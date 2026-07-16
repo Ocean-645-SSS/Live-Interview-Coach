@@ -105,11 +105,11 @@ tests/rag/
 - `KnowledgeBaseMeta.storage_dir/sources_dir/logs_dir`
 - knowledge base、document、最小 ingest job 元数据。
 
-- [ ] 测试 `initialize()` 创建 `knowledge_bases`、`documents`、`ingest_jobs` 和任务文档关联表。
-- [ ] 测试首次初始化创建不可删除的 `default` 知识库。
-- [ ] 测试 `kb_id` 只允许字母、数字、下划线和连字符，阻止 `../` 等路径穿越。
-- [ ] 测试两个知识库分别拥有独立的 `sources/`、`storage/`、`logs/`。
-- [ ] 实现文档最小状态机：`pending → parsed → processing → processed/failed`。
+- [√] 测试 `initialize()` 创建 `knowledge_bases`、`documents`、`ingest_jobs` 和任务文档关联表。
+- [√] 测试首次初始化创建不可删除的 `default` 知识库。
+- [√] 测试 `kb_id` 只允许字母、数字、下划线和连字符，阻止 `../` 等路径穿越。
+- [√] 测试两个知识库分别拥有独立的 `sources/`、`storage/`、`logs/`。
+- [√] 实现文档最小状态机：`pending → parsed → processing → processed/failed`。
 - [ ] 只实现 M1 HTTP 闭环需要的 CRUD，不实现 session 配置和产品级统计。
 - [ ] 运行 `uv run pytest tests/rag/test_metadata_store.py tests/rag/test_knowledge_base.py -v`。
 - [ ] 提交：`feat: add isolated knowledge base metadata`。
