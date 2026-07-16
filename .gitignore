@@ -1,0 +1,43 @@
+.env
+.env.local
+.env.*
+!.env.example
+.DS_Store
+__pycache__/
+.idea
+KMS
+.venv/
+node_modules/
+.next/
+tts-debug.txt
+.vscode
+*.egg-info
+.pytest_cache
+.ruff_cache
+
+# Claude Code
+.claude/settings.local.json
+.claude/worktrees/
+
+# OpenAI Codex
+.codex/config.local.toml
+
+# Gemini CLI
+.gemini/history/
+.gemini/tmp/
+.gemini/google_accounts.json
+.gemini/installation_id
+.gemini/oauth_creds.json
+
+# Cursor
+.cursor/chat/
+.cursor/rules/*.local.mdc
+
+# GitHub CLI
+.github/personal-instructions.md
+
+# 本地运行数据
+log/
+rag_storage/
+uploads/
+.LiveRAG/

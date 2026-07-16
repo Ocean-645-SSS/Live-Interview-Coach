@@ -1,0 +1,63 @@
+[project]
+name = "LiveRAG"
+version = "1.0.0"
+description = "基于 LiveKit、LightRAG 和在线模型的个人知识库语音助手"
+requires-python = ">=3.10, <3.15"
+
+dependencies = [
+    "fastapi>=0.115.0",
+    "lightrag-hku[api]>=1.4.16",
+    "livekit-agents[minimax,turn-detector]~=1.4",
+    "livekit-plugins-openai~=1.4",
+    "livekit-plugins-silero>=1.4.5",
+    "livekit-plugins-volcengine>=1.2.8",
+    "openai>=2.0.0,<3.0.0",
+    "onnxruntime<1.24; python_version < '3.11'",
+    "openpyxl>=3.1.0",
+    "pypdf>=5.0.0",
+    "python-docx>=1.0.0",
+    "python-dotenv",
+    "python-multipart>=0.0.9",
+    "python-pptx>=1.0.0",
+    "uvicorn[standard]>=0.30.0",
+    "websockets>=15.0.0",
+]
+
+[project.scripts]
+liverag-agent = "liverag.main:main"
+liverag-api = "liverag.api.main:main"
+liverag-rag-service = "liverag.rag.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["liverag", "liverag.*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [
+    "src",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "B", "A", "C4", "UP", "SIM", "RUF"]
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
