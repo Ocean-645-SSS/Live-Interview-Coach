@@ -3,14 +3,17 @@
 这部分逻辑参考 HKUDS/LightRAG 的 document_routes.py 流程，
 并改造成当前 RAG Core Service 使用的同步解析函数。
 """
+
 from __future__ import annotations
-from docling.document_converter import DocumentConverter
+
 from io import BytesIO
 from pathlib import Path
 from typing import Protocol
-from pypdf import PdfReader
-from pptx import Presentation
+
+from docling.document_converter import DocumentConverter
 from openpyxl import load_workbook
+from pptx import Presentation
+from pypdf import PdfReader
 
 # ---------------------------------------------------------------------------
 # docling 协议类型，避免为了类型检查强依赖 docling。
@@ -18,8 +21,7 @@ from openpyxl import load_workbook
 
 
 class DoclingConverter(Protocol):
-    def convert(self, file_path: Path) -> DoclingResult:
-        ...
+    def convert(self, file_path: Path) -> DoclingResult: ...
 
 
 class DoclingResult(Protocol):
@@ -27,8 +29,7 @@ class DoclingResult(Protocol):
 
 
 class DoclingDocument(Protocol):
-    def export_to_markdown(self) -> str:
-        ...
+    def export_to_markdown(self) -> str: ...
 
 
 # ---------------------------------------------------------------------------
@@ -227,8 +228,7 @@ def extract_xlsx(file_bytes: bytes) -> str:
         max_cols = sheet.max_column or 0
         for row in sheet.iter_rows(values_only=True):
             row_parts = [
-                _escape_cell(row[col]) if col < len(row) else ""
-                for col in range(max_cols)
+                _escape_cell(row[col]) if col < len(row) else "" for col in range(max_cols)
             ]
             if all(p == "" for p in row_parts):
                 content_parts.append("")
@@ -274,10 +274,7 @@ def parse_file_content(file_bytes: bytes, extension: str, **kwargs: object) -> s
         try:
             text = file_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise ValueError(
-                f"文件不是合法 UTF-8 文本。"
-                f"请先转换为 UTF-8 后再处理: {exc}"
-            ) from exc
+            raise ValueError(f"文件不是合法 UTF-8 文本。请先转换为 UTF-8 后再处理: {exc}") from exc
         if not text.strip():
             raise ValueError("文件没有文本内容")
         if text.startswith("b'") or text.startswith('b"'):
@@ -287,8 +284,7 @@ def parse_file_content(file_bytes: bytes, extension: str, **kwargs: object) -> s
     dispatch = BINARY_EXTENSIONS.get(ext)
     if dispatch is None:
         raise ValueError(
-            f"不支持的文件扩展名: {ext}。"
-            f"支持的扩展名: {sorted(ALL_SUPPORTED_EXTENSIONS)}"
+            f"不支持的文件扩展名: {ext}。支持的扩展名: {sorted(ALL_SUPPORTED_EXTENSIONS)}"
         )
 
     if dispatch == "pdf":

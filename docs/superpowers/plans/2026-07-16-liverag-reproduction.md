@@ -1,389 +1,464 @@
-# LiveRAG 从零复现实施计划
+# LiveRAG 分阶段源码复现实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan milestone-by-milestone. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 从空目录按依赖顺序复现一个可管理单知识库、可进行实时语音 RAG 通话、可记录证据和长期 history 的 LiveRAG。
+**Goal:** 以学习 LiveRAG 核心原理为优先，在不改变现有模块边界的前提下，先复现“单库文本 RAG”，再接入 Agent、上下文和长期 history，最后补齐管理层与生产化能力。
 
-**Architecture:** 后端拆为运行时基础设施、单知识库隔离 RAG Core、上下文系统、统一管理 API 和 LiveKit 语音 Agent；前端作为相邻 Next.js 项目，只访问统一管理 API 与 LiveKit。先完成无外部模型也能测试的本地模块，再接在线模型和实时语音，避免同时调试存储、检索、音频和 UI。
+**Architecture:** 继续保留 `runtime/config → rag → context → agent → api → frontend/deploy` 的总体架构，但改为四个可独立验收的里程碑。M1 只解决文本 RAG，M2 解决智能体与上下文，M3 再做产品管理，M4 复用已有前端并完成部署与生产化。
 
-**Tech Stack:** Python 3.10–3.14、uv、FastAPI、SQLite、LightRAG、LiveKit Agents、火山 STT、OpenAI-compatible LLM、MiniMax/DashScope TTS、Next.js 15、React 19、TypeScript、Docker Compose。
+**Tech Stack:** Python 3.10–3.14、uv、Pydantic Settings、FastAPI、SQLite、LightRAG、LiveKit Agents、火山 STT、OpenAI-compatible LLM、MiniMax/DashScope TTS、Next.js 15、React 19、TypeScript、Docker Compose。
 
 ## Global Constraints
 
 - 所有用户数据只写入 `~/.LiveRAG/`，不得写入项目源码目录。
-- 每个 `knowledge_base` 使用独立 LightRAG workspace；一次通话只锁定一个 `kb_id`。
-- 前端只访问 `liverag/api/` 的 `9821` 端口，不直接访问 RAG Core 的 `/v1/*`。
+- 每个 `knowledge_base` 使用独立 LightRAG workspace；一次查询或通话只允许一个 `kb_id`。
+- 禁止实现多库 fan-out、统一 workspace 后过滤或 `kb_ids` 多选查询。
 - `rag_tool_mode` 只实现 `auto` 和 `never`，不得恢复 `always`。
-- 不恢复旧 `src/`、旧入口、本地 STT/TTS 服务或 `memory.md` 体系。
-- LiveKit 的 STT、LLM、TTS、VAD、打断和 endpointing 参数只能在功能闭环后做有数据依据的时延调优。
-- 新增注释、docstring、文档和环境变量示例注释使用中文。
-- 每个任务都先写测试或契约样例，再做最小实现；每个任务独立提交。
+- 不恢复旧 `src/`、旧入口、本地 STT/TTS 服务、`memory.md` 或旧 context bootstrap 体系。
+- 原始 session 消息必须保留；`history.jsonl` 是摘要层，不是原始消息的替代品。
+- M1/M2 只使用 `.env → Pydantic Settings`；运行时 JSON 配置、网页改模型和密钥掩码回填延后到 M3。
+- M1/M2 不实现 RAG TTL cache；先保证 timeout、错误处理、evidence 记录和 `kb_id` 隔离。
+- M1/M2 只记录 `session_id`、`kb_id`、`turn_index`、`duration`；TTFT、首音频、EOU 和完整 metrics hooks 延后到 M4。
+- API 和 Agent 不得自动启动 RAG Core；`wait_for_ready` 只等待健康状态，开发环境分别启动进程，生产环境由 Compose 管理。
+- LiveKit 的 STT、LLM、TTS、VAD、打断和 endpointing 参数属于时延调优项，M2 先保持最小可用配置，M4 再基于指标调整。
+- 新增注释、docstring、文档和 `.env.example` 注释使用中文。
+- 每个工作包独立测试、独立验收、独立提交；未通过当前里程碑验收前不进入下一里程碑。
 
 ---
 
-## 复现顺序总览
+## 里程碑总览
 
 ```text
-项目骨架
-  → runtime/config/logging
-  → SQLite 元数据与单库目录
-  → 文档解析
-  → LightRAG Engine 与 EngineManager
-  → RAG Core HTTP 服务
-  → ContextStore 与固定 Prompt
-  → Context Model（overview/history）
-  → 统一管理 API
-  → Agent 的 RagClient
-  → 实时语音 Agent
-  → Next.js 前端
-  → Docker、端到端与时延验收
+M1 核心文本 RAG
+项目骨架 → RuntimePaths/Settings → SQLite → txt/md → LightRAG → RAG Core HTTP
+
+M2 Agent 与上下文
+Session 存档 → 固定 Prompt → RagClient → ContextManager → LiveKit Agent → History
+
+M3 产品管理层
+统一管理 API → 动态配置 → Session/Job 管理 → Overview → 多格式解析
+
+M4 前端与生产化
+适配已有前端 → Docker Compose → 健康检查 → 指标 → 端到端测试
 ```
 
-推荐按四个可运行里程碑推进：
+| 里程碑 | 核心学习问题 | 可交付结果 | 建议时间 |
+| --- | --- | --- | ---: |
+| M1 | 文档怎样被隔离、索引、检索并返回证据？ | 可用 HTTP 操作的单库文本 RAG | 5–10 个工作日 |
+| M2 | RAG 怎样成为 Agent 工具，上下文怎样跨会话工作？ | 可通话、可检索、可生成 history 的 Agent | 5–8 个工作日 |
+| M3 | 核心能力怎样包装成可管理产品？ | 统一管理 API 与完整文档管理 | 4–7 个工作日 |
+| M4 | 怎样复用 UI 并稳定部署和观测？ | 完整 Web 产品与五服务部署 | 4–7 个工作日 |
 
-1. M1 本地数据层：任务 1–3，无在线密钥也能验收。
-2. M2 文本 RAG：任务 4–6，可通过 HTTP 上传和查询。
-3. M3 后端产品闭环：任务 7–9，可通过唯一管理 API 完成知识库与上下文操作。
-4. M4 完整语音产品：任务 10–13，可通过网页完成实时语音问答。
+M1 必须控制在 1–2 周。若时间不足，只减少测试样本文档数量，不把 M3/M4 功能提前塞入 M1。
 
 ---
 
-### Task 1: 建立项目骨架与可重复验证基线
-
-**Files:**
-- Create: `pyproject.toml`
-- Create: `.env.example`
-- Create: `liverag/__init__.py`
-- Create: `tests/conftest.py`
-- Create: `pyrightconfig.json`
-
-**Interfaces:**
-- Produces: `liverag-agent`、`liverag-api`、`liverag-rag-service` 三个命令入口的包结构。
-- Produces: 测试统一使用临时 `LIVERAG_USER_DATA_DIR`，不污染真实用户目录。
-
-- [ ] 固定 Python 范围为 `>=3.10,<3.15`，按现有 `pyproject.toml` 加入运行和开发依赖。
-- [ ] 在 `tests/conftest.py` 提供 `tmp_path` 驱动的用户数据目录 fixture，并用 `monkeypatch.setenv` 覆盖 `LIVERAG_USER_DATA_DIR`。
-- [ ] 执行 `uv sync`，预期成功生成虚拟环境并安装锁定依赖。
-- [ ] 执行 `uv run python -c "import liverag"`，预期退出码为 0。
-- [ ] 执行 `uv run ruff check liverag tests` 与 `uv run python -m compileall liverag`，预期均通过。
-- [ ] 提交：`chore: scaffold liverag project`。
-
-**验收门槛:** 新环境只需 `uv sync` 即可导入包；测试不会创建项目目录内的用户数据。
-
-### Task 2: 复现运行时路径、默认文件、配置和事件日志
-
-**Files:**
-- Create: `liverag/runtime/paths.py`
-- Create: `liverag/context/defaults.py`
-- Create: `liverag/config/settings.py`
-- Create: `liverag/logging/setup.py`
-- Create: `liverag/logging/events.py`
-- Test: `tests/runtime/test_paths.py`
-- Test: `tests/config/test_settings.py`
-- Test: `tests/logging/test_events.py`
-
-**Interfaces:**
-- Produces: `build_runtime_paths(user_data_dir: Path | None) -> RuntimePaths`。
-- Produces: `load_app_settings() -> AppSettings`、`load_voice_settings()`、`load_rag_client_settings()`、`load_context_model_settings()`。
-- Produces: JSONL 事件日志和秘密字段掩码逻辑。
-
-- [ ] 测试 `RuntimePaths` 能派生 `liverag.db`、prompts、history、context、session、model、rag 和 logs 的全部路径。
-- [ ] 实现 `ensure_runtime_dirs()`，只创建 `~/.LiveRAG/` 下的运行目录。
-- [ ] 测试默认 prompt、`SOUL.md`、overview/history prompt 首次读取时创建，已有文件不会被覆盖。
-- [ ] 测试环境变量与运行时 JSON 配置的优先级，并覆盖无效整数、布尔值和 URL。
-- [ ] 测试 `RagToolMode = Literal["auto", "never"]`，任何其他值回退或报错，不得接受 `always`。
-- [ ] 测试 API 输出会掩码密钥，前端回传掩码值时不会覆盖真实密钥。
-- [ ] 实现统一日志初始化和 `EventLogger`，每行包含时间、事件名、session/agent 关联字段。
-- [ ] 执行对应 pytest、ruff、compileall；提交：`feat: add runtime configuration and logging`。
-
-**验收门槛:** 使用临时目录启动配置层后，目录和默认文件完整；日志可解析；密钥不出现在公开配置中。
-
-### Task 3: 复现 SQLite 产品元数据与知识库物理隔离
-
-**Files:**
-- Create: `liverag/rag/metadata_store.py`
-- Create: `liverag/rag/knowledge_base.py`
-- Test: `tests/rag/test_metadata_store.py`
-- Test: `tests/rag/test_knowledge_base.py`
-
-**Interfaces:**
-- Produces: `MetadataStore(db_path, knowledge_bases_dir)`。
-- Produces: `KnowledgeBaseMeta.storage_dir/sources_dir/logs_dir`。
-- Produces: knowledge base、document、ingest job、session config CRUD。
-
-- [ ] 测试首次 `initialize()` 创建四张业务表、索引和不可删除的 `default` 知识库。
-- [ ] 测试 `kb_id` 只允许字母、数字、下划线和连字符，阻止路径穿越。
-- [ ] 测试每个知识库创建独立的 `storage/`、`sources/`、`logs/`。
-- [ ] 测试文档状态从 `pending → parsed → processing → processed/failed` 的转换与错误信息保留。
-- [ ] 测试 ingest job 与其文档关联、计数和完成状态。
-- [ ] 测试 session 只保存一个待选 `kb_id`，并能读取当前配置。
-- [ ] 测试删除非默认知识库时只影响目标库；测试默认库删除被拒绝。
-- [ ] 执行对应 pytest；提交：`feat: add isolated knowledge base metadata store`。
-
-**验收门槛:** 创建两个知识库后目录互不重叠，SQLite 查询不会串库，默认知识库始终存在。
-
-### Task 4: 复现文档解析层
-
-**Files:**
-- Create: `liverag/rag/doc_parser.py`
-- Test: `tests/rag/test_doc_parser.py`
-- Test fixtures: `tests/fixtures/documents/`
-
-**Interfaces:**
-- Produces: `parse_file_content(file_bytes: bytes, extension: str, **kwargs) -> str`。
-- Supports: txt/md/json/csv、PDF、DOCX、PPTX、XLSX；PDF 可选 Docling 路径。
-
-- [ ] 为每种格式制作最小 fixture，测试解析后的关键文字而非易变的完整排版。
-- [ ] 测试扩展名标准化、空文件、损坏文件、加密 PDF 和不支持格式的稳定错误。
-- [ ] 先实现纯文本格式，再依次实现 PDF、DOCX、PPTX、XLSX，保持解析函数无数据库副作用。
-- [ ] 对 PDF 的 Docling 可选依赖使用协议/延迟导入，未安装时回退到 pypdf。
-- [ ] 执行 `uv run pytest tests/rag/test_doc_parser.py -v`；提交：`feat: add document parsers`。
-
-**验收门槛:** 所有支持格式均能得到非空文本；解析失败不会残留半成品索引状态。
-
-### Task 5: 复现单知识库 LightRAG Engine
-
-**Files:**
-- Create: `liverag/rag/schemas.py`
-- Create: `liverag/rag/settings.py`
-- Create: `liverag/rag/engine.py`
-- Create: `liverag/rag/engine_manager.py`
-- Test: `tests/rag/test_schemas.py`
-- Test: `tests/rag/test_engine.py`
-- Test: `tests/rag/test_engine_manager.py`
-
-**Interfaces:**
-- Produces: `QueryRequest`、`QueryOptions`、`ConversationOptions` 和统一 envelope。
-- Produces: `RagEngine` 的 initialize、insert、query_context、query_data、query_answer、document status/delete/clear/overview 能力。
-- Produces: `RagEngineManager.get(kb_id)`，缓存严格以 `kb_id` 为键。
-
-- [ ] 测试 voice profile 固定低延迟默认值：`naive`、top_k 4、chunk_top_k 4、1800 字符、关闭 rerank。
-- [ ] 用 fake LightRAG 测试 Engine 输入输出映射、references/chunks 保留、无命中与异常路径。
-- [ ] 测试短追问只在提供 conversation history 时重写，并返回 `effective_query`、`rewritten`。
-- [ ] 测试 manager 为两个 `kb_id` 创建不同 working directory 和不同 engine 实例。
-- [ ] 测试并发首次访问同一 `kb_id` 只初始化一次；预热后复用缓存。
-- [ ] 禁止实现多库查询、fan-out、后过滤或 `kb_ids` 参数。
-- [ ] 使用测试密钥或 fake provider 跑完单元测试；提交：`feat: add per-kb lightrag engine`。
-
-**验收门槛:** 同一查询在两个测试知识库中只能返回各自 workspace 的内容。
-
-### Task 6: 复现内部 RAG Core HTTP 服务
-
-**Files:**
-- Create: `liverag/rag/server.py`
-- Create: `liverag/rag/service.py`
-- Create: `liverag/rag/cli.py`
-- Test: `tests/rag/test_server.py`
-- Test: `tests/rag/test_service.py`
-
-**Interfaces:**
-- Produces: 内部 `/v1/healthz`、`/v1/readyz`、knowledge base、documents、jobs、query、overview 路由。
-- Produces: `wait_for_rag_ready()` 和嵌入式服务拉起/复用逻辑。
-
-- [ ] 用 FastAPI TestClient 测试 knowledge base CRUD 和统一成功/错误 envelope。
-- [ ] 测试文本/文件上传顺序：保存原文、写 pending 元数据、解析、提交 LightRAG、同步 job 状态。
-- [ ] 测试原文件路径固定为 `sources/{document_id}/{safe_filename}`，并拒绝危险文件名。
-- [ ] 测试 job 轮询会同步 LightRAG 状态、chunks_count 和失败原因。
-- [ ] 测试 query context/data/answer 只接受 URL 中的单个 `kb_id`。
-- [ ] 测试删除文档、清空知识库、删除知识库时，元数据与对应 workspace 一致；实现时逐项处理明确路径，禁止批量递归删除命令。
-- [ ] 启动 `uv run liverag-rag-service`，验证 `GET http://127.0.0.1:9721/v1/readyz`。
-- [ ] 提交：`feat: expose internal rag core service`。
-
-**验收门槛:** 不经过 Agent/API，curl 已能完成“建库→上传→轮询→查询→删除”的文本 RAG 闭环。
-
-### Task 7: 复现会话上下文存储与固定系统提示词
-
-**Files:**
-- Create: `liverag/context/store.py`
-- Create: `liverag/context/renderer.py`
-- Test: `tests/context/test_store.py`
-- Test: `tests/context/test_renderer.py`
-
-**Interfaces:**
-- Produces: `ContextStore` 对 messages、rag_context、history、SOUL、overview、runtime state 的读写。
-- Produces: `SessionPromptRenderer.render(kb_id, kb_name, rag_tool_mode)`。
-
-- [ ] 测试 messages 和 rag_context 使用 JSONL，损坏单行被跳过而不破坏其余记录。
-- [ ] 测试 `turn_index` 能把 user、assistant 与多条 RAG 证据聚合成 session turns。
-- [ ] 测试每个 KB 的 `history.jsonl` 和 `.cursor` 独立递增。
-- [ ] 测试 prompt 精确替换 SOUL、history、overview、RAG 工具说明、KB ID/名称。
-- [ ] 测试 `auto` 提供工具说明，`never` 提供禁用说明；渲染结果写入 `session_system_prompt.md`。
-- [ ] 测试通话开始后修改 SOUL/history/overview 不会改变已渲染 prompt。
-- [ ] 提交：`feat: add fixed session context rendering`。
-
-**验收门槛:** 给定同一组输入可确定性生成固定 SessionSystemPrompt；通话中无需再次读取长期上下文。
-
-### Task 8: 复现 Context Model 的 overview 与挂断后 history
-
-**Files:**
-- Create: `liverag/context/overview.py`
-- Create: `liverag/context/history.py`
-- Test: `tests/context/test_overview.py`
-- Test: `tests/context/test_history.py`
-
-**Interfaces:**
-- Produces: `KnowledgeOverviewGenerator.generate(kb_id, ...)`。
-- Produces: `HistoryCompactor.compact(kb_id, ...)`。
-
-- [ ] 用 fake OpenAI-compatible client 测试 overview 输入包含 KB metadata、文档列表、LightRAG overview 和当前查询参数。
-- [ ] 测试索引 job 完成且存在新 processed 文档时才生成 overview；上传后先标记 stale。
-- [ ] 测试模型失败时写入降级 overview 和错误 meta，不阻断查询或通话。
-- [ ] 测试 history 压缩输入包含本次 messages、SOUL、当前 KB overview、最近 history。
-- [ ] 测试正常摘要追加一条带 cursor 的 history；`NO_HISTORY` 不追加；失败不清除已有 history。
-- [ ] 测试压缩结束后清空本次 messages，并把结果写入 runtime state。
-- [ ] 提交：`feat: add context overview and history compaction`。
-
-**验收门槛:** overview 和 history 都使用独立 Context Model；失败只降级，不影响下一通会话启动。
-
-### Task 9: 复现唯一对外管理 API
-
-**Files:**
-- Create: `liverag/api/rag_gateway.py`
-- Create: `liverag/api/server.py`
-- Create: `liverag/api/main.py`
-- Test: `tests/api/test_server.py`
-- Test: `tests/api/test_rag_gateway.py`
-- Update: `docs/API.md`
-
-**Interfaces:**
-- Produces: `9821` 端口上的 health/runtime、model、prompt、session 和 `/rag/*` 路由。
-- Consumes: 任务 6 的内部 RAG Core，但对前端隐藏 `/v1/*`。
-
-- [ ] 测试 gateway 自动等待/拉起 RAG Core、透传状态码、统一超时和文件流响应。
-- [ ] 测试模型配置公开读取、更新、校验、密钥掩码和“下次通话生效”状态。
-- [ ] 测试 SOUL、session messages/rag context/turns、session KB 选择与清理接口。
-- [ ] 测试通话 active 时禁止切换 `kb_id`，idle 时仅允许选择存在的单一知识库。
-- [ ] 测试 knowledge base、documents、jobs、query 路由均代理到单个目标 KB。
-- [ ] 测试 completed job 后后台生成 overview，失败不改变原 job 成功状态。
-- [ ] 启动 `uv run liverag-api`，验证 `/health`、`/rag/ready`、`/rag/knowledge-bases`。
-- [ ] 更新 `docs/API.md` 并提交：`feat: expose unified management api`。
-
-**验收门槛:** 产品后端的所有管理操作都可经 `9821` 完成；关闭 `9721` 的外部访问不影响前端设计。
-
-### Task 10: 复现 Agent 侧低延迟 RAG Client 与证据记录
-
-**Files:**
-- Create: `liverag/agent/tool/rag_client.py`
-- Create: `liverag/agent/tool/__init__.py`
-- Create: `liverag/context/manager.py`
-- Test: `tests/agent/test_rag_client.py`
-- Test: `tests/context/test_manager.py`
-
-**Interfaces:**
-- Produces: `RagClient.query(query, kb_id, ...) -> RagQueryResult`。
-- Produces: 只面向当前锁定 KB 的 `search_knowledge_base` 上下文能力。
-
-- [ ] 用 fake HTTP 服务测试超时、TTL cache、query 参数和单 `kb_id` URL。
-- [ ] 测试结果保留 request_id、hit、context、metrics、references、chunks 和 no_evidence_reason。
-- [ ] 测试证据归一化为 `evidence_documents`、`evidence_chunks`，并记录 `turn_index`。
-- [ ] 测试无命中、超时和 5xx 都写入 `rag_context.jsonl`，但返回可供语音模型继续回答的稳定结果。
-- [ ] 测试 `never` 模式不注册/调用 RAG 工具。
-- [ ] 提交：`feat: add voice rag client and evidence tracking`。
-
-**验收门槛:** 一次工具调用能与本轮 user/assistant 消息按 `turn_index` 对齐，且不会访问其他知识库。
-
-### Task 11: 复现实时语音 Agent
-
-**Files:**
-- Create: `liverag/agent/providers.py`
-- Create: `liverag/agent/dashscope_tts.py`
-- Create: `liverag/agent/assistant.py`
-- Create: `liverag/agent/metrics_hooks.py`
-- Create: `liverag/main.py`
-- Test: `tests/agent/test_providers.py`
-- Test: `tests/agent/test_assistant.py`
-- Test: `tests/test_main.py`
-
-**Interfaces:**
-- Produces: `build_agent_session(settings) -> AgentSession`。
-- Produces: LiveKit 注册名固定为 `my-agent`，与前端 token dispatch 一致。
-
-- [ ] 先用 fake STT/LLM/TTS 测试 provider 选择与缺失密钥错误，再进行真实 provider 联调。
-- [ ] 测试 Assistant 在 user committed 时写 user message，在 assistant 完成时写 assistant message及字符数。
-- [ ] 测试 `auto` 暴露知识库工具，`never` 不暴露工具；默认语音回答遵守 1–3 句短回答策略。
-- [ ] 测试 job 启动顺序：解析单个 KB→预热 engine→清空临时会话→渲染固定 prompt→连接房间→启动 session。
-- [ ] 测试挂断顺序：停止探针→读取本次消息→history compact→更新 runtime state→清空临时消息。
-- [ ] 注册 STT/LLM/TTS/首 token/首音频/RAG 延迟指标；先保持现有 endpointing 参数，不做提前优化。
-- [ ] 启动 LiveKit Server 与 `uv run python -m liverag.main dev`，验证 worker 注册成功。
-- [ ] 提交：`feat: add livekit voice agent`。
-
-**验收门槛:** 不启用 RAG 时能完成可打断语音对话；启用 RAG 时只查询通话开始前锁定的 KB；挂断后 history 正确落盘。
-
-### Task 12: 复现 Next.js 前端
-
-**Files (相邻仓库 `LiveRAG-Fronted/agent-starter-react`):**
-- Create: `types/liverag.ts`
-- Create: `lib/api/client.ts`
-- Create: `lib/api/server.ts`
-- Create: `app/api/liverag/[...path]/route.ts`
-- Create: `app/api/connection-details/route.ts`
-- Create: `components/knowledge/*`
-- Create: `components/voice/*`
-- Create: `app/page.tsx`
-- Create: `app/knowledge/page.tsx`
-
-**Interfaces:**
-- Consumes: 管理 API `9821` 与 LiveKit WebSocket；浏览器不持有 LiveKit API secret。
-- Produces: `/` 实时语音页与 `/knowledge` 单知识库管理页。
-
-- [ ] 先定义与 `docs/API.md` 一致的 TypeScript 类型和统一错误模型。
-- [ ] 实现同源 `/api/liverag/*` 服务端代理，禁止浏览器直接配置内部 RAG URL。
-- [ ] 实现 `/api/connection-details`：服务端签发 15 分钟、单随机房间、显式 dispatch `my-agent` 的 token。
-- [ ] 先完成知识库 CRUD、选择、文本/文件上传、job 轮询、文档列表/删除，再开发语音 UI。
-- [ ] 实现语音连接、麦克风控制、转录、状态条和通话前 KB 选择；连接后锁定选择器。
-- [ ] 展示每轮 `not_queried/hit/miss/failed`、RAG 延迟、cache hit、命中文档和折叠片段。
-- [ ] 执行 `corepack pnpm lint`、`corepack pnpm typecheck`、`corepack pnpm build`。
-- [ ] 提交：`feat: add liverag web interface`。
-
-**验收门槛:** 用户能从浏览器完成建库、上传、等待索引、选择 KB、发起语音通话并查看回答依据。
-
-### Task 13: 部署、端到端测试与性能验收
-
-**Files:**
-- Create: `Dockerfile`
-- Create: `docker-compose.yml`
-- Update: `README.md`
-- Create: `tests/e2e/test_reproduction_checklist.md`
-
-**Interfaces:**
-- Produces: `livekit`、`liverag-rag`、`liverag-api`、`liverag-agent`、`liverag-frontend` 五服务部署。
-
-- [ ] 构建共享后端镜像，运行时只持久化 `/data`，并确保三个 Python 进程复用同一数据卷。
-- [ ] 为 RAG Core 增加 ready healthcheck，让 API/Agent 等待其就绪；前端只依赖 API 与 LiveKit。
-- [ ] 做两库隔离测试：两库分别写入互斥事实，连续两通电话切换 KB，确认无交叉命中。
-- [ ] 做上传闭环测试：txt、PDF、DOCX、PPTX、XLSX 各一份，记录解析、索引、overview、查询、删除结果。
-- [ ] 做 7 问语音测试：3 个库内问题、2 个库外问题、2 个闲聊；对齐 messages、rag_context 与 UI turn。
-- [ ] 做 history 测试：第一通产生长期信息，第二通确认按同一 KB 注入；另一个 KB 不得读取该 history。
-- [ ] 记录至少 20 轮数据，分别统计无 RAG 和有 RAG 的 P50/P95 首音频延迟；目标参考值约 900ms/1500ms，不为达标盲改时延参数。
-- [ ] 执行后端 ruff、compileall、pytest，前端 lint、typecheck、build，以及 `docker compose config`。
-- [ ] 更新 README 的本地与 Docker 启动说明；提交：`docs: finalize reproduction and acceptance guide`。
-
-**验收门槛:** 全新机器按 README 配置密钥后可启动全部服务；单库隔离、证据可观测、固定 prompt、挂断压缩和实时语音全部通过。
+# M1：核心文本 RAG 闭环
+
+## 阶段目标
+
+从空项目复现最小但真实的文本 RAG：创建知识库、上传 txt/md、保存原文、索引、查询并返回结构化证据。该阶段不依赖 LiveKit Agent、管理 API、前端、Docker、动态配置、查询缓存或复杂指标。
+
+## M1 文件范围
+
+```text
+pyproject.toml
+.env.example
+liverag/runtime/paths.py
+liverag/config/settings.py
+liverag/rag/settings.py
+liverag/rag/schemas.py
+liverag/rag/metadata_store.py
+liverag/rag/knowledge_base.py
+liverag/rag/doc_parser.py
+liverag/rag/engine.py
+liverag/rag/engine_manager.py
+liverag/rag/server.py
+liverag/rag/service.py
+liverag/rag/cli.py
+tests/runtime/
+tests/config/
+tests/rag/
+```
+
+## M1 工作包 A：项目骨架、路径和静态配置
+
+**Produces:**
+- `build_runtime_paths(user_data_dir: Path | None = None) -> RuntimePaths`
+- `Settings`：从 `.env` 读取用户目录、RAG 端口、LightRAG LLM/Embedding 和查询参数。
+- `liverag-rag-service = liverag.rag.cli:main`
+
+- [√] 建立 `pyproject.toml`、`liverag/` 包和 pytest/ruff 基线，固定 Python `>=3.10,<3.15`。
+- [√] 在 `tests/conftest.py` 中用 `tmp_path` 和 `monkeypatch` 隔离 `LIVERAG_USER_DATA_DIR`。
+- [√] 测试并实现 `RuntimePaths` 的 `db_file`、`rag_knowledge_bases_dir` 和基础日志目录。
+- [√] 使用 `pydantic-settings` 实现只读环境配置；缺失必需模型配置时给出明确校验错误。
+- [√] 不创建 runtime model JSON，不实现密钥掩码，不实现前端可写配置。
+- [√] 运行 `uv run pytest tests/runtime tests/config -v`，预期全部通过。
+- [√] 提交：`chore: scaffold minimal text rag runtime`。
+
+**学习重点:** 环境配置与运行数据路径解耦；理解为什么用户数据不能进入源码目录。
+
+## M1 工作包 B：SQLite 元数据与物理隔离
+
+**Produces:**
+- `MetadataStore(db_path: Path, knowledge_bases_dir: Path)`
+- `KnowledgeBaseMeta.storage_dir/sources_dir/logs_dir`
+- knowledge base、document、最小 ingest job 元数据。
+
+- [ ] 测试 `initialize()` 创建 `knowledge_bases`、`documents`、`ingest_jobs` 和任务文档关联表。
+- [ ] 测试首次初始化创建不可删除的 `default` 知识库。
+- [ ] 测试 `kb_id` 只允许字母、数字、下划线和连字符，阻止 `../` 等路径穿越。
+- [ ] 测试两个知识库分别拥有独立的 `sources/`、`storage/`、`logs/`。
+- [ ] 实现文档最小状态机：`pending → parsed → processing → processed/failed`。
+- [ ] 只实现 M1 HTTP 闭环需要的 CRUD，不实现 session 配置和产品级统计。
+- [ ] 运行 `uv run pytest tests/rag/test_metadata_store.py tests/rag/test_knowledge_base.py -v`。
+- [ ] 提交：`feat: add isolated knowledge base metadata`。
+
+**学习重点:** SQLite 只保存产品元数据；原文件、向量、图谱和 chunk 由各自 workspace 保存。
+
+## M1 工作包 C：最小文档解析
+
+**Produces:**
+- `parse_file_content(file_bytes: bytes, extension: str) -> str`
+- 仅支持 `.txt` 与 `.md`。
+
+- [ ] 为 UTF-8 txt、Markdown、空文件、非法编码和不支持扩展名编写测试样例。
+- [ ] 实现 `.txt/.md` 解码、空文本拒绝和稳定错误类型。
+- [ ] 保持解析函数无数据库、网络和 LightRAG 副作用。
+- [ ] 将 PDF、DOCX、PPTX、XLSX 明确留到 M3，不在 M1 引入对应解析依赖和分支。
+- [ ] 运行 `uv run pytest tests/rag/test_doc_parser.py -v`。
+- [ ] 提交：`feat: parse txt and markdown documents`。
+
+**学习重点:** 先把“文件解析”和“索引提交”拆开，便于定位失败发生在哪一层。
+
+## M1 工作包 D：LightRAG Engine 与 EngineManager
+
+**Produces:**
+- `QueryOptions`、`QueryRequest`、`EvidenceDocument`、`EvidenceChunk`。
+- `RagEngine.initialize/insert/query_context/query_answer`。
+- `RagEngineManager.get(kb_id: str) -> RagEngine`。
+
+- [ ] 先用 fake LightRAG 测试输入输出映射，再用真实在线 LLM/Embedding 做一条集成测试。
+- [ ] 测试 `EngineManager` 以 `kb_id` 为唯一缓存键，并将 working directory 指向该库的 `storage/`。
+- [ ] 测试两个 KB 返回不同 engine 实例，同一个 KB 重用已初始化实例。
+- [ ] 查询结果必须返回 `request_id`、`kb_id`、`hit`、`has_context`、`references`、`chunks`、`duration`。
+- [ ] 无证据时 `hit=false`、`has_context=false`；`query_answer` 返回“知识库中没有足够依据”，禁止让模型自由补全事实。
+- [ ] 只实现 timeout 和异常映射，不实现 TTL cache、query rewrite、rerank 调优和复杂 voice profile。
+- [ ] 禁止接受 `kb_ids`，禁止跨 workspace 合并结果。
+- [ ] 运行 `uv run pytest tests/rag/test_engine.py tests/rag/test_engine_manager.py -v`。
+- [ ] 提交：`feat: add per-kb lightrag engine`。
+
+**学习重点:** LightRAG 的 working directory 就是隔离边界；evidence 是判断回答可信度的依据。
+
+## M1 工作包 E：RAG Core HTTP API
+
+**Produces:**
+- `GET /v1/healthz`、`GET /v1/readyz`
+- knowledge base 创建/列表/详情
+- txt/md 上传、job 查询
+- `POST /v1/knowledge-bases/{kb_id}/query/context`
+- `POST /v1/knowledge-bases/{kb_id}/query/answer`
+- `wait_for_rag_ready()`：只等待，不启动子进程。
+
+- [ ] 用 FastAPI TestClient 测试统一成功/错误 envelope。
+- [ ] 实现上传顺序：生成 document_id → 保存原文件 → 写 pending 元数据 → 解析 → 插入 LightRAG → 更新状态。
+- [ ] 安全文件名固定保存到 `sources/{document_id}/{original_filename}`，拒绝路径穿越。
+- [ ] 查询 URL 必须包含单个 `kb_id`，返回结构化 evidence 和 `duration`。
+- [ ] `liverag-rag-service` 只启动当前服务；API 内不创建子进程，不探测后自动拉起自己。
+- [ ] 启动 `uv run liverag-rag-service`，用 HTTP 完成建库、上传、轮询、查询。
+- [ ] 运行 `uv run ruff check liverag tests`、`uv run python -m compileall liverag` 和 M1 全部 pytest。
+- [ ] 提交：`feat: expose minimal rag core api`。
+
+## M1 验收标准
+
+- [ ] HTTP 完成：创建知识库 → 上传 txt/md → 索引 → 查询 → 返回证据。
+- [ ] 建立 `kb_alpha`、`kb_beta`，分别写入互斥事实；物理目录和查询结果完全隔离。
+- [ ] 对不存在的信息，接口返回 `hit=false`、空 evidence 和明确的“依据不足”，不得生成貌似正确的答案。
+- [ ] RAG Core 独立启动，不依赖 Agent、管理 API、前端或 Docker。
+- [ ] 配置只来自 `.env`；没有 runtime JSON、TTL cache、自动进程拉起和复杂 metrics。
+- [ ] M1 在 5–10 个工作日内完成。
+
+## M1 建议日程
+
+| 时间 | 内容 | 当日可验证结果 |
+| --- | --- | --- |
+| 第 1–2 天 | 工作包 A、B | 能创建隔离的 KB 目录和 SQLite 记录 |
+| 第 3 天 | 工作包 C | txt/md 能稳定解析 |
+| 第 4–6 天 | 工作包 D | 两个 workspace 可独立插入和查询 |
+| 第 7–8 天 | 工作包 E | HTTP 文本 RAG 闭环 |
+| 第 9–10 天 | 隔离、无命中、异常回归 | M1 验收报告 |
 
 ---
 
-## 推荐时间安排
+# M2：Agent 与上下文闭环
 
-| 阶段 | 范围 | 建议投入 | 阶段产物 |
-| --- | --- | ---: | --- |
-| 第 1 阶段 | 任务 1–3 | 1–2 天 | 可测试的数据和配置底座 |
-| 第 2 阶段 | 任务 4–6 | 2–4 天 | 可用 curl 操作的单库 RAG Core |
-| 第 3 阶段 | 任务 7–9 | 2–3 天 | 完整管理 API 与上下文闭环 |
-| 第 4 阶段 | 任务 10–11 | 2–4 天 | 可工作的实时语音 RAG Agent |
-| 第 5 阶段 | 任务 12 | 2–4 天 | 知识库与语音 WebUI |
-| 第 6 阶段 | 任务 13 | 1–2 天 | 部署、回归与性能报告 |
+## 阶段目标
 
-单人熟悉 Python/TypeScript/LiveKit 时，完整复现约 10–19 个工作日；第一次接触 LiveKit 或 LightRAG 时应为外部服务联调额外预留 3–5 天。
+把 M1 的 RAG Core 接入真正的 LiveKit Agent，并复现固定 SessionSystemPrompt、工具调用、evidence 对齐和跨会话 history。M2 不做统一管理 API、Knowledge Overview 自动生成、动态配置、TTL cache 或完整性能指标。
 
-## 最容易踩坑的顺序错误
+## M2 文件范围
 
-1. 不要先写语音 Agent：否则检索、上下文、音频、网络四类问题会混在一起。
-2. 不要先写前端页面：API envelope、job 状态和 session 锁库规则尚未稳定时返工最多。
-3. 不要把 Context Model 与 Voice LLM 合并：两者延迟目标、提示词和故障策略不同。
-4. 不要在通话中动态重建大 prompt：固定 prompt 是当前时延与行为稳定性的核心。
-5. 不要用一个 LightRAG workspace 加 `kb_id` 后过滤：物理隔离必须在 engine working directory 层完成。
-6. 不要在功能未闭环前调 VAD/endpointing：先用指标确定瓶颈属于 STT、LLM、RAG 还是 TTS。
+```text
+liverag/context/defaults.py
+liverag/context/store.py
+liverag/context/renderer.py
+liverag/context/manager.py
+liverag/context/history.py
+liverag/agent/tool/rag_client.py
+liverag/agent/providers.py
+liverag/agent/assistant.py
+liverag/main.py
+tests/context/
+tests/agent/
+```
 
-## 最小成功路径
+## M2 工作包 A：不可变原始 Session 存档
 
-如果目标是最快看到结果，可先只做任务 1–7，并临时省略 PDF/DOCX/PPTX/XLSX、overview 自动生成、前端和语音。此时用纯文本上传与 `/v1/.../query/context` 即可验证核心设计。随后按 8→9→10→11→12 补齐，避免更改模块边界。
+**Runtime layout:**
+
+```text
+~/.LiveRAG/
+  sessions/
+    {session_id}/
+      messages.jsonl
+      rag_context.jsonl
+      runtime.json
+      session_system_prompt.md
+  history/
+    {kb_id}/
+      history.jsonl
+      .cursor
+```
+
+**Produces:**
+- `ContextStore.start_session(session_id, kb_id)`
+- `append_message(session_id, role, content, turn_index)`
+- `append_rag_context(session_id, record)`
+- `end_session(session_id, state)`
+
+- [ ] 测试每次通话生成独立 `session_id` 目录，不再复用全局 `session/messages.jsonl`。
+- [ ] 测试 messages 和 rag_context 使用追加式 JSONL，包含 `session_id`、`kb_id`、`turn_index`、时间和 `duration`。
+- [ ] 测试挂断只把 `runtime.json` 标记为 ended，不清空或覆盖 messages/rag_context。
+- [ ] 测试损坏的单行 JSONL 被跳过，其余审计记录仍可读取。
+- [ ] 实现保留策略元数据：默认原始 session 永久保留；M2 不运行自动清理。
+- [ ] history 记录增加 `source_session_id`，可追溯到原始 session。
+- [ ] 提交：`feat: preserve immutable session records`。
+
+**保留策略:** 学习阶段 `cleanup_enabled=false`。M3 可提供按明确 `session_id` 导出/删除能力；压缩失败、存在 RAG 错误或被标记用于审计的 session 永不自动删除。不得用批量递归删除命令清理 sessions。
+
+## M2 工作包 B：固定 SessionSystemPrompt
+
+**Produces:**
+- `SessionPromptRenderer.render(session_id, kb_id, kb_name, rag_tool_mode)`
+
+- [ ] 从 system template、SOUL、当前 KB 最近 history、静态 overview fallback 和 RAG 工具规则渲染 prompt。
+- [ ] 将渲染结果写入当前 session 的 `session_system_prompt.md`，便于事后审计。
+- [ ] 测试 `auto` 暴露工具说明，`never` 不暴露工具。
+- [ ] 测试通话开始后即使 SOUL/history 改变，本次 session prompt 也保持不变。
+- [ ] M2 不生成 Knowledge Overview；缺失时使用稳定降级文本，自动生成留到 M3。
+- [ ] 提交：`feat: render auditable session prompts`。
+
+## M2 工作包 C：RagClient 与 ContextManager
+
+**Produces:**
+- `RagClient.query(query, kb_id, session_id, turn_index) -> RagQueryResult`
+- `ContextManager.search_knowledge_base(query, turn_index)`
+
+- [ ] 用 fake HTTP 服务测试超时、4xx、5xx、无命中和正常 evidence。
+- [ ] RagClient 只访问显式 `kb_id` 的 M1 查询路径，不维护 TTL cache。
+- [ ] 将 request_id、query、hit、has_context、evidence documents/chunks、error、duration 写入当前 session 的 `rag_context.jsonl`。
+- [ ] 测试 user message、一次或多次 RAG 调用、assistant message 可通过相同 `turn_index` 聚合。
+- [ ] 无命中或超时时返回稳定工具结果，明确告诉 LLM 不得伪造知识库依据。
+- [ ] `never` 模式不注册知识库工具，也不产生伪造的查询记录。
+- [ ] 提交：`feat: connect agent context to rag evidence`。
+
+## M2 工作包 D：最小 LiveKit Agent
+
+**Produces:**
+- `build_agent_session(settings) -> AgentSession`
+- LiveKit worker entry：`uv run python -m liverag.main dev`
+
+- [ ] 先用 fake STT/LLM/TTS 测试消息、工具和挂断顺序，再接真实在线 provider。
+- [ ] 启动时解析单个 `kb_id`，调用 `wait_for_rag_ready()`；未就绪时报错退出，不启动 RAG 子进程。
+- [ ] 创建 session 存档、渲染固定 prompt、连接房间并启动 AgentSession。
+- [ ] user committed 时追加原始 user message；assistant committed 时追加原始 assistant message。
+- [ ] 仅记录基础字段 `session_id/kb_id/turn_index/duration`，不实现完整 metrics hooks。
+- [ ] 保持当前 STT/LLM/TTS/VAD/打断/endpointing 的最小可用参数，不在 M2 做性能优化。
+- [ ] 开发环境分别运行 LiveKit Server、RAG Core、Agent 三个进程。
+- [ ] 提交：`feat: add minimal livekit rag agent`。
+
+## M2 工作包 E：HistoryCompactor
+
+**Produces:**
+- `HistoryCompactor.compact(session_id, kb_id) -> HistoryCompactionResult`
+
+- [ ] 挂断后读取该 session 的原始 messages、SOUL、当前 KB 最近 history 和 overview fallback。
+- [ ] Context Model 输出长期摘要时，追加到 `history/{kb_id}/history.jsonl`，记录 cursor 与 `source_session_id`。
+- [ ] 模型输出 `NO_HISTORY` 时不追加摘要，但仍保留原始 session。
+- [ ] 压缩失败时把错误写入该 session 的 `runtime.json`，不得删除原始 session，也不得阻断下一通会话。
+- [ ] 下一次同 KB 会话的 SessionPromptRenderer 读取最近 history；不同 KB 不可读取该摘要。
+- [ ] 提交：`feat: compact sessions without deleting originals`。
+
+## M2 验收标准
+
+- [ ] Agent 能根据问题在 `auto` 模式调用当前 KB 的 RAG。
+- [ ] 每条 evidence 与当前 `session_id + turn_index` 对齐。
+- [ ] 挂断后生成长期 history，但原始 messages/rag_context/runtime 完整保留。
+- [ ] 下一次同知识库会话能读取 history。
+- [ ] 不同知识库的 history 和 session prompt 互不污染。
+- [ ] RAG Core、LiveKit Server、Agent 分别启动；Agent 只等待健康状态。
+
+---
+
+# M3：产品管理层
+
+## 阶段目标
+
+在 M1/M2 稳定后补齐产品管理能力。CRUD、动态配置、Knowledge Overview、job 展示和多格式解析不能反向改变 M1/M2 的核心接口。
+
+## M3 文件范围
+
+```text
+liverag/api/rag_gateway.py
+liverag/api/server.py
+liverag/api/main.py
+liverag/config/settings.py
+liverag/context/overview.py
+liverag/rag/doc_parser.py
+liverag/rag/server.py
+docs/API.md
+tests/api/
+tests/context/test_overview.py
+tests/rag/test_doc_parser.py
+```
+
+## M3 工作包 A：统一管理 API（9821）
+
+- [ ] 实现 health/runtime、knowledge base、documents、jobs、query 代理接口。
+- [ ] 前端只访问 `9821`，内部 RAG Core `/v1/*` 保持内部依赖。
+- [ ] `RagGateway` 调用 `wait_for_rag_ready()` 只等待健康状态，不自动启动 RAG 服务。
+- [ ] 实现 SOUL、session 列表/详情/turn 聚合、当前 KB 选择和显式 session 导出。
+- [ ] session 删除只接受一个明确 `session_id`，逐个删除已知文件后移除空目录；不提供批量清空接口。
+- [ ] 提交：`feat: expose unified management api`。
+
+## M3 工作包 B：动态模型与 Prompt 配置
+
+- [ ] 在现有 `.env` 默认值之上增加 runtime model/context config JSON 覆盖层。
+- [ ] 实现模型、STT、TTS、Context Model、SOUL 和 RAG `auto/never` 配置接口。
+- [ ] 实现 API Key 掩码输出与掩码值回填保护。
+- [ ] 明确语音 provider 变更“下一次通话生效”，不得在进行中的 session 热切换。
+- [ ] 配置校验失败返回稳定字段级错误，不写入部分配置。
+- [ ] 提交：`feat: add runtime model and prompt management`。
+
+## M3 工作包 C：Knowledge Overview 与 Job 管理
+
+- [ ] 索引 job 完成且有新 processed 文档时，后台调用独立 Context Model 生成 overview。
+- [ ] 上传或删除文档后把 overview 标记 stale；生成失败写降级 overview，不影响文档和通话。
+- [ ] 管理 API 提供 job 查询、文档状态、错误原因和 overview 状态。
+- [ ] job 管理只观察/同步任务，不承担 RAG Core 进程生命周期。
+- [ ] 提交：`feat: add knowledge overview and job management`。
+
+## M3 工作包 D：多格式文档解析
+
+- [ ] 在 M1 `parse_file_content` 接口上依次加入 PDF、DOCX、PPTX、XLSX。
+- [ ] 每种格式使用最小 fixture 验证关键文字、空文件、损坏文件和加密文件错误。
+- [ ] PDF 优先使用稳定解析路径；可选 Docling 使用延迟导入，缺失时回退到 pypdf。
+- [ ] 解析失败保留原文件与错误元数据，不提交 LightRAG。
+- [ ] 提交：`feat: add office and pdf document parsers`。
+
+## M3 验收标准
+
+- [ ] 所有产品管理操作都能经 `9821` 完成。
+- [ ] M1 文本 RAG 与 M2 Agent 在管理 API 未启动时仍可独立运行。
+- [ ] 动态配置只影响后续 session，密钥不会在 API 响应中泄露。
+- [ ] 多格式文档可上传、解析、索引、查看状态和查询。
+- [ ] 原始 session 可审计、导出，并按明确 session ID 管理。
+
+---
+
+# M4：已有前端适配、Docker 和生产化
+
+## 阶段目标
+
+复用 `E:/CS/project/LiveRAG-Fronted/agent-starter-react`，只做 API 契约适配、缺陷修复和必要交互补齐；随后完成五服务部署、健康检查、指标与端到端验收。
+
+## M4 文件范围
+
+```text
+E:/CS/project/LiveRAG-Fronted/agent-starter-react/types/liverag.ts
+E:/CS/project/LiveRAG-Fronted/agent-starter-react/lib/api/
+E:/CS/project/LiveRAG-Fronted/agent-starter-react/app/api/
+E:/CS/project/LiveRAG-Fronted/agent-starter-react/components/knowledge/
+E:/CS/project/LiveRAG-Fronted/agent-starter-react/components/voice/
+Dockerfile
+docker-compose.yml
+liverag/agent/metrics_hooks.py
+README.md
+tests/e2e/
+```
+
+## M4 工作包 A：适配已有 Next.js 前端
+
+- [ ] 先对照 `docs/API.md` 修正现有 TypeScript 类型和 API client，不重写页面架构。
+- [ ] 复用已有 `/` 语音页、`/knowledge` 管理页、知识库组件和 voice components。
+- [ ] 保留同源 `/api/liverag/*` 代理，浏览器不得直接访问 RAG Core。
+- [ ] 保留服务端 LiveKit token 签发，API secret 不进入浏览器。
+- [ ] 修复知识库选择锁定、job 轮询、上传失败、RAG evidence 展示等现有交互问题。
+- [ ] 展示 `not_queried/hit/miss/failed`、命中文档、片段和错误；cache hit 只有 M4 真正引入缓存后才展示。
+- [ ] 运行 `corepack pnpm lint`、`corepack pnpm typecheck`、`corepack pnpm build`。
+- [ ] 提交：`fix: adapt existing frontend to staged backend`。
+
+## M4 工作包 B：Docker Compose 五服务部署
+
+- [ ] 复用共享后端镜像，部署 livekit、liverag-rag、liverag-api、liverag-agent、liverag-frontend。
+- [ ] RAG Core、API 和 Agent 共享 `/data`，但各自是独立进程。
+- [ ] Compose 用 `depends_on` 与 healthcheck 管理启动顺序；应用代码不启动子进程。
+- [ ] RAG Core 暴露 ready healthcheck，API/Agent 仅等待 ready。
+- [ ] 验证 Compose 重启后 SQLite、workspaces、sessions 和 history 均保留。
+- [ ] 提交：`ops: add five-service compose deployment`。
+
+## M4 工作包 C：指标、缓存和端到端验收
+
+- [ ] 在语音闭环稳定后增加 TTFT、首音频延迟、EOU、STT/LLM/TTS/RAG duration hooks。
+- [ ] 只有在观测到重复查询收益且具备知识库版本失效键后，才实现可选 TTL cache；缓存键至少包含 `kb_id + knowledge_version + query + query_options`。
+- [ ] 知识库新增、删除或重建索引时使对应版本缓存失效；默认可继续关闭缓存。
+- [ ] 做两库隔离测试、跨 session history 测试、无命中防幻觉测试和原始 session 审计测试。
+- [ ] 用 3 个库内问题、2 个库外问题、2 个闲聊问题对齐 messages、rag_context、history 和 UI。
+- [ ] 记录至少 20 轮无 RAG/有 RAG 的 P50/P95 首音频延迟，再决定是否调整 endpointing 和查询参数。
+- [ ] 执行后端 pytest/ruff/compileall、前端 lint/typecheck/build、`docker compose config` 和完整手工通话验收。
+- [ ] 提交：`test: complete production readiness validation`。
+
+## M4 验收标准
+
+- [ ] 已有前端完成适配，没有重新开发一套重复 UI。
+- [ ] 五服务能通过 Compose 启动、健康检查和重启恢复。
+- [ ] 用户能完成建库、上传、等待索引、选择单 KB、语音问答和 evidence 查看。
+- [ ] 原始 session、长期 history、SQLite 和 LightRAG workspace 均持久化。
+- [ ] 指标能够定位 STT、LLM、RAG、TTS 的主要延迟，不为追求数字提前改变语音参数。
+
+---
+
+## 阶段依赖与停止条件
+
+| 当前阶段 | 进入下一阶段前必须满足 | 不满足时不要做什么 |
+| --- | --- | --- |
+| M1 | 两库隔离、txt/md HTTP 闭环、无命中不作答 | 不接 LiveKit，不写管理 UI |
+| M2 | evidence 对齐、原始 session 保留、history 跨会话且按 KB 隔离 | 不做动态配置和多格式解析 |
+| M3 | `9821` 契约稳定、job/overview/配置可管理 | 不大改已有前端 |
+| M4 | 前三阶段回归全部通过 | 不用性能优化掩盖功能错误 |
+
+## 学习优先级
+
+1. 先理解 `kb_id → workspace` 的物理隔离，这是整个项目最重要的数据边界。
+2. 再理解 `query → evidence → answer`，无 evidence 时必须显式拒答。
+3. 接着理解 `session_id + turn_index` 如何关联原始消息、工具调用和回答。
+4. 最后理解 history 是可追溯的摘要层，不是删除原始会话的理由。
+5. 管理 API、UI、Docker、缓存和指标都是对核心链路的包装与运维能力，不应反向主导前两阶段设计。
+
+## 最终复现完成定义
+
+- M1 能独立演示文本 RAG。
+- M2 能独立演示实时语音 RAG 与跨会话 history。
+- M3 能通过统一 API 管理模型、Prompt、session、job、overview 和多格式文档。
+- M4 复用已有前端并完成五服务部署、观测与端到端验收。
+- 任一阶段的失败都能通过 SQLite、原始 session、RAG evidence 和基础日志定位，不依赖猜测。

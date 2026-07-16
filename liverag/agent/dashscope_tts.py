@@ -2,6 +2,7 @@
 DashScope实时TTS适配"""
 
 from __future__ import annotations
+
 import asyncio
 import base64
 import json
@@ -238,7 +239,11 @@ class DashScopeRealtimeSynthesizeStream(tts.SynthesizeStream):
                     return
 
                 msg = await asyncio.wait_for(ws.receive(), timeout=self._conn_options.timeout)
-                if msg.type in {aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING}:
+                if msg.type in {
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSING,
+                }:
                     raise APIConnectionError("DashScope realtime TTS websocket closed unexpectedly")
                 if msg.type != aiohttp.WSMsgType.TEXT:
                     continue

@@ -21,6 +21,7 @@ dependencies = [
     "python-pptx>=1.0.0",
     "uvicorn[standard]>=0.30.0",
     "websockets>=15.0.0",
+    "pydantic-settings>=2.14.2",
 ]
 
 [project.scripts]
@@ -52,6 +53,9 @@ line-length = 100
 target-version = "py310"
 extend-exclude = [
     "src",
+    ".uvtool",
+    ".uv-cache",
+    ".venv",
 ]
 
 [tool.ruff.lint]
