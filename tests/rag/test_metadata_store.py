@@ -1,9 +1,10 @@
 """测试/rag/metadata_store.py模块的功能。"""
 import sqlite3
 from pathlib import Path
-import pytest
-from liverag.rag.metadata_store import MetadataStore
 
+import pytest
+
+from liverag.rag.metadata_store import MetadataStore
 
 EXPECTED_TABLES = {
     "knowledge_bases",
@@ -205,44 +206,44 @@ def test_two_knowledge_bases_have_isolated_directories(tmp_path: Path):
     )
     store.initialize()
 
-    alpha_dir = store.create_knowledge_base(
+    alpha = store.create_knowledge_base(
         kb_id="kb_alpha",
         name="Alpha 知识库",
         description="Alpha 测试数据",
     )
-    beta_dir = store.create_knowledge_base(
+    beta = store.create_knowledge_base(
         kb_id="kb_beta",
         name="Beta 知识库",
         description="Beta 测试数据",
     )
 
-    assert alpha_dir == knowledge_bases_dir / "kb_alpha"
-    assert beta_dir == knowledge_bases_dir / "kb_beta"
-    assert alpha_dir != beta_dir
+    assert alpha.root_dir == knowledge_bases_dir / "kb_alpha"
+    assert beta.root_dir == knowledge_bases_dir / "kb_beta"
+    assert alpha.root_dir != beta.root_dir
 
-    for kb_dir in (alpha_dir, beta_dir):
-        assert kb_dir.is_dir()
-        assert (kb_dir / "sources").is_dir()
-        assert (kb_dir / "storage").is_dir()
-        assert (kb_dir / "logs").is_dir()
+    for meta in (alpha, beta):
+        assert meta.root_dir.is_dir()
+        assert meta.sources_dir.is_dir()
+        assert meta.storage_dir.is_dir()
+        assert meta.logs_dir.is_dir()
 
 
 def test_knowledge_base_files_are_physically_isolated(tmp_path: Path):
     """测试不同知识库的文件是否在物理上隔离，确保一个知识库的文件不会出现在另一个知识库中。"""
     knowledge_bases_dir = tmp_path / "knowledge_bases"
-    
+
     store = MetadataStore(
         tmp_path / "liverag.db",
         knowledge_bases_dir
     )
     store.initialize()
 
-    alpha_dir = store.create_knowledge_base(
+    alpha = store.create_knowledge_base(
         kb_id="kb_alpha",
         name="Alpha",
         description="Alpha 测试数据",
     )
-    beta_dir = store.create_knowledge_base(
+    beta = store.create_knowledge_base(
         kb_id="kb_beta",
         name="Beta",
         description="Beta 测试数据",
@@ -263,13 +264,19 @@ def test_knowledge_base_files_are_physically_isolated(tmp_path: Path):
     assert rows == [("kb_alpha",), ("kb_beta",)]
 
     # 验证知识库根目录互不相同
-    assert alpha_dir == knowledge_bases_dir / "kb_alpha"
-    assert beta_dir == knowledge_bases_dir / "kb_beta"
-    assert alpha_dir != beta_dir
+    assert alpha.root_dir == knowledge_bases_dir / "kb_alpha"
+    assert beta.root_dir == knowledge_bases_dir / "kb_beta"
+    assert alpha.root_dir != beta.root_dir
 
     # 验证每个知识库都有自己的三个子目录
-    for kb_dir in (alpha_dir, beta_dir):
-        assert kb_dir.is_dir()
-        assert (kb_dir / "sources").is_dir()
-        assert (kb_dir / "storage").is_dir()
-        assert (kb_dir / "logs").is_dir()
+    for meta in (alpha, beta):
+        assert meta.root_dir.is_dir()
+        assert meta.sources_dir.is_dir()
+        assert meta.storage_dir.is_dir()
+        assert meta.logs_dir.is_dir()
+
+    alpha_file = alpha.sources_dir / "alpha.txt"
+    alpha_file.write_text("only alpha", encoding="utf-8")
+
+    assert alpha_file.is_file()
+    assert not (beta.sources_dir / "alpha.txt").exists()

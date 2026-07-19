@@ -19,7 +19,7 @@ class KnowledgeBaseMeta:
     description:str
     created_at:str
     updated_at:str
-    root_dir:Path
+    root_dir:Path #知识库根目录
 
     @property
     def storage_dir(self):
@@ -682,14 +682,6 @@ class MetadataStore:
             payload["total"]=len(rows)
 
             return payload
-
-
-
-
-
-
-
-
 
 
 

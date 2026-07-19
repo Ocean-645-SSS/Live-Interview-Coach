@@ -110,9 +110,9 @@ tests/rag/
 - [√] 测试 `kb_id` 只允许字母、数字、下划线和连字符，阻止 `../` 等路径穿越。
 - [√] 测试两个知识库分别拥有独立的 `sources/`、`storage/`、`logs/`。
 - [√] 实现文档最小状态机：`pending → parsed → processing → processed/failed`。
-- [ ] 只实现 M1 HTTP 闭环需要的 CRUD，不实现 session 配置和产品级统计。
-- [ ] 运行 `uv run pytest tests/rag/test_metadata_store.py tests/rag/test_knowledge_base.py -v`。
-- [ ] 提交：`feat: add isolated knowledge base metadata`。
+- [√] 只实现 M1 HTTP 闭环需要的 CRUD，不实现 session 配置和产品级统计。
+- [√] 运行 `uv run pytest tests/rag/test_metadata_store.py tests/rag/test_knowledge_base.py -v`。
+- [√] 提交：`feat: add isolated knowledge base metadata`。
 
 **学习重点:** SQLite 只保存产品元数据；原文件、向量、图谱和 chunk 由各自 workspace 保存。
 
@@ -122,12 +122,12 @@ tests/rag/
 - `parse_file_content(file_bytes: bytes, extension: str) -> str`
 - 仅支持 `.txt` 与 `.md`。
 
-- [ ] 为 UTF-8 txt、Markdown、空文件、非法编码和不支持扩展名编写测试样例。
-- [ ] 实现 `.txt/.md` 解码、空文本拒绝和稳定错误类型。
-- [ ] 保持解析函数无数据库、网络和 LightRAG 副作用。
-- [ ] 将 PDF、DOCX、PPTX、XLSX 明确留到 M3，不在 M1 引入对应解析依赖和分支。
-- [ ] 运行 `uv run pytest tests/rag/test_doc_parser.py -v`。
-- [ ] 提交：`feat: parse txt and markdown documents`。
+- [√] 为 UTF-8 txt、Markdown、空文件、非法编码和不支持扩展名编写测试样例。
+- [√] 实现 `.txt/.md` 解码、空文本拒绝和稳定错误类型。
+- [√] 保持解析函数无数据库、网络和 LightRAG 副作用。
+- [√] 将 PDF、DOCX、PPTX、XLSX 明确留到 M3，不在 M1 引入对应解析依赖和分支。
+- [√] 运行 `uv run pytest tests/rag/test_doc_parser.py -v`。
+- [√] 提交：`feat: parse txt and markdown documents`。
 
 **学习重点:** 先把“文件解析”和“索引提交”拆开，便于定位失败发生在哪一层。
 
@@ -135,17 +135,17 @@ tests/rag/
 
 **Produces:**
 - `QueryOptions`、`QueryRequest`、`EvidenceDocument`、`EvidenceChunk`。
-- `RagEngine.initialize/insert/query_context/query_answer`。
+- `RagEngine.initialize/enqueue_documents/query_context/query_answer`。
 - `RagEngineManager.get(kb_id: str) -> RagEngine`。
 
-- [ ] 先用 fake LightRAG 测试输入输出映射，再用真实在线 LLM/Embedding 做一条集成测试。
-- [ ] 测试 `EngineManager` 以 `kb_id` 为唯一缓存键，并将 working directory 指向该库的 `storage/`。
-- [ ] 测试两个 KB 返回不同 engine 实例，同一个 KB 重用已初始化实例。
-- [ ] 查询结果必须返回 `request_id`、`kb_id`、`hit`、`has_context`、`references`、`chunks`、`duration`。
-- [ ] 无证据时 `hit=false`、`has_context=false`；`query_answer` 返回“知识库中没有足够依据”，禁止让模型自由补全事实。
-- [ ] 只实现 timeout 和异常映射，不实现 TTL cache、query rewrite、rerank 调优和复杂 voice profile。
-- [ ] 禁止接受 `kb_ids`，禁止跨 workspace 合并结果。
-- [ ] 运行 `uv run pytest tests/rag/test_engine.py tests/rag/test_engine_manager.py -v`。
+- [√] 先用 fake LightRAG 测试输入输出映射，再用真实在线 LLM/Embedding 做一条集成测试。
+- [√] 测试 `EngineManager` 以 `kb_id` 为唯一缓存键，并将 working directory 指向该库的 `storage/`。
+- [√] 测试两个 KB 返回不同 engine 实例，同一个 KB 重用已初始化实例。
+- [√] 查询结果必须返回 `kb_id`、`hit`、`has_context`、`references`、`chunks`、`duration`。
+- [√] 无证据时 `hit=false`、`has_context=false`；`query_answer` 返回“知识库中没有足够依据”，禁止让模型自由补全事实。
+- [√] 只实现 timeout 和异常映射，不实现 TTL cache、query rewrite、rerank 调优和复杂 voice profile。
+- [√] 禁止接受 `kb_ids`，禁止跨 workspace 合并结果。
+- [√] 运行 `uv run pytest tests/rag/test_engine.py tests/rag/test_engine_manager.py -v`。
 - [ ] 提交：`feat: add per-kb lightrag engine`。
 
 **学习重点:** LightRAG 的 working directory 就是隔离边界；evidence 是判断回答可信度的依据。
@@ -160,6 +160,7 @@ tests/rag/
 - `POST /v1/knowledge-bases/{kb_id}/query/answer`
 - `wait_for_rag_ready()`：只等待，不启动子进程。
 
+- [ ] 接入SQLite 状态编排和返回结果中request_id
 - [ ] 用 FastAPI TestClient 测试统一成功/错误 envelope。
 - [ ] 实现上传顺序：生成 document_id → 保存原文件 → 写 pending 元数据 → 解析 → 插入 LightRAG → 更新状态。
 - [ ] 安全文件名固定保存到 `sources/{document_id}/{original_filename}`，拒绝路径穿越。
