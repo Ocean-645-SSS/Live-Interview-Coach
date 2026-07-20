@@ -7,6 +7,7 @@
 """
 
 import asyncio
+from math import ceil
 import time
 from asyncio.log import logger
 from dataclasses import asdict, is_dataclass
@@ -381,7 +382,7 @@ class RagEngine:
                 rewritten=rewritten,
                 has_context=False,
                 context="",
-                context_truncated=True,
+                context_truncated=False,
                 answer=None,
                 references=[],
                 chunks=[],
@@ -400,7 +401,7 @@ class RagEngine:
                 rewritten=rewritten,
                 has_context=False,
                 context="",
-                context_truncated=True,
+                context_truncated=False,
                 answer=None,
                 references=[],
                 chunks=[],
@@ -679,6 +680,70 @@ class RagEngine:
             "chunk_top_k": options.chunk_top_k,
             "enable_rerank": options.enable_rerank,
             "cache_hit": cache_hit,
+            "kb_id": self.settings.kb_id,
+            "kb_name": self.settings.kb_name,
+        }
+    
+    async def documents(self,page:int=1,page_size:int=50)->dict[str,Any]:
+        """分页查询documents"""
+
+        rag = self.ensure_ready()
+        #TODO:分页读取LightRAG文档状态
+        docs, total = await rag.doc_status.get_docs_paginated(page=page, page_size=page_size)
+        #TODO:统计不同文档数量
+        counts = await rag.doc_status.get_all_status_counts()
+        #计算总页数
+        total_pages = ceil(total / page_size) if total else 0
+        return { #组装当前页文档
+            "documents": [
+                self._with_kb({"document_id": doc_id, **_to_jsonable(status)}) for doc_id, status in docs
+            ],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_prev": page > 1 and total_pages > 0,
+            "status_counts": counts,
+        }
+
+    #TODO
+    async def document_detail(self, document_id: str) -> dict[str, Any]:
+        """读取单个文档状态、原文和文本块。"""
+
+        rag = self.ensure_ready()
+        status = await rag.doc_status.get_by_id(document_id)
+        if not status:
+            raise KeyError(f"document not found: {document_id}")
+
+        full_doc = await rag.full_docs.get_by_id(document_id)
+        json_status = _to_jsonable(status)
+        chunks_list = json_status.get("chunks_list") or []
+        chunks = []
+        if chunks_list:
+            raw_chunks = await rag.text_chunks.get_by_ids(chunks_list)
+            chunks = _to_jsonable(raw_chunks)
+
+        return self._with_kb({
+            "document_id": document_id,
+            "status": json_status,
+            "content": (full_doc or {}).get("content", ""),
+            "file_path": json_status.get("file_path") or (full_doc or {}).get("file_path"),
+            "chunks": chunks,
+            "chunks_count": len(chunks),
+        })
+    
+
+    async def job(self, job_id: str) -> dict[str, Any]:
+        """异步获取入库任务"""
+        rag = self.ensure_ready()
+        docs = await rag.aget_docs_by_track_id(job_id)
+        return {
+            "job_id": job_id,
+            "documents": [
+                self._with_kb({"document_id": doc_id, **_to_jsonable(status)}) for doc_id, status in docs.items()
+            ],
+            "total": len(docs),
             "kb_id": self.settings.kb_id,
             "kb_name": self.settings.kb_name,
         }

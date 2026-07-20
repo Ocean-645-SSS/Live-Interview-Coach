@@ -76,13 +76,20 @@ class RagEngineManager:
     
     async def get_engine(self,kb_id:str)->RagEngine:
         """获取或创建单个KB的engine
+
         必须保证：
         同一个 kb_id 重用同一个 Engine；
         不同 kb_id 使用不同 Engine；
         同一 KB 不会被并发重复初始化；
         不同 KB 可以并行初始化；
         初始化失败的 Engine 不会进入缓存；
-        每个 KB 使用独立的 working_dir 和 workspace"""
+        每个 KB 使用独立的 working_dir 和 workspace
+        
+        需要的情况：
+        涉及 storage、向量、图谱、检索或 LLM
+        不需要的情况：
+        只涉及 SQLite 或 sources 原文件
+        """
         #如果缓存中有engine，直接返回
         if kb_id in self._engines:
             return self._engines[kb_id]
@@ -106,9 +113,10 @@ class RagEngineManager:
 
 
     def _settings_for(self,meta:KnowledgeBaseMeta)->RAGSettings:
-        """绑定KB独立目录和workspace！！！"""
+        """绑定KB独立目录和workspace！！！
+        确保了Engine A.settings ≠ Engine B.settings"""
 
-        return replace(
+        return replace( #基于全局配置绑定新值
             self.settings,
             kb_id=meta.kb_id,
             kb_name=meta.name,
@@ -130,5 +138,5 @@ class RagEngineManager:
             "embedding_dim":self.settings.embedding_dim,
             "user_data_dir":self.settings.absolute_user_data_dir,
             "knowledge_bases_dir":self.settings.absolute_knowledge_bases_dir,
-            "cached_kb_ids":sorted(self._engines.keys()),
+            "cached_kb_ids":sorted(self._engines.keys()), #已经缓存了哪些engines
         }

@@ -450,6 +450,43 @@ class MetadataStore:
         }
 
 
+    #TODO
+    def list_documents(self, kb_id: str, *, page: int, page_size: int) -> dict[str, Any]:
+        """分页读取知识库文档。"""
+
+        meta = self.get_knowledge_base(kb_id)
+        offset = (page - 1) * page_size
+        with self._connect() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) AS count FROM documents WHERE kb_id = ?",
+                (kb_id,),
+            ).fetchone()["count"]
+            rows = conn.execute(
+                """
+                SELECT d.*, kb.name AS kb_name
+                FROM documents d
+                JOIN knowledge_bases kb ON kb.kb_id = d.kb_id
+                WHERE d.kb_id = ?
+                ORDER BY d.updated_at DESC, d.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (kb_id, page_size, offset),
+            ).fetchall()
+        total_pages = (total + page_size - 1) // page_size if total else 0
+        return {
+            "documents": [self._document_public_from_row(row) for row in rows],
+            "kb_id": meta.kb_id,
+            "kb_name": meta.name,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_prev": page > 1 and total_pages > 0,
+        }
+    
+
+
     def _update_document(self,document_id:str,kb_id:str,**values):
         """更新文档元数据记录"""
         if not values:

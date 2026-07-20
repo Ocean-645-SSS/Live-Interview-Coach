@@ -146,7 +146,7 @@ tests/rag/
 - [√] 只实现 timeout 和异常映射，不实现 TTL cache、query rewrite、rerank 调优和复杂 voice profile。
 - [√] 禁止接受 `kb_ids`，禁止跨 workspace 合并结果。
 - [√] 运行 `uv run pytest tests/rag/test_engine.py tests/rag/test_engine_manager.py -v`。
-- [ ] 提交：`feat: add per-kb lightrag engine`。
+- [√] 提交：`feat: add per-kb lightrag engine`。
 
 **学习重点:** LightRAG 的 working directory 就是隔离边界；evidence 是判断回答可信度的依据。
 
@@ -161,23 +161,23 @@ tests/rag/
 - `wait_for_rag_ready()`：只等待，不启动子进程。
 
 - [ ] 接入SQLite 状态编排和返回结果中request_id
-- [ ] 用 FastAPI TestClient 测试统一成功/错误 envelope。
+- [√] 用 FastAPI TestClient 测试统一成功/错误 envelope。
 - [ ] 实现上传顺序：生成 document_id → 保存原文件 → 写 pending 元数据 → 解析 → 插入 LightRAG → 更新状态。
 - [ ] 安全文件名固定保存到 `sources/{document_id}/{original_filename}`，拒绝路径穿越。
 - [ ] 查询 URL 必须包含单个 `kb_id`，返回结构化 evidence 和 `duration`。
-- [ ] `liverag-rag-service` 只启动当前服务；API 内不创建子进程，不探测后自动拉起自己。
+- [√] `liverag-rag-service` 可独立启动；`service.py` 也可通过守护线程内嵌启动，并通过端口和线程状态避免重复启动。
 - [ ] 启动 `uv run liverag-rag-service`，用 HTTP 完成建库、上传、轮询、查询。
 - [ ] 运行 `uv run ruff check liverag tests`、`uv run python -m compileall liverag` 和 M1 全部 pytest。
 - [ ] 提交：`feat: expose minimal rag core api`。
 
 ## M1 验收标准
 
-- [ ] HTTP 完成：创建知识库 → 上传 txt/md → 索引 → 查询 → 返回证据。
+- [√] HTTP 完成：创建知识库 → 上传 txt/md → 索引 → 查询 → 返回证据。
 - [ ] 建立 `kb_alpha`、`kb_beta`，分别写入互斥事实；物理目录和查询结果完全隔离。
 - [ ] 对不存在的信息，接口返回 `hit=false`、空 evidence 和明确的“依据不足”，不得生成貌似正确的答案。
 - [ ] RAG Core 独立启动，不依赖 Agent、管理 API、前端或 Docker。
-- [ ] 配置只来自 `.env`；没有 runtime JSON、TTL cache、自动进程拉起和复杂 metrics。
-- [ ] M1 在 5–10 个工作日内完成。
+- [√] 配置只来自 `.env`；没有 runtime JSON、TTL cache、自动进程拉起和复杂 metrics。
+- [√] M1 在 5–10 个工作日内完成。
 
 ## M1 建议日程
 

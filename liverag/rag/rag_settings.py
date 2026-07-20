@@ -179,6 +179,15 @@ class RAGSettings:
     voice_enable_rerank: bool = _bool_env("LIGHTRAG_VOICE_ENABLE_RERANK", False)
 
 
+    """文件之间的层级关系
+    user_data_dir（整个应用共享）
+        └── rag/
+            └── knowledge_bases/       ← knowledge_bases_dir：所有知识库共享的物理目录的父目录
+                └── {kb_id}/           ← 单个知识库根目录
+                    ├── sources/       ← upload_dir：存储原始上传文件
+                    ├── storage/       ← working_dir：存储LightRAG索引、向量和图谱数据
+                    └── logs/
+    """
     @property
     def absolute_working_dir(self) -> str:
         """返回绝对 RAG 存储目录。"""
@@ -187,7 +196,8 @@ class RAGSettings:
 
     @property
     def absolute_user_data_dir(self) -> str:
-        """返回绝对用户数据目录。"""
+        """返回绝对用户数据目录。
+        存储LiveRAG全部运行数据的根目录"""
 
         return str(Path(self.user_data_dir).expanduser().resolve())
 

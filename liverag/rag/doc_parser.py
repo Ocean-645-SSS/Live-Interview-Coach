@@ -92,7 +92,7 @@ def parse_file_content(file_bytes:bytes,extension:str,**kwargs:object)->str:
             raise ValueError(
                 "当前文件不是合法 UTF-8，请转换为 UTF-8 格式后再处理"
             ) from exc
-        if text.strip() is "":
+        if text.strip() == "":
             raise ValueError("文本内容为空！")
         if text.startswith("b'") or text.startswith('b"'):
             raise ValueError("文件看起来包含二进制数据")

@@ -63,6 +63,7 @@ class QueryRequest(BaseModel):
     profile:ProfileName="default"
     options:QueryOptions |None = None
     conversation:ConversationOptions |None=None
+    model_config = ConfigDict(extra="forbid") #禁止传入kb_ids，只能单个kb_id
 
     #扁平化字段：用于兼容两种请求格式（嵌套+扁平）
     mode: QueryMode | None = None
@@ -129,7 +130,7 @@ class TextDocumentRequest(BaseModel):
 
 class Envelope(BaseModel):
     """封装给HTTP的统一外壳->HTTP响应"""
-    request_id:str
+    request_id:str #一次HTTP请求的唯一ID
     status:Literal["ok","error"]
     data:dict[str,Any] | list[Any] | None = None #实际业务结果
     metrics:dict[str,Any]=Field(default_factory=dict) #耗时等指标，每次创建都生成一次dict()
