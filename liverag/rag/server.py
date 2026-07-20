@@ -316,7 +316,10 @@ async def query_answer(kb_id:str,request:QueryRequest):
 @app.post("/v1/knowledge-bases/{kb_id}/documents/files",dependencies=[Depends(require_api_key)])
 async def documents_files(
     kb_id:str,
-    files:Annotated[list[UploadFile], File(...)]
+    files:Annotated[
+        list[UploadFile],
+        File(json_schema_extra={"items": {"type": "string", "format": "binary"}}),
+    ],
 )->dict[str,Any]:
     """批量向指定知识库上传文档、解析并且导入"""
 

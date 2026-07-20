@@ -354,6 +354,33 @@ class RagEngine:
 
 
 
+    async def _evidence_is_relevant(self,query: str,context: str,) -> bool:
+        """判断当前context是否能真正回答query"""
+
+        if not context.strip():
+            return False
+
+        rag = self.ensure_ready()
+        prompt = f"""
+        判断下面的证据是否包含能够直接回答问题的信息。
+
+        严格规则：
+        - 仅仅主题相似不算相关。
+        - 不能依靠常识补充缺失信息。
+        - 如果证据不能直接支持答案，返回 false。
+        - 只能返回 true 或 false。
+
+        问题：
+        {query}
+
+        证据：
+        {context}
+        """.strip()
+
+        response = await rag.llm_model_func(prompt)
+        text = str(response).strip().lower()
+        return text == "true"
+    
 
     async def query_context(
         self, query: str, profile: str, options: QueryOptions, conversation: ConversationOptions
@@ -431,6 +458,19 @@ class RagEngine:
 
         # 提取context/references/chunks结构化上下文
         payload = self._extract_context_payload(result, resolved)
+
+        #判断当前context是否能回答query
+        relevant = await self._evidence_is_relevant(
+            effective_query,
+            payload["context"],
+        )
+        if not relevant:
+            payload["hit"] = False
+            payload["context"] = ""
+            payload["context_truncated"] = False
+            payload["references"] = []
+            payload["chunks"] = []
+
         payload.update({"query": query, "effective_query": effective_query, "rewritten": rewritten})
         query_result = QueryResult(
             kb_id=self.settings.kb_id,
@@ -525,7 +565,6 @@ class RagEngine:
 
 
 
-
     async def query_answer(
         self,
         query: str,  # 用户原始问题
@@ -580,7 +619,7 @@ class RagEngine:
         references = data.get("references") or []
         query_succeeded=result.get("status")=="success"
         has_evidence = bool(chunks or references)
-        hit = query_succeeded and has_evidence
+        candidate_hit = query_succeeded and has_evidence
 
         context = str(data.get("context") or "").strip()
         if not context:
@@ -589,13 +628,29 @@ class RagEngine:
                 for chunk in chunks
                 if isinstance(chunk, dict) and chunk.get("content")
             )
-        has_context = hit and bool(context)
 
-        #截断context
+        # 截断 context
         context_truncated = False
         if resolved.context_max_chars and len(context) > resolved.context_max_chars:
             context = context[: resolved.context_max_chars].strip()
             context_truncated = True
+
+        # 有检索结果不代表证据真的能回答问题
+        relevant = (
+            await self._evidence_is_relevant(effective_query, context)
+            if candidate_hit
+            else False
+        )
+        hit = candidate_hit and relevant
+
+        # 不相关时必须清空全部证据，禁止模型答案泄漏出去
+        if not hit:
+            context = ""
+            context_truncated = False
+            references = []
+            chunks = []
+
+        has_context = hit and bool(context)
 
         evidence_references = (
             self._with_kb_list(_to_jsonable(references)) if resolved.include_references else []
