@@ -1,4 +1,9 @@
-"""等待独立运行的 RAG Core 服务进入 ready 状态。"""
+"""等待独立运行的 RAG Core 服务进入 ready 状态,在主进程的后台线程中运行Uvicorn
+主应用进程
+├── 主线程：主应用
+└── 后台 daemon 线程
+    └── Uvicorn
+        └── FastAPI RAG 服务"""
 
 import json
 import logging
@@ -18,7 +23,7 @@ from liverag.rag.rag_settings import RAGSettings
 
 logger = logging.getLogger("liverag.rag.service")
 _START_LOCK = Lock()
-_START_THREAD: Thread | None = None
+_START_THREAD: Thread | None = None #保存启动RAG服务的后台线程
 
 
 class RagServiceStartStatus(str, Enum):
@@ -51,7 +56,7 @@ def port_is_open(host:str,port:str)->bool:
 
 
 def start_embedded_rag_service()->RagServiceStartStatus:
-    """如果RAG Core没有运行，就在当前进程中创建一个后台进程，并在线程里启动Uvicorn"""
+    """如果RAG Core没有运行，就在当前进程中创建一个后台进程，并在线程里启动Uvicorn，避免了重复启动"""
 
     #检查是否启用RAG
     if os.getenv("LIGHTRAG_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
@@ -87,7 +92,7 @@ def start_embedded_rag_service()->RagServiceStartStatus:
                 log_level=os.getenv("RAG_UVICORN_LOG_LEVEL", "warning"),
             )
 
-        #创建线程
+        #创建daemon后台线程
         _START_THREAD = Thread(target=_run_server, name="rag-service", daemon=True)
        #启动线程
         _START_THREAD.start()

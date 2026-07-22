@@ -427,7 +427,7 @@ async def documents_files(
                     document_ids=parsed_document_ids,
                     track_id=track_id
                 )
-                #提交成功后，更新状态->indexing
+                #提交成功后，更新状态->processing
                 for document_id in parsed_document_ids:
                     manager.metadata.mark_document_indexing(kb_id,document_id)
                 status="processing"
@@ -469,7 +469,7 @@ async def documents_files(
                 )
         #如果没有任何文件解析成功
         else:
-            status="failed"
+            status="failed" #直接短路，防止初始化engine造成浪费
 
         #更新最终任务状态
         manager.metadata.update_job(
@@ -516,7 +516,7 @@ async def documents(
 
     request_id=str(uuid.uuid4())
     try:
-        await _sync_documents_from_lightrag(kb_id)
+        await _sync_documents_from_lightrag(kb_id) #分页读取该KB所有文档状态
         return envelope(
             request_id=request_id,
             data=manager.metadata.list_documents(kb_id,page=page,page_size=page_size)
@@ -530,25 +530,25 @@ async def documents(
             error={"type": type(exc).__name__, "message": str(exc)},
         )
 
-#TODO:真的写不动了
+
 @app.get("/v1/knowledge-bases/{kb_id}/documents/{document_id}", dependencies=[Depends(require_api_key)])
 async def document_detail(kb_id:str,document_id:str)->dict[str,Any]:
     """获取某个文件的细节"""
 
     request_id=str(uuid.uuid4())
     try:
-        document = manager.metadata.get_document(kb_id, document_id)
-        content = ""
+        document = manager.metadata.get_document(kb_id, document_id) #返回文档，保证了即使文档没有进入LightRAG，也保留了元数据
+        content = "" #正文
         chunks: list[Any] = []
-        status_raw: dict[str, Any] = {}
-        light_detail = await _sync_one_document_from_lightrag(kb_id, document_id)
+        status_raw: dict[str, Any] = {} #LightRAG状态
+        light_detail = await _sync_one_document_from_lightrag(kb_id, document_id) #主动查询某个文件，并同步状态
         if light_detail is not None:
-            content = str(light_detail.get("content") or "")
-            raw_chunks = light_detail.get("chunks")
+            content = str(light_detail.get("content") or "") #正文
+            raw_chunks = light_detail.get("chunks") #原始chunks
             chunks = raw_chunks if isinstance(raw_chunks, list) else []
             status_payload = light_detail.get("status")
             status_raw = status_payload if isinstance(status_payload, dict) else {}
-            document = manager.metadata.get_document(kb_id, document_id)
+            document = manager.metadata.get_document(kb_id, document_id)  #获取文档最新状态
         return envelope(
             request_id=request_id,
             data={
@@ -569,7 +569,28 @@ async def document_detail(kb_id:str,document_id:str)->dict[str,Any]:
 
 
 
+#几个同步函数的区别：
+#单篇详情查询 ──┐
+#文档列表查询 ──┼→ _sync_document_from_lightrag() → SQLite
+#任务状态查询 ──┘
 
+def _sync_document_from_lightrag(kb_id:str,document_id:str,status_payload:dict[str,Any]):
+    """同步单个文档状态到SQLite,没有返回完整文档详情"""
+
+    #转换状态名称
+    status=_map_lightrag_status(status_payload)
+    #提取chunk数量
+    chunks_count=int(status_payload.get("chunks_count") or status_payload.get("chunk_count") or 0)
+    #更新SQLite文档记录
+    manager.metadata.update_document_index_status(
+        kb_id=kb_id,
+        document_id=document_id,
+        index_status=status,
+        chunks_count=chunks_count,
+        error_msg=_first_error(status_payload)
+    )
+
+    
 def _sync_job_from_lightrag(kb_id:str,job_id:str,light_job:dict[str,Any]):
     """用 LightRAG 最新任务状态同步 SQLite 元数据。
     负责：
@@ -577,13 +598,7 @@ def _sync_job_from_lightrag(kb_id:str,job_id:str,light_job:dict[str,Any]):
     → 映射为 processed/processing/failed
     → 提取 chunks_count
     → 提取错误信息
-    → 更新 SQLite documents 表
-
-    LightRAG 的真实处理状态
-            ↓
-    _sync_job_from_lightrag()
-            ↓
-    LiveRAG 的 SQLite 产品元数据"""
+    → 更新 SQLite documents 表"""
 
     #遍历LightRAG返回的文档
     for item in light_job.get("documents",[]) or []:
@@ -609,10 +624,7 @@ def _sync_job_from_lightrag(kb_id:str,job_id:str,light_job:dict[str,Any]):
         for item in documents_payload
     ]
     #汇总成功、失败的数量
-    parsed_count=sum(
-        1 for item in documents_payload if item.get("parse_status")=="parsed"
-
-    )
+    parsed_count=sum(1 for item in documents_payload if item.get("parse_status")=="parsed")
     failed_count=sum(
         1 for item in documents_payload if item.get("parse_status")=="failed" #解析失败
         or item.get("index_status")=="failed" #解释成功，但索引失败
@@ -641,21 +653,7 @@ def _sync_job_from_lightrag(kb_id:str,job_id:str,light_job:dict[str,Any]):
         failed_count=failed_count,
     )
 
-def _sync_document_from_lightrag(kb_id:str,document_id:str,status_payload:dict[str,Any]):
-    """同步单个文档状态到SQLite"""
 
-    #转换状态名称
-    status=_map_lightrag_status(status_payload)
-    #提取chunk数量
-    chunks_count=int(status_payload.get("chunks_count") or status_payload.get("chunk_count") or 0)
-    #更新SQLite文档记录
-    manager.metadata.update_document_index_status(
-        kb_id=kb_id,
-        document_id=document_id,
-        index_status=status,
-        chunks_count=chunks_count,
-        error_msg=_first_error(status_payload)
-    )
 
 async def _sync_documents_from_lightrag(kb_id:str)->None:
     """分页读取某个KB在LightRAG中全部文档状态，逐个同步到SQLite"""
@@ -699,7 +697,7 @@ async def _sync_one_document_from_lightrag(kb_id:str,document_id:str)->dict[str,
     #找不到文档，暂时无法同步
     except KeyError:
         return None
-    #取出状态
+    #取出LightRAG状态
     status_payload=light_detail.get("status")
     if isinstance(status_payload,dict):
         #映射状态，提取chunks_count、错误信息，更新SQLite documents表

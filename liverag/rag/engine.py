@@ -281,7 +281,7 @@ class RagEngine:
         rag = self.ensure_ready()
         async with self._write_lock:  # 获取写锁
             """处理队列中文档：
-            读取待处理文档
+            → 读取待处理文档
             → 更新文档状态
             → 文本切块
             → 调用 Embedding
@@ -290,7 +290,7 @@ class RagEngine:
             → 更新知识图谱
             → 更新文档处理状态
             """
-            await rag.apipeline_process_enqueue_documents()
+            await rag.apipeline_process_enqueue_documents() #后台真正处理索引
 
     def _on_background_job_done(
     self,
@@ -705,6 +705,7 @@ class RagEngine:
         # 重新构造
         return QueryOptions(**base)
 
+
     def _profile_defaults(self, profile: str) -> QueryOptions:
         """"""
         if profile == "voice":
@@ -740,12 +741,12 @@ class RagEngine:
         }
     
     async def documents(self,page:int=1,page_size:int=50)->dict[str,Any]:
-        """分页查询documents"""
+        """读取documents状态列侬阿婆"""
 
         rag = self.ensure_ready()
-        #TODO:分页读取LightRAG文档状态
-        docs, total = await rag.doc_status.get_docs_paginated(page=page, page_size=page_size)
-        #TODO:统计不同文档数量
+        #分页读取LightRAG文档状态
+        docs, total = await rag.doc_status.get_docs_paginated(page=page, page_size=page_size) #查询当前知识库中的全部 LightRAG 文档，但一次只返回一页
+        #统计不同文档数量
         counts = await rag.doc_status.get_all_status_counts()
         #计算总页数
         total_pages = ceil(total / page_size) if total else 0
@@ -762,37 +763,42 @@ class RagEngine:
             "status_counts": counts,
         }
 
-    #TODO
+   
     async def document_detail(self, document_id: str) -> dict[str, Any]:
-        """读取单个文档状态、原文和文本块。"""
+        """读取单个文档状态status、原文content和文本块chunks。"""
 
         rag = self.ensure_ready()
+        #读取文档状态
         status = await rag.doc_status.get_by_id(document_id)
         if not status:
             raise KeyError(f"document not found: {document_id}")
 
+        #读取完整正文
         full_doc = await rag.full_docs.get_by_id(document_id)
+        #将文档状态转换为json格式
         json_status = _to_jsonable(status)
+        #获得chunk ID
         chunks_list = json_status.get("chunks_list") or []
         chunks = []
+        #批量读取chunk内容
         if chunks_list:
             raw_chunks = await rag.text_chunks.get_by_ids(chunks_list)
             chunks = _to_jsonable(raw_chunks)
 
         return self._with_kb({
             "document_id": document_id,
-            "status": json_status,
-            "content": (full_doc or {}).get("content", ""),
+            "status": json_status, #rag.doc_status
+            "content": (full_doc or {}).get("content", ""), #rag.full_docs
             "file_path": json_status.get("file_path") or (full_doc or {}).get("file_path"),
-            "chunks": chunks,
+            "chunks": chunks, #rag.text_chunks
             "chunks_count": len(chunks),
         })
     
 
     async def job(self, job_id: str) -> dict[str, Any]:
-        """异步获取入库任务"""
+        """按照track_id(job_id)异步获取入库任务"""
         rag = self.ensure_ready()
-        docs = await rag.aget_docs_by_track_id(job_id)
+        docs = await rag.aget_docs_by_track_id(job_id) #根据track_id,查询某次批量上传任务包含的文档及其最新状态
         return {
             "job_id": job_id,
             "documents": [

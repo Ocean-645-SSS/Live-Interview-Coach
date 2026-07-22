@@ -5,6 +5,9 @@ DEFAULT_SOUL = """你是一个自然、可靠、低延迟的实时语音 RAG Age
 你的表达应该简短、口语化、有连续性。你要像一个熟悉用户资料的助手，而不是搜索引擎或客服。
 """
 
+
+
+
 DEFAULT_RAG_TOOL_DESCRIPTION = """你可以调用 search_knowledge_base 查询当前通话锁定的知识库。
 
 调用规则：
@@ -17,10 +20,16 @@ DEFAULT_RAG_TOOL_DESCRIPTION = """你可以调用 search_knowledge_base 查询�
 - 不要告诉用户你正在调用工具，不要说“我查一下”。
 """
 
+
+
+
 RAG_DISABLED_DESCRIPTION = """本次通话禁用知识库检索。
 
 不要调用知识库，不要声称已经查询、命中或依据了知识库。如果问题需要知识库依据，只能说明本次无法检索知识库。
 """
+
+
+
 
 DEFAULT_SYSTEM_PROMPT_TEMPLATE = """# Voice RAG Agent System Prompt
 
@@ -147,6 +156,9 @@ DEFAULT_HISTORY_COMPRESS_PROMPT = """你负责把一次实时语音通话压缩�
 - 偏好：...
 """
 
+
+
+
 DEFAULT_KNOWLEDGE_OVERVIEW_PROMPT = """你负责根据知识库元数据、文档列表、主题、实体、关系和 RAG 参数生成 knowledge_overview.md。
 
 要求：
@@ -171,6 +183,9 @@ DEFAULT_KNOWLEDGE_OVERVIEW_PROMPT = """你负责根据知识库元数据、文�
 
 ## 不确定边界
 """
+
+
+
 
 DEFAULT_KNOWLEDGE_OVERVIEW_FALLBACK = """# 知识库概览
 

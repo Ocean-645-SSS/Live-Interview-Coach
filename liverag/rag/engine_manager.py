@@ -32,15 +32,15 @@ class RagEngineManager:
         )
         self.kb_store=KnowledgeBaseStore(self.metadata)
         self._engines:dict[str,RagEngine]={}
-        self._locks:dict[str,asyncio.Lock]={}
+        self._locks:dict[str,asyncio.Lock]={} #防止一个engine被并发初始化多次
         self._initialized=False
 
 
     async def initialize(self):
         """初始化默认知识库，预热默认engine"""
 
-        self.kb_store.initialize()
-        await self.get_engine("default")
+        self.kb_store.initialize() #准备产品元数据数据库（四张表）+确保默认知识库存在
+        await self.get_engine("default") #预热engine：生成source/storage/logs文件库，封装LLM+Embedding，初始化LightRAG存储
         self._initialized=True
 
 
@@ -49,7 +49,7 @@ class RagEngineManager:
         engines=list(self._engines.values())
         self._engines.clear()
         if engines:
-            await asyncio.gather(*(engine.finalize() for engine in engines),return_exceptions=True)
+            await asyncio.gather(*(engine.finalize() for engine in engines),return_exceptions=True) #某个engine清除失败，不影响其他engine清除
         self._initialized=False
 
 
@@ -67,7 +67,7 @@ class RagEngineManager:
         #确认知识库存在
         self.kb_store.get(kb_id)
 
-        #关闭引擎
+        #必须先关闭引擎！防止向量库或图谱存储仍然持有文件句柄就直接删除目录，导致资源错误或残留状态
         await self.close_engine(kb_id)
 
         #删除KB
@@ -90,11 +90,12 @@ class RagEngineManager:
         不需要的情况：
         只涉及 SQLite 或 sources 原文件
         """
+
         #如果缓存中有engine，直接返回
         if kb_id in self._engines:
             return self._engines[kb_id]
         
-        #缓存中没有engine，获取kb_id对应的异步锁
+        #缓存中没有engine，获取kb_id专属的异步锁
         lock=self._locks.setdefault(kb_id,asyncio.Lock())
         async with lock:
             #双重检索
@@ -114,7 +115,8 @@ class RagEngineManager:
 
     def _settings_for(self,meta:KnowledgeBaseMeta)->RAGSettings:
         """绑定KB独立目录和workspace！！！
-        确保了Engine A.settings ≠ Engine B.settings"""
+        确保了Engine A.settings ≠ Engine B.settings
+        共享全局模型配置，隔离知识库数据"""
 
         return replace( #基于全局配置绑定新值
             self.settings,

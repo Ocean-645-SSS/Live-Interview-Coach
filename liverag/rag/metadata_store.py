@@ -450,18 +450,18 @@ class MetadataStore:
         }
 
 
-    #TODO
+  
     def list_documents(self, kb_id: str, *, page: int, page_size: int) -> dict[str, Any]:
         """分页读取知识库文档。"""
 
-        meta = self.get_knowledge_base(kb_id)
-        offset = (page - 1) * page_size
+        meta = self.get_knowledge_base(kb_id) #知识库元数据
+        offset = (page - 1) * page_size #页内偏移量
         with self._connect() as conn:
-            total = conn.execute(
+            total = conn.execute( #求出文件总数量
                 "SELECT COUNT(*) AS count FROM documents WHERE kb_id = ?",
                 (kb_id,),
             ).fetchone()["count"]
-            rows = conn.execute(
+            rows = conn.execute( #分页查询（加上知识库名称）
                 """
                 SELECT d.*, kb.name AS kb_name
                 FROM documents d

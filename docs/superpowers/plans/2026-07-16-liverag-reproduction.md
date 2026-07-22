@@ -221,10 +221,10 @@ tests/agent/
 ~/.LiveRAG/
   sessions/
     {session_id}/
-      messages.jsonl
-      rag_context.jsonl
-      runtime.json
-      session_system_prompt.md
+      messages.jsonl 用户和助手的原始消息
+      rag_context.jsonl 每次RAG查询以及evidence
+      runtime.json 会话状态
+      session_system_prompt.md 本次会话实际使用的prompt
   history/
     {kb_id}/
       history.jsonl
@@ -237,12 +237,11 @@ tests/agent/
 - `append_rag_context(session_id, record)`
 - `end_session(session_id, state)`
 
-- [ ] 测试每次通话生成独立 `session_id` 目录，不再复用全局 `session/messages.jsonl`。
-- [ ] 测试 messages 和 rag_context 使用追加式 JSONL，包含 `session_id`、`kb_id`、`turn_index`、时间和 `duration`。
-- [ ] 测试挂断只把 `runtime.json` 标记为 ended，不清空或覆盖 messages/rag_context。
-- [ ] 测试损坏的单行 JSONL 被跳过，其余审计记录仍可读取。
-- [ ] 实现保留策略元数据：默认原始 session 永久保留；M2 不运行自动清理。
-- [ ] history 记录增加 `source_session_id`，可追溯到原始 session。
+- [√] 测试每次通话生成独立 `session_id` 目录，不再复用全局 `session/messages.jsonl`。
+- [√] 测试 messages 和 rag_context 使用追加式 JSONL，包含 `session_id`、`kb_id`、`turn_index`、时间和 `duration`。
+- [√] 测试挂断只把 `runtime.json` 标记为 ended，不清空或覆盖 messages/rag_context。
+- [√] 测试损坏的单行 JSONL 被跳过，其余审计记录仍可读取。
+- [√] 实现保留策略元数据：默认原始 session 永久保留；M2 不运行自动清理。
 - [ ] 提交：`feat: preserve immutable session records`。
 
 **保留策略:** 学习阶段 `cleanup_enabled=false`。M3 可提供按明确 `session_id` 导出/删除能力；压缩失败、存在 RAG 错误或被标记用于审计的 session 永不自动删除。不得用批量递归删除命令清理 sessions。
@@ -293,6 +292,7 @@ tests/agent/
 **Produces:**
 - `HistoryCompactor.compact(session_id, kb_id) -> HistoryCompactionResult`
 
+- [ ] history 记录增加 `source_session_id`，可追溯到原始 session。
 - [ ] 挂断后读取该 session 的原始 messages、SOUL、当前 KB 最近 history 和 overview fallback。
 - [ ] Context Model 输出长期摘要时，追加到 `history/{kb_id}/history.jsonl`，记录 cursor 与 `source_session_id`。
 - [ ] 模型输出 `NO_HISTORY` 时不追加摘要，但仍保留原始 session。
