@@ -242,7 +242,7 @@ tests/agent/
 - [√] 测试挂断只把 `runtime.json` 标记为 ended，不清空或覆盖 messages/rag_context。
 - [√] 测试损坏的单行 JSONL 被跳过，其余审计记录仍可读取。
 - [√] 实现保留策略元数据：默认原始 session 永久保留；M2 不运行自动清理。
-- [ ] 提交：`feat: preserve immutable session records`。
+- [√] 提交：`feat: preserve immutable session records`。
 
 **保留策略:** 学习阶段 `cleanup_enabled=false`。M3 可提供按明确 `session_id` 导出/删除能力；压缩失败、存在 RAG 错误或被标记用于审计的 session 永不自动删除。不得用批量递归删除命令清理 sessions。
 
@@ -251,12 +251,12 @@ tests/agent/
 **Produces:**
 - `SessionPromptRenderer.render(session_id, kb_id, kb_name, rag_tool_mode)`
 
-- [ ] 从 system template、SOUL、当前 KB 最近 history、静态 overview fallback 和 RAG 工具规则渲染 prompt。
-- [ ] 将渲染结果写入当前 session 的 `session_system_prompt.md`，便于事后审计。
-- [ ] 测试 `auto` 暴露工具说明，`never` 不暴露工具。
-- [ ] 测试通话开始后即使 SOUL/history 改变，本次 session prompt 也保持不变。
-- [ ] M2 不生成 Knowledge Overview；缺失时使用稳定降级文本，自动生成留到 M3。
-- [ ] 提交：`feat: render auditable session prompts`。
+- [√] 从 system template、SOUL、当前 KB 最近 history、静态 overview fallback 和 RAG 工具规则渲染 prompt。
+- [√] 将渲染结果写入当前 session 的 `session_system_prompt.md`，便于事后审计。
+- [√] 测试 `auto` 暴露工具说明，`never` 不暴露工具。
+- [√] 测试通话开始后即使 SOUL/history 改变，本次 session prompt 也保持不变。
+- [√] M2 不生成 Knowledge Overview；缺失时使用稳定降级文本，自动生成留到 M3。
+- [√] 提交：`feat: render auditable session prompts`。
 
 ## M2 工作包 C：RagClient 与 ContextManager
 

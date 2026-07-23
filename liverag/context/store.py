@@ -1,4 +1,5 @@
-"""提示词、会话、历史、知识库上下文文件存储"""
+"""提示词、会话、历史、知识库上下文文件存储
+数据读写"""
 
 import json
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ from typing import Any, Literal
 
 from liverag.context.defaults import (
     DEFAULT_HISTORY_COMPRESS_PROMPT,
+    DEFAULT_KNOWLEDGE_OVERVIEW_FALLBACK,
     DEFAULT_KNOWLEDGE_OVERVIEW_PROMPT,
     DEFAULT_SOUL,
     DEFAULT_SYSTEM_PROMPT_TEMPLATE,
@@ -130,6 +132,65 @@ class ContextStore:
 
         self.paths.soul_file.write_text(content.rstrip() + "\n", encoding="utf-8")
 
+    def read_knowledge_overview(self,kb_id:str)->str:
+            """读取指定知识库固定概览"""
+    
+            self.ensure_knowledge_overview_default(kb_id)
+
+            #防止文件存在但是内容为空
+            content = self._read_text(self._overview_file(kb_id),"")
+            if content.strip():
+                return content
+            return DEFAULT_KNOWLEDGE_OVERVIEW_FALLBACK.rstrip()+"\n"
+    
+    def ensure_knowledge_overview_default(self,kb_id:str)->None:
+        """确保指定知识库至少有默认概览文件"""
+
+        if self._overview_file(kb_id).is_file():
+            return
+        self.write_knowledge_overview(
+            kb_id,
+            DEFAULT_KNOWLEDGE_OVERVIEW_FALLBACK,
+            stale=True,
+            reason="default_created",
+            source="default",
+        )
+
+    def write_knowledge_overview(
+        self,
+        kb_id:str,
+        content:str,
+        *,
+        stale:bool, #概览是否过期
+        reason: str | None = None, #解释为什么stale？
+        source: str = "context_model", #概览来源：默认上下文模型生成
+        source_job_id: str | None = None, #哪一次后台任务生成了概览
+        raw_overview: dict[str, Any] | None = None,
+    )->None:
+        """写入指定知识库概览和元数据（状态和来源）"""
+
+        #写入概览
+        self._overview_file(kb_id).write_text(content.rstrip()+"\n",encoding="utf-8")
+
+        #写入元数据
+        self._overview_meta_file(kb_id).write_text(
+            json.dumps(
+                        {
+                            "kb_id": kb_id,
+                            "updated_at": self._now_iso(),
+                            "stale": stale,
+                            "reason": reason,
+                            "source": source,
+                            "source_job_id": source_job_id,
+                            "raw_summary": self._raw_overview_summary(raw_overview),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+        )
+
     def read_history_compress_prompt(self) -> str:
         """读取通话历史压缩提示词。"""
 
@@ -170,6 +231,31 @@ class ContextStore:
             content.rstrip() + "\n", encoding="utf-8"
         )
 
+    def lock_session_system_prompt(self,session_id:str,content:str)->str:
+            """将渲染结果首次写入当前session的SessionSystemPrompt，已锁定时不覆盖"""
+    
+            safe_session_id=self._safe_session_id(session_id)
+    
+            #确认session_id已经通过start_session初始化
+            self._session_kb_id(safe_session_id)
+
+            #保证了只写一次，不覆盖
+            #只要session_system_prompt.md非空，直接返回初始prompt,不重写
+            existing=self.read_session_system_prompt(safe_session_id)
+            if existing.strip():
+                return existing
+
+            #不存在prompt，检查并且写入content
+            prompt=content.rstrip() #删除末尾的空格换行
+            if not prompt:
+                raise ValueError("session system prompt不能为空！")
+    
+            locked_prompt=prompt+"\n" #统一加一个换行符
+            prompt_file=self._session_paths(safe_session_id).system_prompt_file
+            prompt_file.write_text(locked_prompt,encoding="utf-8")
+    
+            return locked_prompt
+    
     def append_message(
         self,
         *,
@@ -284,6 +370,15 @@ class ContextStore:
 
         return items
 
+    def read_recent_history(self, kb_id:str,limit:int=20)->list[dict[str,Any]]:
+        """读取指定知识库最近limit条历史记录"""
+
+        if isinstance(limit,bool) or not isinstance(limit,int) or limit<=0:
+            raise ValueError("limit不能为负数！")
+
+        records=self._read_jsonl(self._history_file(kb_id))
+        return records[-limit:]
+
     def read_runtime_state(self, session_id: str) -> dict[str, Any]:
         """读取当前运行状态"""
 
@@ -306,6 +401,31 @@ class ContextStore:
             json.dumps(state, indent=2, ensure_ascii=False),  # 写入状态
             encoding="utf-8",
         )
+
+    def _context_kb_dir(self, kb_id: str) -> Path:
+            directory = self.paths.context_dir / self._safe_kb_id(kb_id)
+            directory.mkdir(parents=True, exist_ok=True)
+            return directory
+    
+    def _overview_file(self,kb_id: str) -> Path:
+        """返回指定知识库概览文件路径"""
+
+        return self._context_kb_dir(kb_id) / "knowledge_overview.md"
+
+    def _overview_meta_file(self, kb_id: str) -> Path:
+        """返回指定知识库概览元数据文件"""
+
+        return self._context_kb_dir(kb_id) / "knowledge_overview_meta.json"
+
+    def _history_kb_dir(self, kb_id: str) -> Path:
+            directory = self.paths.history_dir / self._safe_kb_id(kb_id)
+            directory.mkdir(parents=True, exist_ok=True)
+            return directory
+    
+    def _history_file(self, kb_id: str) -> Path:
+        """返回指定知识库的长期历史文件路径。"""
+
+        return self._history_kb_dir(kb_id) / "history.jsonl"
 
     def _session_dir(self, session_id: str) -> Path:
         """获取安全的session_id,拼接路径
@@ -432,6 +552,15 @@ class ContextStore:
             "kb_name": record.get("kb_name"),
         }
 
+    @staticmethod
+    def _raw_overview_summary(raw_overview:dict[str,Any] | None)->dict[str,Any]:
+        """提取原始overview中的summary数据"""
+
+        if not isinstance(raw_overview,dict):
+            return {}
+        summary=raw_overview.get("summary")
+        return summary if isinstance(summary,dict) else {}
+    
     @staticmethod
     def _ensure_text_file(path: Path, default: str) -> None:
         """确保指定文本文件存在"""

@@ -1,10 +1,12 @@
 """统一读取 LiveRAG Agent 配置文件。"""
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+RagToolMode = Literal["auto", "never"]
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(

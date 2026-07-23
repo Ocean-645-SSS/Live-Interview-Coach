@@ -199,3 +199,37 @@ def test_audit_records_require_an_initialized_session(store: ContextStore) -> No
             {"turn_index": 1, "duration": 0.1},
         )
 
+
+def test_global_prompt_files_can_be_read_and_written_independently(
+    store: ContextStore,
+) -> None:
+    original_soul = store.read_soul()
+
+    store.write_system_prompt_template("新的系统模板")
+    store.write_history_compress_prompt("新的历史压缩提示词")
+    store.write_knowledge_overview_prompt("新的知识库概览提示词")
+
+    assert store.read_system_prompt_template() == "新的系统模板\n"
+    assert store.read_history_compress_prompt() == "新的历史压缩提示词\n"
+    assert store.read_knowledge_overview_prompt() == "新的知识库概览提示词\n"
+    assert store.read_soul() == original_soul
+
+    store.write_soul("新的人格设定")
+
+    assert store.read_soul() == "新的人格设定\n"
+    assert store.read_system_prompt_template() == "新的系统模板\n"
+
+
+def test_session_system_prompts_are_isolated_from_global_template(
+    store: ContextStore,
+) -> None:
+    store.start_session("session-one", "kb-one")
+    store.start_session("session-two", "kb-two")
+    global_template = store.read_system_prompt_template()
+
+    store.write_session_system_prompt("session-one", "会话一提示词")
+    store.write_session_system_prompt("session-two", "会话二提示词")
+
+    assert store.read_session_system_prompt("session-one") == "会话一提示词\n"
+    assert store.read_session_system_prompt("session-two") == "会话二提示词\n"
+    assert store.read_system_prompt_template() == global_template
