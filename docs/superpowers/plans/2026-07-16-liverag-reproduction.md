@@ -264,12 +264,12 @@ tests/agent/
 - `RagClient.query(query, kb_id, session_id, turn_index) -> RagQueryResult`
 - `ContextManager.search_knowledge_base(query, turn_index)`
 
-- [ ] 用 fake HTTP 服务测试超时、4xx、5xx、无命中和正常 evidence。
-- [ ] RagClient 只访问显式 `kb_id` 的 M1 查询路径，不维护 TTL cache。
-- [ ] 将 request_id、query、hit、has_context、evidence documents/chunks、error、duration 写入当前 session 的 `rag_context.jsonl`。
+- [√] 用 fake HTTP 服务测试超时、4xx、5xx、无命中和正常 evidence。
+- [√] RagClient 只访问显式 `kb_id` 的 M1 查询路径，不维护 TTL cache。
+- [√] 将 request_id、query、hit、has_context、evidence documents/metrics 写入当前 session 的 `rag_context.jsonl`。
 - [ ] 测试 user message、一次或多次 RAG 调用、assistant message 可通过相同 `turn_index` 聚合。
-- [ ] 无命中或超时时返回稳定工具结果，明确告诉 LLM 不得伪造知识库依据。
-- [ ] `never` 模式不注册知识库工具，也不产生伪造的查询记录。
+- [√] 无命中或超时时返回稳定工具结果，明确告诉 LLM 不得伪造知识库依据。
+- [√] `never` 模式不注册知识库工具，也不产生伪造的查询记录。
 - [ ] 提交：`feat: connect agent context to rag evidence`。
 
 ## M2 工作包 D：最小 LiveKit Agent
