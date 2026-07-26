@@ -233,3 +233,78 @@ def test_session_system_prompts_are_isolated_from_global_template(
     assert store.read_session_system_prompt("session-one") == "会话一提示词\n"
     assert store.read_session_system_prompt("session-two") == "会话二提示词\n"
     assert store.read_system_prompt_template() == global_template
+
+
+def test_append_history_persists_traceability_cursor_and_kb_isolation(
+    store: ContextStore,
+) -> None:
+    first = store.append_history(
+        kb_id="kb-one",
+        content="  第一条长期摘要  ",
+        source_session_id="session-1",
+    )
+    second = store.append_history(
+        kb_id="kb-one",
+        content="第二条长期摘要",
+        source_session_id="session-2",
+    )
+    other = store.append_history(
+        kb_id="kb-two",
+        content="另一个知识库的摘要",
+        source_session_id="session-3",
+    )
+
+    assert first["cursor"] == 1
+    assert first["content"] == "第一条长期摘要"
+    assert first["source_session_id"] == "session-1"
+    assert isinstance(first["timestamp"], str) and first["timestamp"]
+    assert second["cursor"] == 2
+    assert second["source_session_id"] == "session-2"
+    assert other["cursor"] == 1
+    assert store.read_recent_history("kb-one", limit=10) == [first, second]
+    assert store.read_recent_history("kb-two", limit=10) == [other]
+
+
+def test_append_history_rejects_empty_content(store: ContextStore) -> None:
+    with pytest.raises(ValueError, match="history content"):
+        store.append_history(
+            kb_id="kb-one",
+            content=" \n ",
+            source_session_id="session-1",
+        )
+
+    assert store.read_recent_history("kb-one", limit=10) == []
+
+
+def test_history_cursor_recovers_from_existing_jsonl(
+    store: ContextStore,
+) -> None:
+    directory = store.paths.history_dir / "kb-one"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "history.jsonl").write_text(
+        '{"cursor": 4, "content": "existing", "source_session_id": "old"}\n',
+        encoding="utf-8",
+    )
+
+    record = store.append_history(
+        kb_id="kb-one",
+        content="new",
+        source_session_id="session-new",
+    )
+
+    assert record["cursor"] == 5
+
+
+def test_clear_history_removes_records_and_restarts_cursor(
+    store: ContextStore,
+) -> None:
+    store.append_history("kb-one", "第一条", "session-1")
+    store.append_history("kb-one", "第二条", "session-2")
+    store.append_history("kb-two", "其他库记录", "session-other")
+
+    store.clear_history("kb-one")
+
+    assert store.read_recent_history("kb-one", limit=10) == []
+    assert store.read_recent_history("kb-two", limit=10)[0]["content"] == "其他库记录"
+    record = store.append_history("kb-one", "清空后的记录", "session-3")
+    assert record["cursor"] == 1

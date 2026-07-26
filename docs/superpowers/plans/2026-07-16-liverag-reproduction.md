@@ -283,21 +283,21 @@ tests/agent/
 - [√] 创建 session 存档、渲染固定 prompt、连接房间并启动 AgentSession。
 - [√] user committed 时追加原始 user message；assistant committed 时追加原始 assistant message。
 - [√] 保持当前 STT/LLM/TTS/VAD/打断/endpointing 的最小可用参数，不在 M2 做性能优化。
-- [ ] 开发环境分别运行 LiveKit Server、RAG Core、Agent 三个进程。
-- [ ] 提交：`feat: add minimal livekit rag agent`。
+- [√] 开发环境分别运行 LiveKit Server、RAG Core、Agent 三个进程。
+- [√] 提交：`feat: add minimal livekit rag agent`。
 
 ## M2 工作包 E：HistoryCompactor
 
 **Produces:**
 - `HistoryCompactor.compact(session_id, kb_id) -> HistoryCompactionResult`
 
-- [ ] history 记录增加 `source_session_id`，可追溯到原始 session。
-- [ ] 挂断后读取该 session 的原始 messages、SOUL、当前 KB 最近 history 和 overview fallback。
-- [ ] Context Model 输出长期摘要时，追加到 `history/{kb_id}/history.jsonl`，记录 cursor 与 `source_session_id`。
-- [ ] 模型输出 `NO_HISTORY` 时不追加摘要，但仍保留原始 session。
-- [ ] 压缩失败时把错误写入该 session 的 `runtime.json`，不得删除原始 session，也不得阻断下一通会话。
-- [ ] 下一次同 KB 会话的 SessionPromptRenderer 读取最近 history；不同 KB 不可读取该摘要。
-- [ ] 提交：`feat: compact sessions without deleting originals`。
+- [√] history 记录增加 `source_session_id`，可追溯到原始 session。
+- [√] 挂断后读取该 session 的原始 messages、SOUL、当前 KB 最近 history 和 overview fallback。
+- [√] Context Model 输出长期摘要时，追加到 `history/{kb_id}/history.jsonl`，记录 cursor 与 `source_session_id`。
+- [√] 模型输出 `NO_HISTORY` 时不追加摘要，但仍保留原始 session。
+- [√] 压缩失败时把错误写入该 session 的 `runtime.json`，不得删除原始 session，也不得阻断下一通会话。
+- [√] 下一次同 KB 会话的 SessionPromptRenderer 读取最近 history；不同 KB 不可读取该摘要。
+- [√] 提交：`feat: compact sessions without deleting originals`。
 
 ## M2 验收标准
 

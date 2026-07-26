@@ -97,6 +97,8 @@ def install_job_dependencies(
     *,
     ready: bool = True,
     fail_start: bool = False,
+    history_result: dict[str, Any] | None = None,
+    history_error: Exception | None = None,
 ) -> SimpleNamespace:
     """替换所有外部依赖，让 my_agent() 完全在内存中执行。"""
 
@@ -166,7 +168,9 @@ def install_job_dependencies(
 
         async def compact_after_call(self, **kwargs: Any) -> dict[str, Any]:
             history_calls.append(kwargs)
-            return {"updated": True}
+            if history_error is not None:
+                raise history_error
+            return history_result or {"updated": True, "reason": "appended"}
 
     monkeypatch.setattr(main, "MetadataStore", FakeMetadataStore)
     monkeypatch.setattr(main, "_resolve_knowledge_base", resolve_knowledge_base)
@@ -220,6 +224,89 @@ async def test_agent_job_starts_and_finalizes_one_session(
     ]
     assert dependencies.store.ended == [("job-id", "ended")]
     assert dependencies.store.runtime["job-id"]["state"] == "ended"
+    assert dependencies.store.runtime["job-id"]["history_compaction"] == {
+        "updated": True,
+        "reason": "appended",
+    }
+    assert (
+        "session.finalized",
+        {
+            "session_id": "job-id",
+            "result": {"updated": True, "reason": "appended"},
+            "reason": "normal shutdown",
+        },
+    ) in dependencies.events
+
+
+@pytest.mark.asyncio
+async def test_agent_job_persists_non_updated_history_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """NO_HISTORY 等非异常结果也必须写入 runtime 并记录完成事件。"""
+
+    result = {
+        "updated": False,
+        "reason": "no_history_value",
+        "message_count": 2,
+        "session_truncated": False,
+    }
+    dependencies = install_job_dependencies(
+        monkeypatch,
+        tmp_path,
+        history_result=result,
+    )
+    ctx = FakeJobContext()
+
+    await main.my_agent(ctx)
+    await ctx.shutdown_callbacks[0]("normal shutdown")
+
+    assert dependencies.store.runtime["job-id"]["history_compaction"] == result
+    assert dependencies.store.runtime["job-id"]["state"] == "ended"
+    assert dependencies.store.ended == [("job-id", "ended")]
+    assert (
+        "session.finalized",
+        {
+            "session_id": "job-id",
+            "result": result,
+            "reason": "normal shutdown",
+        },
+    ) in dependencies.events
+
+
+@pytest.mark.asyncio
+async def test_agent_job_records_unexpected_history_compaction_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """未被 compactor 捕获的异常不得阻止 session 正常结束。"""
+
+    dependencies = install_job_dependencies(
+        monkeypatch,
+        tmp_path,
+        history_error=RuntimeError("unexpected compactor failure"),
+    )
+    ctx = FakeJobContext()
+
+    await main.my_agent(ctx)
+    await ctx.shutdown_callbacks[0]("room disconnected")
+
+    expected = {
+        "updated": False,
+        "reason": "history_compaction_failed",
+        "error": "RuntimeError: unexpected compactor failure",
+    }
+    assert dependencies.store.runtime["job-id"]["history_compaction"] == expected
+    assert dependencies.store.runtime["job-id"]["state"] == "ended"
+    assert dependencies.store.ended == [("job-id", "ended")]
+    assert (
+        "session.finalized",
+        {
+            "session_id": "job-id",
+            "result": expected,
+            "reason": "room disconnected",
+        },
+    ) in dependencies.events
 
 
 @pytest.mark.asyncio
@@ -264,4 +351,3 @@ async def test_agent_job_marks_session_failed_when_start_raises(
     assert dependencies.store.started == [("job-id", "kb-1")]
     assert dependencies.store.ended == [("job-id", "failed")]
     assert dependencies.store.runtime["job-id"]["state"] == "failed"
-

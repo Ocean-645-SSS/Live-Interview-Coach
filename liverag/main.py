@@ -28,7 +28,7 @@ from liverag.agent.providers import build_agent_session
 from liverag.agent.tool.rag_client import RagClient
 from liverag.agent.metrics_hooks import MetricsState,register_session_metrics_hooks,start_network_probe_task
 from liverag.rag.metadata_store import MetadataStore
-from liverag.rag.service import wait_for_rag_ready,start_embedded_rag_service
+from liverag.rag.service import wait_for_rag_ready
 from liverag.config.settings import load_environment,load_app_settings,AppSettings,public_voice_config
 from liverag.context.store import ContextStore
 from liverag.context.renderer import SessionPromptRenderer
@@ -214,7 +214,21 @@ async def my_agent(ctx:JobContext)->None:   #ctx:本次通话在哪个房间
                     kb_id=knowledge_base["kb_id"],
                     kb_name=knowledge_base["name"],
                 )
-            
+            except Exception as exc:
+                #压缩失败
+                history_result = {
+                    "updated": False,
+                    "reason": "history_compaction_failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+
+            try:
+                #将history压缩结果写入本次session的runtime.json
+                state=store.read_runtime_state(session_id)
+                state["history_compaction"]=history_result
+                store.write_runtime_state(session_id,state=state)
+
+                #记录history压缩完成日志
                 event_logger.append(
                     "session.finalized",
                     {

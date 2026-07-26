@@ -63,6 +63,7 @@ class HistoryCompactor:
             )
             #清理代码块包裹
             content=self._clean_model_text(response.choices[0].message.content or "")
+            #如果是NO_HISTORY，不追加记录
             if not content or content.strip().upper()=="NO_HISTORY":
                 return {
                     "updated": False,
@@ -71,7 +72,7 @@ class HistoryCompactor:
                     "session_truncated": truncated,
                 }
             #把记录添加到history.jsonl
-            record=self.store.append_history(kb_id=kb_id, content=content)
+            record=self.store.append_history(kb_id=kb_id, content=content,source_session_id=session_id)
             return {
                 "updated": True,
                 "reason": "appended",
