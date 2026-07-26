@@ -191,6 +191,20 @@ class ContextStore:
                     encoding="utf-8",
         )
 
+    def read_knowledge_overview_meta(self,kb_id:str)->dict[str, Any]:
+        """读取指定知识库的元数据"""
+
+        #确保至少有默认知识库
+        self.ensure_knowledge_overview_default(kb_id) 
+
+        try:
+            data=json.loads(self._overview_meta_file(kb_id).read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {"kb_id": kb_id, "stale": True, "reason": "missing"}
+
+        return data if isinstance(data, dict) else {"kb_id": kb_id, "stale": True, "reason": "invalid"}
+
+
     def read_history_compress_prompt(self) -> str:
         """读取通话历史压缩提示词。"""
 
@@ -266,7 +280,8 @@ class ContextStore:
         metadata: dict[str, Any] | None = None,
         duration: float | None = None,
     ) -> None:
-        """追加当前通话消息"""
+        """追加当前通话消息，
+        写入到~/.LiveRAG/sessions/{session_id}/messages.jsonl"""
 
         text = content.strip()
         if not text:
@@ -379,6 +394,38 @@ class ContextStore:
         records=self._read_jsonl(self._history_file(kb_id))
         return records[-limit:]
 
+    def append_history(self,kb_id:str,content:str)->dict[str,Any]:
+        """增加一条历史记录"""
+
+        texts=content.strip()
+        if not texts:
+            raise ValueError("history content can not be empty!")
+        cursor=self._next_history_cursor(kb_id)
+        record={
+            "cursor":cursor,
+            "timestamp":datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "content":texts,
+        }
+        self._append_jsonl(self._history_file(kb_id),record)
+        return record
+
+    def _next_history_cursor(self, kb_id: str) -> int:
+        """为知识库生成下一条历史记录的递增编号，并且把最新编号保存到.cursor文件中"""
+
+        path = self._history_kb_dir(kb_id) / ".cursor"
+        try:
+            cursor = int(path.read_text(encoding="utf-8").strip() or "0")
+        except (FileNotFoundError, ValueError):
+            cursor = self._infer_history_cursor(kb_id)
+        cursor += 1
+        path.write_text(f"{cursor}\n", encoding="utf-8")
+        return cursor
+
+    def _infer_history_cursor(self, kb_id: str) -> int:
+        """从历史消息记录中推断出下一个cursor编号"""
+        cursors = [int(item.get("cursor") or 0) for item in self.read_recent_history(kb_id) if str(item.get("cursor") or "").isdigit()]
+        return max(cursors, default=0)
+    
     def read_runtime_state(self, session_id: str) -> dict[str, Any]:
         """读取当前运行状态"""
 

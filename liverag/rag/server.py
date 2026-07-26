@@ -22,6 +22,7 @@ from liverag.rag.engine import RagEngineError, RagQueryTimeoutError
 from liverag.rag.engine_manager import RagEngineManager
 from liverag.rag.rag_settings import RAGSettings
 from liverag.rag.schemas import Envelope, QueryRequest
+from liverag.rag.metadata_store import DEFAULT_KB_ID,DEFAULT_KB_NAME
 
 settings=RAGSettings()
 manager=RagEngineManager(settings)
@@ -233,6 +234,34 @@ async def create_knowledge_base(request:KnowledgeBaseCreateRequest)->dict[str,An
         request_id=request_id,
         data=manager.kb_store.public_detail(meta.kb_id),
     )
+
+
+@app.delete("/v1/knowledge-bases/{kb_id}",dependencies=[Depends(require_api_key)])
+async def delete_knowledge_base(kb_id:str)->dict[str,Any]:
+    """删除知识库"""
+
+    request_id=str(uuid.uuid4())
+    if kb_id == DEFAULT_KB_ID:
+        raise HTTPException(status_code=409, detail="default knowledge base cannot be deleted")
+    try:
+        await manager.delete_knowledge_base(kb_id)
+        return envelope(request_id=request_id,data={"deleted": True, "kb_id": kb_id})
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/v1/knowledge-bases/{kb_id}/ready", dependencies=[Depends(require_api_key)])
+async def knowledge_base_ready(kb_id:str)->dict[str,Any]:
+    """预热知识库，并返回知识库ready状态"""
+
+    request_id=str(uuid.uuid4())
+    try:
+        engine=await manager.get_engine(kb_id)
+        return envelope(request_id=request_id,data=engine.ready_state())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/v1/knowledge-bases/{kb_id}",dependencies=[Depends(require_api_key)])

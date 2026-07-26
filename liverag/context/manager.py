@@ -63,6 +63,30 @@ class ContextManager:
         self._last_rag_query = ""  #最近一次真正提交给RAG的查询
 
 
+    def record_user_message(self,*,content:str,turn_index:int)->None:
+        """当LiveKit确认用户这一轮的最终语音转写后，保存原始用户消息、维护追问上下文，
+        并更新当前session的运行状态"""
+
+        query=content.strip()
+        if not query:
+            return
+
+        if query!=self._last_user_text:
+            self._previous_user_text=self._last_user_text
+        self._last_user_text=query
+
+        #保存原始用户消息
+        self.rag_client.store.append_message(
+            session_id=self.session_id,
+            role="user",
+            content=query,
+            turn_index=turn_index
+        )
+
+        #写入当前session运行状态
+        self._write_runtime_state(turn_index=turn_index,rag_result=None)
+
+
     async def query_knowledge_base(
         self,
         *,
@@ -112,7 +136,65 @@ class ContextManager:
         #转换为Agent可用的工具相应
         return result.to_tool_payload()
 
-    
+
+    def record_assistant_message(self,*,content:str,turn_index:int):
+        """在助手的一轮回答生成之后，将回答原文写入messages.jsonl，
+        同时记录回答长度和该轮是否查询过RAG，并更新runtime.json中的最近回答记录"""
+
+        #计算回答字符数
+        char_count=len(content.strip())
+
+        #查询当前轮RAG记录
+        rag_records=[item for item in self.rag_client.store.read_rag_context(self.session_id)
+                     if item.get("turn_index")==turn_index] #限制条件：必须是同一轮对话
+
+        #判断当前是否调用过RAG
+        rag_queried=bool(rag_records)
+        rag_hit=any(item.get("hit") is True and item.get("has_context") is True
+                    for item in rag_records)
+        rag_failed=any(item.get("error") is not None for item in rag_records)
+
+        #判断回答是否太长了
+        too_long=char_count>180
+
+        #生成metadata
+        metadata={
+            "char_count":char_count,
+            "tts_text_chars":char_count,  #预计传给TTS的长度
+            "tts_text_chars_source":"assistant_text",
+            "too_long":too_long,
+            "rag_queried":rag_queried,
+            "rag_hit":rag_hit,
+            "rag_failed":rag_failed,
+            "rag_tool_mode":self.rag_client.settings.rag_tool_mode
+        }
+
+        #保存原始assistant消息
+        self.rag_client.store.append_message(
+            session_id=self.session_id,
+            role="assistant",
+            content=content,
+            turn_index=turn_index,
+            metadata=metadata,
+        )
+
+        #更新运行状态
+        state=self.rag_client.store.read_runtime_state(self.session_id)
+        state.update(
+            {
+            "last_assistant_chars": char_count,
+            "last_tts_text_chars": char_count,
+            "last_tts_text_chars_source": "assistant_text",
+            "last_answer_too_long": too_long,
+            "last_answer_rag_queried": rag_queried,
+            "last_answer_rag_hit":rag_hit,
+            "last_answer_rag_failed":rag_failed,
+            "rag_tool_mode": self.rag_client.settings.rag_tool_mode,
+            }
+        )
+        self.rag_client.store.write_runtime_state(session_id=self.session_id,state=state)
+
+
     def _build_rag_query(self,user_text:str):
         """为短追问补充上一轮内容"""
 
@@ -139,7 +221,7 @@ class ContextManager:
 
 
     def _write_runtime_state(self,*,turn_index:int,rag_result:RagQueryResult|None) -> None:
-        """写入运行状态，方便前端排查错误"""
+        """封装user/RAG字段，写入运行状态，方便前端排查错误"""
 
         #获取ContextState
         state=self.rag_client.store.read_runtime_state(self.session_id)

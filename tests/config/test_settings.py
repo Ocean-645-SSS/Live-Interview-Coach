@@ -7,7 +7,11 @@
 import pytest
 from pydantic import ValidationError
 
-from liverag.config.settings import Settings
+from liverag.config.settings import (
+    Settings,
+    VoiceSettings,
+    load_voice_settings,
+)
 
 MODEL_ENV = {
     "LIVERAG_RAG_LLM_MODEL": "qwen-plus",
@@ -94,3 +98,76 @@ def test_settings_is_frozen(monkeypatch):
 
     with pytest.raises(ValidationError, match="frozen"):
         settings.rag_port = 1234
+
+
+def test_voice_settings_use_dashscope_defaults(monkeypatch, tmp_path):
+    """未配置 TTS 字段时固定使用 DashScope 实时 TTS 默认值。"""
+
+    for name in (
+        "VOICE_TTS_PROVIDER",
+        "VOICE_TTS_MODEL",
+        "VOICE_TTS_VOICE",
+        "VOICE_TTS_API_KEY",
+        "VOICE_TTS_BASE_URL",
+        "DASHSCOPE_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = load_voice_settings(tmp_path)
+
+    assert settings.tts_provider == "dashscope_realtime"
+    assert settings.tts_model == "qwen3-tts-flash-realtime"
+    assert settings.tts_voice == "Cherry"
+    assert settings.tts_api_key == ""
+    assert settings.tts_base_url == "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+
+
+def test_voice_settings_read_dashscope_environment(monkeypatch, tmp_path):
+    """DashScope 模型、音色、密钥和地址可由环境变量覆盖。"""
+
+    monkeypatch.setenv("VOICE_TTS_MODEL", "custom-tts-model")
+    monkeypatch.setenv("VOICE_TTS_VOICE", "Serena")
+    monkeypatch.setenv("VOICE_TTS_API_KEY", "tts-secret")
+    monkeypatch.setenv("VOICE_TTS_BASE_URL", "wss://tts.example/ws/")
+
+    settings = load_voice_settings(tmp_path)
+
+    assert settings.tts_provider == "dashscope_realtime"
+    assert settings.tts_model == "custom-tts-model"
+    assert settings.tts_voice == "Serena"
+    assert settings.tts_api_key == "tts-secret"
+    assert settings.tts_base_url == "wss://tts.example/ws"
+
+
+def test_voice_settings_fall_back_to_dashscope_api_key(monkeypatch, tmp_path):
+    """未提供专用 TTS 密钥时复用 DASHSCOPE_API_KEY。"""
+
+    monkeypatch.delenv("VOICE_TTS_API_KEY", raising=False)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "shared-secret")
+
+    settings = load_voice_settings(tmp_path)
+
+    assert settings.tts_api_key == "shared-secret"
+
+
+def test_voice_settings_reject_runtime_minimax_provider(tmp_path):
+    """运行时配置不能把仅支持 DashScope 的链路切换到 MiniMax。"""
+
+    config_file = tmp_path / "model" / "config.json"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text(
+        '{"voice":{"tts":{"provider":"minimax"}}}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="只支持 DashScope TTS"):
+        load_voice_settings(tmp_path)
+
+
+def test_voice_settings_is_frozen():
+    """单次会话的语音配置创建后不可热修改。"""
+
+    settings = VoiceSettings()
+
+    with pytest.raises((AttributeError, ValidationError)):
+        settings.tts_voice = "Serena"

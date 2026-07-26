@@ -1,4 +1,5 @@
 """LiveRAG 元数据存储模块，提供用于管理知识库和文档的元数据存储功能。"""
+import json
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -721,7 +722,38 @@ class MetadataStore:
             return payload
 
 
+    def get_session_config(self,key:str)->dict[str,Any]:
+        """读取JSON会话配置"""
 
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT value_json FROM session_config WHERE key = ?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return {}
+        try:
+            config=json.loads(row["value_json"])
+        except json.JSONDecodeError:
+            return {}
+        return config if isinstance(config, dict) else {}
+
+
+    def set_session_config(self,key:str,value:dict[str,Any]) -> None:
+        """写入JSON会话配置"""
+
+        now=utc_now_iso()
+        raw=json.dumps(value, ensure_ascii=False)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO session_config(key, value_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                                    updated_at = excluded.updated_at
+                """,
+                (key, raw, now),
+            )
 
 
     def _connect(self):

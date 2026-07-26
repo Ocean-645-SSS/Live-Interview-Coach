@@ -186,6 +186,21 @@ class RagEngine:
             raise RuntimeError("当前LigthRAG尚未初始化")
         return self.rag
 
+    def ready_state(self) -> dict[str, Any]:
+            return {
+                "initialized": self.rag is not None,
+                "provider_configured": self.settings.provider_ready(),
+                "llm_model": self.settings.llm_model,
+                "embedding_model": self.settings.embedding_model,
+                "embedding_dim": self.settings.embedding_dim,
+                "working_dir": self.settings.absolute_working_dir,
+                "user_data_dir": self.settings.absolute_user_data_dir,
+                "upload_dir": self.settings.absolute_upload_dir,
+                "workspace": self.settings.workspace,
+                "kb_id": self.settings.kb_id,
+                "kb_name": self.settings.kb_name,
+            }
+    
     async def finalize(self):
         """释放LiveRAG存储资源"""
         for task in list(self._background_jobs):

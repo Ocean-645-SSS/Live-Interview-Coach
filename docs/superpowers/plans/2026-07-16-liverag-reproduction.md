@@ -267,10 +267,10 @@ tests/agent/
 - [√] 用 fake HTTP 服务测试超时、4xx、5xx、无命中和正常 evidence。
 - [√] RagClient 只访问显式 `kb_id` 的 M1 查询路径，不维护 TTL cache。
 - [√] 将 request_id、query、hit、has_context、evidence documents/metrics 写入当前 session 的 `rag_context.jsonl`。
-- [ ] 测试 user message、一次或多次 RAG 调用、assistant message 可通过相同 `turn_index` 聚合。
+- [√] 测试 user message、一次或多次 RAG 调用、assistant message 可通过相同 `turn_index` 聚合。
 - [√] 无命中或超时时返回稳定工具结果，明确告诉 LLM 不得伪造知识库依据。
 - [√] `never` 模式不注册知识库工具，也不产生伪造的查询记录。
-- [ ] 提交：`feat: connect agent context to rag evidence`。
+- [√] 提交：`feat: connect agent context to rag evidence`。
 
 ## M2 工作包 D：最小 LiveKit Agent
 
@@ -278,12 +278,11 @@ tests/agent/
 - `build_agent_session(settings) -> AgentSession`
 - LiveKit worker entry：`uv run python -m liverag.main dev`
 
-- [ ] 先用 fake STT/LLM/TTS 测试消息、工具和挂断顺序，再接真实在线 provider。
-- [ ] 启动时解析单个 `kb_id`，调用 `wait_for_rag_ready()`；未就绪时报错退出，不启动 RAG 子进程。
-- [ ] 创建 session 存档、渲染固定 prompt、连接房间并启动 AgentSession。
-- [ ] user committed 时追加原始 user message；assistant committed 时追加原始 assistant message。
-- [ ] 仅记录基础字段 `session_id/kb_id/turn_index/duration`，不实现完整 metrics hooks。
-- [ ] 保持当前 STT/LLM/TTS/VAD/打断/endpointing 的最小可用参数，不在 M2 做性能优化。
+- [√] 先用 fake STT/LLM/TTS 测试消息、工具和挂断顺序，再接真实在线 provider。
+- [√] 启动时解析单个 kb_id，调用 wait_for_rag_ready()；RAG 未启动时按源项目逻辑启动内置服务，最终未就绪则报错退出。
+- [√] 创建 session 存档、渲染固定 prompt、连接房间并启动 AgentSession。
+- [√] user committed 时追加原始 user message；assistant committed 时追加原始 assistant message。
+- [√] 保持当前 STT/LLM/TTS/VAD/打断/endpointing 的最小可用参数，不在 M2 做性能优化。
 - [ ] 开发环境分别运行 LiveKit Server、RAG Core、Agent 三个进程。
 - [ ] 提交：`feat: add minimal livekit rag agent`。
 
