@@ -1,6 +1,10 @@
-"""通话开始前，把系统模版、soul、history、知识库概览和rag规则
-组合为一份固定的渲染SessionSystemPrompt
-属于业务组合"""
+"""通话开始前，把系统模版、soul、history、知识库overview和rag规则组合为一份固定的渲染SessionSystemPrompt
+
+SessionPromptRenderer 在会话开始时读取系统模板、SOUL、当前知识库最近的长期 History、Knowledge Overview 以及 RAG 工具规则，
+校验知识库与 Session 绑定一致后完成占位符替换。
+最终 Prompt 通过 ContextStore 首次写入并锁定，通话期间即使外部上下文改变也不会覆盖。
+本场对话因此行为稳定且可审计，而新生成的 History 只会在下一场同知识库会话中生效。
+"""
 
 from dataclasses import dataclass
 

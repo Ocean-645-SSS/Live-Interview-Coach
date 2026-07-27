@@ -1,4 +1,14 @@
-"""访问内置 RAG 服务的客户端"""
+"""Agent 与 RAG Core之间的 HTTP 适配层
+它在构造时锁定单个知识库，查询前再次校验 Session Runtime 中的 kb_id，防止跨会话或跨库污染；
+语音 Agent 只调用 M1 的 Context 接口，由 RAG Core 返回证据；M2 Agent LLM 负责最终生成。
+所有网络结果都会统一转换成 RagQueryResult，并与当前 session_id + turn_index 一起落入 Evidence 审计日志
+
+在全局链路中：
+VoiceAssistant
+→ ContextManager
+→ RagClient*
+→ HTTP
+→ M1 RAG Core /query/context"""
 
 import asyncio
 import json
@@ -25,10 +35,10 @@ class RagQueryError:
     http_4xx：服务器成功接受请求，但是请求存在问题：
     401：API Key错误    404：KB不存在   422：请求参数不合法
 
-    http_5xx：未处理的内部异常
+    http_5xx：RAG Core或者上游服务内部异常
     502：RAG Core上游失败   504：服务端报告查询超时
 
-    transport：请求还没有有效HTTP响应，底层连接就失败了
+    transport：DNS、拒绝连接、连接中断等网络问题
 
     protocol：获得HTTP响应，但是返回内容不符合约定"""
 
@@ -86,7 +96,7 @@ class RagQueryResult(BaseModel):
         request_id: str | None = None,
         status_code: int | None = None,
     ) -> "RagQueryResult":
-        """创建一个查询失败的RagQueryResult"""
+        """创建一个查询失败的RagQueryResult快捷方法"""
 
         return cls(
             request_id=request_id,
@@ -200,11 +210,12 @@ class RagClient:
         if not runtime:
             raise ValueError(f"session 不存在:{session_id}")
 
+        #校验session runtime中的kb_id与RAG Client绑定的kb_id的一致条件
         session_kb_id = runtime.get("kb_id")
         if session_kb_id != self.kb_id:
             raise ValueError("RagClient 的 kb_id 与 session 锁定的知识库不一致")
 
-        # 构造请求头
+        # 构造请求头(schemas.QueryRequest嵌套参数部分)
         payload = {
             "query": clean_query,
             "profile": "voice",
@@ -235,7 +246,7 @@ class RagClient:
 
             # 创建异步 HTTP ClientSession
             async with aiohttp.ClientSession(timeout=timeout) as session:  # noqa: SIM117
-                # 向 RAG Core 发送 POST 请求
+                # 向 RAG Core 发送 POST 请求: /v1/knowledge-bases/{kb_id}/query/context
                 async with session.post(
                     self._context_url(), json=payload, headers=headers
                 ) as response:
@@ -250,6 +261,7 @@ class RagClient:
                         else:
                             error_type = "http_5xx"
 
+                        #响应非200的RagQuery结果
                         result = RagQueryResult(
                             kb_id=self.kb_id,
                             query=clean_query,
@@ -270,7 +282,7 @@ class RagClient:
                                 status_code=response.status,
                             ),
                         )
-
+                        #写入rag_context.jsonl
                         return self._record_result(
                             result,
                             session_id=session_id,
@@ -376,7 +388,7 @@ class RagClient:
         query: str,
         start: float,
     ) -> RagQueryResult:
-        """解析所有 HTTP 200、合法 JSON 的 RAG Core 响应，包括命中、未命中和业务协议错误，
+        """解析所有 HTTP 200、合法 JSON 的 RAG Core 响应，但status=200包括了命中、未命中和业务协议错误(还需进一步排查)
         并解析 context 和 evidence，封装为统一的RagQueryResult"""
 
         # 初始化默认结果
@@ -569,7 +581,7 @@ class RagClient:
         tool_name: str | None,
         turn_index: int | None,
     ) -> RagQueryResult:
-        """写rag_context.jsonl"""
+        """写入rag_context.jsonl"""
 
         self.store.append_rag_context(
             session_id=session_id,

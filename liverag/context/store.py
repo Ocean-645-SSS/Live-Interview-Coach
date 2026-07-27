@@ -1,5 +1,10 @@
-"""提示词、会话、历史、知识库上下文文件存储
-数据读写"""
+"""只负责安全地读写 Session、Prompt、Evidence 和长期 History数据
+ContextStore 使用按 Session 隔离的目录保存原始消息、RAG Evidence、固定 Prompt 和 Runtime，
+其中消息与 Evidence 使用追加式 JSONL，损坏单行会被跳过，不影响其他记录；
+Runtime 作为可覆盖的状态快照。
+长期 History 则按 kb_id 隔离，并记录来源 Session。
+Session 目录禁止复用，路径 ID 经过白名单校验，挂断只更新状态和持续时间，不删除原始数据
+"""
 
 import json
 from dataclasses import dataclass
@@ -42,7 +47,7 @@ class ContextStore:
     def initialize(self) -> None:
         """初始化公共运行目录和默认提示词"""
 
-        # 创建prompts,history,session,model,rag,logs对应的目录
+        # 创建prompts,history,context,sessions,model,rag,logs对应的目录
         ensure_runtime_dirs(self.paths)
 
         # 创建以上目录对应的文件
@@ -65,11 +70,12 @@ class ContextStore:
         safe_kb_id = self._safe_kb_id(kb_id)
 
         paths = self._session_paths(safe_session_id)
-        paths.directory.mkdir(parents=True, exist_ok=False)
+        paths.directory.mkdir(parents=True, exist_ok=False) #exist_ok=False确保了如果当前知识库paths已经存在，直接报错，而不是在旧目录继续写
 
         self._ensure_text_file(paths.messages_file, "")
         self._ensure_text_file(paths.rag_context_file, "")
         self._ensure_text_file(paths.system_prompt_file, "")
+        #初始化 runtime.jsonl
         self.write_runtime_state(
             safe_session_id,
             {
@@ -321,7 +327,9 @@ class ContextStore:
 
         safe_session_id = self._safe_session_id(session_id)
         kb_id = self._session_kb_id(safe_session_id)
+
         duration = record.get("duration")
+        #校验持续时间
         if duration is not None:
             if isinstance(duration, bool) or not isinstance(duration, (int, float)):
                 raise ValueError("RAG duration must be a number or None")
@@ -348,9 +356,9 @@ class ContextStore:
 
     def read_session_turns(self, session_id: str, limit: int | None = None) -> list[dict[str, Any]]:
         """按照轮次聚合当前对话的messages+rag_context
-        读取消息 ─┐
-                 ├─ 按 turn_index 分组 ─ 按轮次排序 ─ 截取最近 N 轮 ─ 生成 RAG 摘要
-        读取RAG ─┘
+        读取 messages.jsonl   ─┐
+                               ├─ 按 turn_index 分组 ─ 按轮次排序 ─ 截取最近 N 轮 ─ 生成 RAG 摘要
+        读取rag_context.jsonl ─┘
         """
 
         turns: dict[int, dict[str, Any]] = {}
@@ -393,6 +401,18 @@ class ContextStore:
 
         records=self._read_jsonl(self._history_file(kb_id))
         return records[-limit:]
+
+    def find_history_by_source_session(
+        self,
+        kb_id: str,
+        source_session_id: str,
+    ) -> dict[str, Any] | None:
+        """按原始 Session 查找已生成的 History，用于保证压缩幂等。"""
+
+        for record in reversed(self._read_jsonl(self._history_file(kb_id))):
+            if record.get("source_session_id") == source_session_id:
+                return record
+        return None
 
     def append_history(self,kb_id:str,content:str,source_session_id:str)->dict[str,Any]:
         """增加一条历史记录"""
@@ -623,7 +643,7 @@ class ContextStore:
 
         # 创建文件所在父文件
         path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():  # 文件不存在，写入默认内容并且创建文件；文件存在的话就不修改
+        if not path.exists():  # 文件不存在，写入默认内容并且创建文件；文件存在的话就不修改，防止覆盖
             path.write_text(default.rstrip() + "\n", encoding="utf-8")
 
     @staticmethod
@@ -645,7 +665,9 @@ class ContextStore:
 
     @staticmethod
     def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-        """读取该JSONL文件中的数据"""
+        """读取该JSONL文件中的数据
+        合法行 → 保留
+        空行/损坏行/非dict → 跳过"""
 
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
@@ -658,7 +680,7 @@ class ContextStore:
             try:
                 value = json.loads(line)
             except json.JSONDecodeError:
-                continue
+                continue    #单行记录损坏不影响整体审计
             if isinstance(value, dict):
                 items.append(value)
         return items

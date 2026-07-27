@@ -1,4 +1,5 @@
-"""LiveKit Agent对话行为适配层，所在的流程：
+"""LiveKit Agent对话行为适配层:VoiceAssistant 决定每轮对话怎样进入 LLM、RAG 工具是否可用，以及user消息、RAG Evidence、assistant消息怎样用同一个 turn_index 对齐
+所在的流程：
 LiveKit 房间
   ↓
 providers.py 创建 AgentSession：负责使用哪些模型、怎样创建语音流水线
@@ -22,6 +23,11 @@ ContextManager
 RagClient
   ↓
 RAG Core
+
+VoiceAssistant 继承 LiveKit Agent，并重写 llm_node 将实时对话事件接入 LiveRAG 业务;
+每发现一条新增用户消息就递增 turn_index 并持久化,本轮所有 RAG 工具调用和最终助手回答都复用这个编号，从而实现 Evidence 对齐;
+auto 模式保留知识库 Function Tool，由模型自主调用；never 模式在交给 LLM 前直接过滤该工具;
+LLM 输出仍按 Chunk 实时交给 TTS，同时在本地累积完整文本，生成结束后写入 Session 存档。
 """
 
 import time
@@ -64,7 +70,7 @@ class VoiceAssistant(Agent):
         rag_tool_mode: RagToolMode,
         event_logger: EventLogger | None = None,
     ) -> None:
-        super().__init__(instructions=session_system_prompt)
+        super().__init__(instructions=session_system_prompt)    #固定好的本轮session的session_system_prompt
         self.context_manager = context_manager
         self.rag_tool_mode = rag_tool_mode
         self.event_logger = event_logger
@@ -73,8 +79,53 @@ class VoiceAssistant(Agent):
         self._last_recorded_user_count = (
             0  # 当前已从 LiveKit ChatContext 保存的用户消息数，用于防止重复落盘。
         )
+        # 成功注册 AgentSession committed 事件后，消息落盘以事件为准；
+        # 不支持事件 API 的兼容环境仍使用 llm_node() 兜底。
+        self._session_context_hooks_registered = False
 
-    @llm.function_tool(
+    def record_committed_user_transcript(self, content: str) -> int:
+        """保存 LiveKit 已确认的最终用户转写，并分配 turn_index。"""
+
+        clean_text = content.strip()
+        if not clean_text:
+            return self.turn_index
+
+        self.turn_index += 1
+        self.context_manager.record_user_message(
+            content=clean_text,
+            turn_index=self.turn_index,
+        )
+        self._last_recorded_user_count += 1
+        self._log(
+            "user.message.committed",
+            {
+                "turn_index": self.turn_index,
+                "text_len": len(clean_text),
+                "text_preview": clean_text[:80],
+            },
+        )
+        return self.turn_index
+
+    def record_committed_assistant_message(self, content: str) -> None:
+        """保存 LiveKit 已提交到对话历史的助手消息。"""
+
+        clean_text = content.strip()
+        if not clean_text:
+            return
+
+        self.context_manager.record_assistant_message(
+            content=clean_text,
+            turn_index=self.turn_index,
+        )
+        self._log(
+            "assistant.message.committed",
+            {
+                "turn_index": self.turn_index,
+                "text_len": len(clean_text),
+            },
+        )
+
+    @llm.function_tool( #装饰器作用：把该函数方法描述成 LLM 可调用的 Function Tool
         name="search_knowledge_base",
         description=(
             "查询当前通话锁定的个人知识库。"
@@ -85,7 +136,15 @@ class VoiceAssistant(Agent):
         ),
     )
     async def search_knowledge_base(self, query: str) -> str:
-        """负责向LLM注册工具：查询个人知识库并返回可用于回答的精简上下文。"""
+        """负责向LLM注册工具：查询个人知识库并返回可用于回答的精简上下文。
+
+        主要流程：
+        LLM决定调用search_knowledge_base
+        → VoiceAssistant.search_knowledge_base()
+        → _query_knowledge_base_tool_text()
+        → ContextManager.query_knowledge_base()
+        → RagClient.query()
+        → M1 RAG Core"""
 
         return await self._query_knowledge_base_tool_text(query=query, source="tool")
 
@@ -119,7 +178,16 @@ class VoiceAssistant(Agent):
     def llm_node(
         self, chat_context: llm.ChatContext, tools: list[llm.Tool], model_settings: Any
     ) -> AsyncIterable[llm.ChatChunk | str]:  # 返回异步流
-        """VoiceAssistant对LiveKit默认LLM调用流程的包装，加入用户消息去重保存、RAG工具控制和助手回答保存"""
+        """VoiceAssistant对LiveKit默认LLM调用流程的包装，加入user消息去重保存、RAG工具控制和assistant回答保存
+
+        从ChatContext提取用户消息
+        → 找到尚未存档的新消息
+        → 分配turn_index并落盘
+        → 根据auto/never过滤RAG工具
+        → 调用LiveKit默认llm_node()
+        → 流式返回LLM输出
+        → 收集完整助手文本
+        → 助手回答落盘"""
 
         # 找出用户消息
         user_message = self._user_texts(chat_context)
@@ -131,7 +199,8 @@ class VoiceAssistant(Agent):
             tools if self.rag_tool_mode == "auto" else self._without_knowledge_tool(tools)
         )
 
-        # 真正执行异步LLM流程
+        # 真正执行异步LLM流程：
+        # VoiceAssistant.llm_node()→ Agent.default.llm_node()→ AgentSession里的openai.LLM→ 配置的LLM Provider→ 流式返回ChatChunk
         async def _stream() -> AsyncIterable[llm.ChatChunk | str]:
             # 收集回答片段
             assistant_parts: list[str] = []
@@ -148,13 +217,13 @@ class VoiceAssistant(Agent):
                 if text:
                     # 留一份用于最终存档
                     assistant_parts.append(text)
-                # 把chunk原样交给LiveKit播放
+                # 把chunk原样交给LiveKit，继续TTS+播放
                 yield chunk
             # 合并完整答案
             assistant_text = "".join(assistant_parts).strip()
 
-            if assistant_text:
-                # 记录助手回答到messages.jsonl
+            if assistant_text and not self._session_context_hooks_registered:
+                # 本地存档：记录助手回答到messages.jsonl
                 self.context_manager.record_assistant_message(
                     content=assistant_text,
                     turn_index=turn_index,
@@ -184,7 +253,12 @@ class VoiceAssistant(Agent):
 
     def _ensure_user_turns_recorded(self, user_texts: list[str]) -> int:
         """找出尚未保存的最新用户消息，分配turn_index，
-        确保 ChatContext 中新增的用户输入都被记录，交给messages.jsonl"""
+        确保 ChatContext 中新增的用户输入都被记录，交给messages.jsonl
+        
+        VoiceAssistant
+        → ContextManager.record_user_message()
+        → ContextStore.append_message()
+        → sessions/{session_id}/messages.jsonl"""
 
         # 判断是否存在新消息，没有直接返回，防止重复保存
         if len(user_texts) <= self._last_recorded_user_count:
@@ -288,3 +362,43 @@ class VoiceAssistant(Agent):
         if start is None:
             return None
         return round((end - start) * 1000.0, 1)
+
+
+def register_session_context_hooks(session: Any, assistant: VoiceAssistant) -> bool:
+    """监听 LiveKit committed 事件，并转发给 VoiceAssistant 做业务存档。"""
+
+    on = getattr(session, "on", None)
+    if not callable(on):
+        return False
+
+    seen_assistant_items: set[str] = set()
+
+    @session.on("user_input_transcribed")
+    def _on_user_input_transcribed(ev: Any) -> None:
+        if not bool(getattr(ev, "is_final", False)):
+            return
+        transcript = str(getattr(ev, "transcript", "") or "").strip()
+        if transcript:
+            assistant.record_committed_user_transcript(transcript)
+
+    @session.on("conversation_item_added")
+    def _on_conversation_item_added(ev: Any) -> None:
+        item = getattr(ev, "item", None)
+        if item is None or getattr(item, "type", None) != "message":
+            return
+        if getattr(item, "role", None) != "assistant":
+            return
+
+        text = str(getattr(item, "text_content", "") or "").strip()
+        if not text:
+            return
+
+        item_id = str(getattr(item, "id", "") or "")
+        dedupe_key = item_id or f"{getattr(item, 'created_at', '')}:{text}"
+        if dedupe_key in seen_assistant_items:
+            return
+        seen_assistant_items.add(dedupe_key)
+        assistant.record_committed_assistant_message(text)
+
+    assistant._session_context_hooks_registered = True
+    return True

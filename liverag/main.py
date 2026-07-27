@@ -1,16 +1,31 @@
 """LiveRAG 统一启动入口
-读取配置
-→ 等待内置 RAG Core ready
-→ 初始化 ContextStore
-→ 创建本次 session
-→ 渲染固定 Prompt
-→ 创建 RagClient
-→ 创建 ContextManager
-→ 创建 VoiceAssistant
-→ 创建 AgentSession
-→ 连接 LiveKit 房间
-→ 启动语音会话
-→ 挂断后结束并保存 session
+main.py
+├── 启动LiveKit Worker
+├── 接收语音Job
+├── 读取AppSettings
+├── 创建并初始化上下文存储ContextStore
+├── 等待RAG Core ready(service)，一直失败就抛出异常，提前结束
+├── 锁定知识库，初始化知识库元数据表MetadataStore
+├── 通过ContextStore.start_session()创建不可变Session，及其对应的四个文件目录
+├── 创建日志记录器 EventLogger
+├── 创建语音流水线 AgentSession (provider.py) :VAD+STT+LLM+TTS
+├── 创建RAGClient客户端
+├── 渲染固定Prompt(PromptSessionRenderer)
+├── 获取知识库概览overview
+├── 更新运行状态，写入磁盘
+├── 创建ContextManager
+├── 组装语音Agent(VoiceAssistant)
+├── 创建HistoryCompactor
+├── 连接LiveKit房间
+├── 注册指标
+├── 启动实时语音
+└── 挂断后压缩History并结束Session
+总结：
+main.py 以 LiveKit Job 为一场 Session 的生命周期边界；
+通话开始前，它先确保 RAG 就绪、锁定单个知识库、创建原始存档并固定 System Prompt；
+随后组装 AgentSession、VoiceAssistant、ContextManager 和 RagClient；
+挂断时通过 LiveKit shutdown callback 停止后台探测，基于原始消息异步生成按 KB 隔离的长期 History，并将结果写回 Runtime；
+History 是派生数据，压缩失败只记录错误，不删除原始 Session，也不阻断后续会话。
 """
 
 import asyncio
@@ -23,7 +38,7 @@ from urllib.parse import quote
 import aiohttp
 from livekit.agents import AgentServer, JobContext,cli,room_io
 
-from liverag.agent.assistant import VoiceAssistant
+from liverag.agent.assistant import VoiceAssistant, register_session_context_hooks
 from liverag.agent.providers import build_agent_session
 from liverag.agent.tool.rag_client import RagClient
 from liverag.agent.metrics_hooks import MetricsState,register_session_metrics_hooks,start_network_probe_task
@@ -46,7 +61,7 @@ server=AgentServer()    #语音Agent的任务服务器
 
 
 @server.rtc_session(agent_name="my-agent") #当LiveKit收到一个分配给my-agent的语音任务时，调用my_agent函数
-async def my_agent(ctx:JobContext)->None:   #ctx:本次通话在哪个房间
+async def my_agent(ctx:JobContext)->None:   #ctx:本次通话在哪个房间(room_id)，job_id，连接和回调能力
     """my-agent 在线语音入口
     LiveKit分配一次语音通话任务之后，为这次通话准备：配置、知识库、语音模型、上下文，
     然后让Agent加入房间；通话结束之后，保存和整理记录"""
@@ -57,7 +72,7 @@ async def my_agent(ctx:JobContext)->None:   #ctx:本次通话在哪个房间
     #初始化本地存储ContextStore
     paths=build_runtime_paths(settings.user_data_dir)
     store=ContextStore(paths=paths)
-    store.initialize()
+    store.initialize()  #创建prompts,history,context,sessions,model,rag,logs对应的目录
     
 
     #等待RAG Core服务，to_thread表示单独放到线程运行，避免阻塞LiveKit异步事件循环
@@ -72,7 +87,7 @@ async def my_agent(ctx:JobContext)->None:   #ctx:本次通话在哪个房间
     #读取+预热知识库
     knowledge_base=await _resolve_knowledge_base(settings,metadata_store)
 
-    #开启一段新对话session
+    #创建本次不可变session，以及对应的四个session文件目录
     session_id=ctx.job.id   #获取session_id
     store.start_session(session_id=session_id,kb_id=knowledge_base["kb_id"])
 
@@ -80,12 +95,12 @@ async def my_agent(ctx:JobContext)->None:   #ctx:本次通话在哪个房间
         #创建本次通话事件日志
         session_stamp=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         #构造日志路径:通话开始时间+LiveKit Job ID+Room ID
-        metrics_log_path=(paths.logs_dir) / f"{session_stamp}_metrics_{ctx.job.id}_{ctx.job.room.sid}.jsonl"
+        metrics_log_path=(paths.logs_dir) / f"{session_stamp}_metrics_{session_id}_{ctx.job.room.sid}.jsonl"
         #创建日志对象
         event_logger=EventLogger(
             log_path=metrics_log_path,
             room_id=ctx.job.room.sid if ctx.job and ctx.job.room else None,
-            job_id=ctx.job.id if ctx.job else None,
+            job_id=session_id if ctx.job else None,
             agent_name="my-agent",
         )
 
@@ -101,7 +116,7 @@ async def my_agent(ctx:JobContext)->None:   #ctx:本次通话在哪个房间
             kb_name=knowledge_base["name"],
         )
 
-        #生成本次通话的固定系统Prompt：只生成一次
+        #生成本次通话的固定Session System Prompt：Prompt 只在通话开始时渲染一次，后续即使 SOUL 或 History 发生变化，本次会话仍使用这份固定快照。
         prompt_result=SessionPromptRenderer(store=store,history_limit=settings.history_limit).render(
             session_id=session_id,
             kb_id=knowledge_base["kb_id"],
@@ -171,12 +186,24 @@ async def my_agent(ctx:JobContext)->None:   #ctx:本次通话在哪个房间
         context_manager=ContextManager(rag_client=rag_client,session_id=session_id,rag_tool_mode=settings.rag.rag_tool_mode)
 
         #创建VoiceAssistant
+        """AgentSession
+            └── VoiceAssistant
+                ├── 固定SessionSystemPrompt
+                ├── EventLogger
+                └── ContextManager
+                    ├── session_id
+                    └── RagClient
+                        ├── 固定kb_id
+                        ├── ContextStore
+                        └── M1 RAG HTTP API"""
         assistant=VoiceAssistant(
             context_manager=context_manager, #保存消息和查询知识库
             session_system_prompt=prompt_result.prompt, #告诉模型怎样回答
             rag_tool_mode=settings.rag.rag_tool_mode, #决定模型能否自动调用知识库工具
             event_logger=event_logger, #记录事件和耗时
         )
+        # 以 LiveKit committed 事件作为原始消息落盘来源。
+        register_session_context_hooks(session, assistant)
 
         #创建历史压缩器
         history_compactor=HistoryCompactor(store=store,settings=settings.context_model)
@@ -200,9 +227,10 @@ async def my_agent(ctx:JobContext)->None:   #ctx:本次通话在哪个房间
         async def _finalize_session(reason:str="")->None:
             """结束当前通话，压缩通话内容并且更新Session状态"""
 
+            #停止网络探测任务
             if probe_task is not None:
                 probe_task.cancel()
-                with suppress(asyncio.CancelledError):
+                with suppress(asyncio.CancelledError):  #表示这个异常是主动取消任务的正常结果，不需要把整个 Session 标记成失败
                     await probe_task
 
             history_result:dict[str, Any] | None = None
@@ -215,7 +243,7 @@ async def my_agent(ctx:JobContext)->None:   #ctx:本次通话在哪个房间
                     kb_name=knowledge_base["name"],
                 )
             except Exception as exc:
-                #压缩失败
+                #压缩失败隔离
                 history_result = {
                     "updated": False,
                     "reason": "history_compaction_failed",
@@ -240,10 +268,10 @@ async def my_agent(ctx:JobContext)->None:   #ctx:本次通话在哪个房间
             finally:
                 store.end_session(session_id=session_id,state="ended")
 
-        #注册结束回调
+        #注册结束回调时，调用_finalize_session函数
         ctx.add_shutdown_callback(_finalize_session)
 
-        #正式启动语音Agent
+        #正式启动语音Agent：绑定VoiceAgent与AgentSession
         await session.start(
             agent=assistant,
             room=ctx.room,
@@ -251,7 +279,7 @@ async def my_agent(ctx:JobContext)->None:   #ctx:本次通话在哪个房间
                 audio_input=room_io.AudioInputOptions(sample_rate=16000), #采样频率，16kHz用于语音识别
             ),
         )
-    #任何步骤失败
+    #任何步骤失败，结束会话，记录异常，并重新抛出异常给LiveKit Worker处理
     except Exception:
         store.end_session(session_id=session_id,state="failed")
         logger.exception("agent.session_failed",extra={"session_id":session_id})
@@ -346,6 +374,8 @@ async def _rag_get(settings:AppSettings,path:str)->dict[str,Any]|None:
 
 
 def main():
+    """启动LiveKit Worker"""
+
     cli.run_app(server)
 
 if __name__ == "__main__":

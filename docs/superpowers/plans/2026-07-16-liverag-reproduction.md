@@ -301,12 +301,12 @@ tests/agent/
 
 ## M2 验收标准
 
-- [ ] Agent 能根据问题在 `auto` 模式调用当前 KB 的 RAG。
-- [ ] 每条 evidence 与当前 `session_id + turn_index` 对齐。
-- [ ] 挂断后生成长期 history，但原始 messages/rag_context/runtime 完整保留。
-- [ ] 下一次同知识库会话能读取 history。
-- [ ] 不同知识库的 history 和 session prompt 互不污染。
-- [ ] RAG Core、LiveKit Server、Agent 分别启动；Agent 只等待健康状态。
+- [√] Agent 能根据问题在 `auto` 模式调用当前 KB 的 RAG。
+- [√] 每条 evidence 与当前 `session_id + turn_index` 对齐。
+- [√] 挂断后生成长期 history，但原始 messages/rag_context/runtime 完整保留。
+- [√] 下一次同知识库会话能读取 history。
+- [√] 不同知识库的 history 和 session prompt 互不污染。
+- [√] RAG Core、LiveKit Server、Agent 分别启动；Agent 只等待健康状态。
 
 ---
 

@@ -19,6 +19,7 @@ class FakeContextStore:
             "state": "active",
         }
         self.writes: list[tuple[str, dict[str, Any]]] = []
+        self.messages: list[dict[str, Any]] = []
 
     def read_runtime_state(self, session_id: str) -> dict[str, Any]:
         assert session_id == "session-1"
@@ -32,6 +33,25 @@ class FakeContextStore:
         assert session_id == "session-1"
         self.state = dict(state)
         self.writes.append((session_id, dict(state)))
+
+    def append_message(
+        self,
+        *,
+        session_id: str,
+        role: str,
+        content: str,
+        turn_index: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        assert session_id == "session-1"
+        self.messages.append(
+            {
+                "role": role,
+                "content": content,
+                "turn_index": turn_index,
+                "metadata": metadata or {},
+            }
+        )
 
 
 class FakeRagClient:
@@ -252,3 +272,25 @@ async def test_runtime_state_serializes_structured_rag_error() -> None:
         "status_code": None,
     }
 
+
+async def test_assistant_message_uses_in_memory_turn_rag_summary() -> None:
+    client = FakeRagClient(result=hit_result())
+    manager = ContextManager(
+        rag_client=client,  # type: ignore[arg-type]
+        session_id="session-1",
+        rag_tool_mode="auto",
+    )
+
+    await manager.query_knowledge_base(
+        query="M2-C 是什么？",
+        turn_index=6,
+    )
+    manager.record_assistant_message(
+        content="M2-C 负责连接 Agent 与 RAG Core。",
+        turn_index=6,
+    )
+
+    metadata = client.store.messages[-1]["metadata"]
+    assert metadata["rag_queried"] is True
+    assert metadata["rag_hit"] is True
+    assert metadata["rag_failed"] is False

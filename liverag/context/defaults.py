@@ -1,4 +1,7 @@
-"""上下文系统默认模板。"""
+"""上下文系统默认模板。
+defaults.py 提供上下文系统首次初始化时的默认模板，包括 Agent SOUL 人格、Session System Prompt、RAG 启用与禁用规则、History 压缩规则和 Knowledge Overview 降级内容。
+ContextStore 只在文件不存在时写入默认值，因此用户后续修改不会被重启覆盖；Renderer 再将这些可持久化内容组合成本次固定 Prompt"""
+
 
 DEFAULT_SOUL = """你是一个自然、可靠、低延迟的实时语音 RAG Agent。
 
@@ -198,5 +201,5 @@ DEFAULT_KNOWLEDGE_OVERVIEW_FALLBACK = """# 知识库概览
 ## 检索提示
 
 - 当用户明确询问资料、文档、知识库内容或历史话题时，才考虑调用知识库工具。
-- 如果工具没有返回依据，需要明确说明知识库中没有找到足够依据。
+- 如果工具没有返回依据，必须明确说明知识库中没有找到足够依据。
 """

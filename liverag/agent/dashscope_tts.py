@@ -1,5 +1,17 @@
-"""DashScope Qwen realtime TTS provider for LiveKit.
-DashScope实时TTS适配"""
+"""LiveKit 和 DashScope TTS 之间的实时协议翻译器：把 DashScope 实时 TTS 的 WebSocket 协议，包装成 LiveKit 能识别的 tts.TTS 接口
+主业务链：
+LLM逐步生成回答文本
+→ LiveKit调用tts.stream()
+→ 创建DashScopeRealtimeSynthesizeStream
+→ 建立或复用DashScope WebSocket
+→ 发送音色、采样率、语速配置
+→ 持续发送文本片段
+→ 提交本段文本
+→ DashScope持续返回音频delta
+→ Base64解码成PCM字节
+→ AudioEmitter推给LiveKit
+→ 房间里逐步播放助手声音
+"""
 
 from __future__ import annotations
 
@@ -198,6 +210,16 @@ class DashScopeRealtimeSynthesizeStream(tts.SynthesizeStream):
         output_emitter: tts.AudioEmitter,
         fallback_request_id: str,
     ) -> None:
+        """并行处理文本和音频
+        input_task
+        → 从LiveKit接收文本
+        → 发送给DashScope
+
+        recv_task
+        → 从DashScope接收音频
+        → 推送给LiveKit
+        通过asyncio.gather(...)聚合"""
+
         response_done = asyncio.Event()
         input_done = asyncio.Event()
         committed = False

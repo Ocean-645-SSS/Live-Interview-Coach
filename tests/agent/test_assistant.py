@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from livekit.agents import Agent
 
-from liverag.agent.assistant import VoiceAssistant
+from liverag.agent.assistant import VoiceAssistant, register_session_context_hooks
 
 
 class FakeContextManager:
@@ -48,6 +48,24 @@ class FakeTool:
         self.name = name
         self.id = ""
         self.function_info = None
+
+
+class FakeEventSession:
+    """提供 LiveKit 风格的事件注册与触发。"""
+
+    def __init__(self) -> None:
+        self.handlers: dict[str, list[Any]] = {}
+
+    def on(self, event_name: str):
+        def _register(handler: Any) -> Any:
+            self.handlers.setdefault(event_name, []).append(handler)
+            return handler
+
+        return _register
+
+    def emit(self, event_name: str, event: Any) -> None:
+        for handler in self.handlers.get(event_name, []):
+            handler(event)
 
 
 def make_assistant(
@@ -176,3 +194,34 @@ async def test_llm_node_streams_and_records_assistant_once(
     assert [tool.name for tool in received_tools] == ["other_tool"]
     assert manager.user_messages == [{"content": "请打个招呼", "turn_index": 1}]
     assert manager.assistant_messages == [{"content": "你好，世界", "turn_index": 1}]
+
+
+def test_session_context_hooks_record_only_committed_messages() -> None:
+    """最终转写和已提交助手消息通过 Session 事件按同一 Turn 保存。"""
+
+    manager = FakeContextManager()
+    assistant = make_assistant(manager)
+    session = FakeEventSession()
+
+    assert register_session_context_hooks(session, assistant) is True
+
+    session.emit(
+        "user_input_transcribed",
+        SimpleNamespace(transcript="中间结果", is_final=False),
+    )
+    session.emit(
+        "user_input_transcribed",
+        SimpleNamespace(transcript="最终问题", is_final=True),
+    )
+    assistant_item = SimpleNamespace(
+        id="assistant-item-1",
+        type="message",
+        role="assistant",
+        text_content="最终回答",
+        created_at=1.0,
+    )
+    session.emit("conversation_item_added", SimpleNamespace(item=assistant_item))
+    session.emit("conversation_item_added", SimpleNamespace(item=assistant_item))
+
+    assert manager.user_messages == [{"content": "最终问题", "turn_index": 1}]
+    assert manager.assistant_messages == [{"content": "最终回答", "turn_index": 1}]

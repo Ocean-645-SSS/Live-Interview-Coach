@@ -105,6 +105,30 @@ async def test_compact_appends_traceable_history_and_preserves_raw_messages(
     )
     store.append_history("kb-one", "较早记录", "session-old-1")
     store.append_history("kb-one", "最近记录", "session-old-2")
+    store.append_rag_context(
+        "session-1",
+        {
+            "turn_index": 1,
+            "query": "M2-E 是什么？",
+            "effective_query": "M2-E 是什么？",
+            "hit": True,
+            "has_context": True,
+            "context_preview": "M2-E 负责生成长期 History。",
+            "evidence_documents": [
+                {"document_id": "doc-history", "file_path": "m2-plan.md"}
+            ],
+            "evidence_chunks": [
+                {
+                    "chunk_id": "chunk-history",
+                    "document_id": "doc-history",
+                    "content": "挂断后压缩长期 History。",
+                    "score": 0.95,
+                }
+            ],
+            "error": None,
+            "duration": 0.1,
+        },
+    )
     client = install_model(
         monkeypatch,
         text="```text\n用户正在测试 M2-E 的长期历史压缩。\n```",
@@ -147,6 +171,9 @@ async def test_compact_appends_traceable_history_and_preserves_raw_messages(
     assert "最近记录" in prompt
     assert "user: 请记住我正在测试 M2-E。" in prompt
     assert "assistant: 好的，我会把有长期价值的信息写入 history。" in prompt
+    assert "# 本次通话 RAG Evidence" in prompt
+    assert "M2-E 负责生成长期 History。" in prompt
+    assert "doc-history" in prompt
 
 
 @pytest.mark.asyncio
@@ -289,6 +316,61 @@ async def test_compact_model_failure_is_non_destructive(
 
 
 @pytest.mark.asyncio
+async def test_compact_is_idempotent_for_same_source_session(
+    store: ContextStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    add_session_messages(store, "session-1", "kb-one")
+    client = install_model(monkeypatch, text="唯一的长期摘要")
+    compactor = HistoryCompactor(store=store, settings=settings())
+
+    first = await compactor.compact_after_call(
+        session_id="session-1",
+        kb_id="kb-one",
+        kb_name="知识库一",
+    )
+    second = await compactor.compact_after_call(
+        session_id="session-1",
+        kb_id="kb-one",
+        kb_name="知识库一",
+    )
+
+    assert first["updated"] is True
+    assert second == {
+        "updated": False,
+        "reason": "already_compacted",
+        "record": first["record"],
+    }
+    assert len(client.completions.calls) == 1
+    assert len(store.read_recent_history("kb-one", limit=10)) == 1
+
+
+@pytest.mark.asyncio
+async def test_compact_rejects_kb_different_from_session_lock(
+    store: ContextStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    add_session_messages(store, "session-1", "kb-one")
+
+    def fail_if_constructed(**_kwargs: Any) -> None:
+        pytest.fail("kb mismatch must fail before constructing the model client")
+
+    monkeypatch.setattr(history_module, "AsyncOpenAI", fail_if_constructed)
+
+    with pytest.raises(ValueError, match="kb_id 与 session"):
+        await HistoryCompactor(
+            store=store,
+            settings=settings(),
+        ).compact_after_call(
+            session_id="session-1",
+            kb_id="kb-two",
+            kb_name="知识库二",
+        )
+
+    assert store.read_recent_history("kb-one", limit=10) == []
+
+
+@pytest.mark.asyncio
 async def test_compact_truncates_long_session_from_the_front(
     store: ContextStore,
     monkeypatch: pytest.MonkeyPatch,
@@ -320,7 +402,10 @@ async def test_compact_truncates_long_session_from_the_front(
     assert result["updated"] is True
     assert result["session_truncated"] is True
     prompt = client.completions.calls[0]["messages"][1]["content"]
-    session_section = prompt.split("# 本次通话消息\n", maxsplit=1)[1]
+    session_section = (
+        prompt.split("# 本次通话消息\n", maxsplit=1)[1]
+        .split("# 本次通话 RAG Evidence\n", maxsplit=1)[0]
+    )
     assert "Z" * 40 in session_section
     assert "A" not in session_section
 

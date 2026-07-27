@@ -187,19 +187,20 @@ class RagEngine:
         return self.rag
 
     def ready_state(self) -> dict[str, Any]:
-            return {
-                "initialized": self.rag is not None,
-                "provider_configured": self.settings.provider_ready(),
-                "llm_model": self.settings.llm_model,
-                "embedding_model": self.settings.embedding_model,
-                "embedding_dim": self.settings.embedding_dim,
-                "working_dir": self.settings.absolute_working_dir,
-                "user_data_dir": self.settings.absolute_user_data_dir,
-                "upload_dir": self.settings.absolute_upload_dir,
-                "workspace": self.settings.workspace,
-                "kb_id": self.settings.kb_id,
-                "kb_name": self.settings.kb_name,
-            }
+        """RAG,LLM,Embedding，三个目录+workspace已准备就绪"""
+        return {
+            "initialized": self.rag is not None,
+            "provider_configured": self.settings.provider_ready(),
+            "llm_model": self.settings.llm_model,
+            "embedding_model": self.settings.embedding_model,
+            "embedding_dim": self.settings.embedding_dim,
+            "working_dir": self.settings.absolute_working_dir,
+            "user_data_dir": self.settings.absolute_user_data_dir,
+            "upload_dir": self.settings.absolute_upload_dir,
+            "workspace": self.settings.workspace,
+            "kb_id": self.settings.kb_id,
+            "kb_name": self.settings.kb_name,
+        }
     
     async def finalize(self):
         """释放LiveRAG存储资源"""
@@ -392,7 +393,7 @@ class RagEngine:
         {context}
         """.strip()
 
-        response = await rag.llm_model_func(prompt)
+        response = await rag.llm_model_func(prompt) #调用LLM：判断证据是否真的能回答问题
         text = str(response).strip().lower()
         return text == "true"
     
@@ -607,12 +608,12 @@ class RagEngine:
         # 构造QueryParam
         param = self.build_query_param(resolved, only_need_context=False)
 
-        # LightRAG检索:
+        # LightRAG调用LLM检索:
         # 查询分析→ 关键词提取→ 向量/图谱检索→
         # 选择相关 chunks→ 组装上下文→ 调用 LLM→ 返回答案与检索数据
         try:
             result = await asyncio.wait_for(
-                rag.aquery_llm(effective_query, param=param),
+                rag.aquery_llm(effective_query, param=param), # 第一次调用LLM，次数取决于schemas.QueryMode
                 timeout=self.settings.query_timeout_seconds
             )
         except asyncio.TimeoutError as exc:
@@ -650,7 +651,7 @@ class RagEngine:
             context = context[: resolved.context_max_chars].strip()
             context_truncated = True
 
-        # 有检索结果不代表证据真的能回答问题
+        # 第二次调用LLM：判断证据是否真的能回答问题，有检索结果不代表证据真的能回答问题
         relevant = (
             await self._evidence_is_relevant(effective_query, context)
             if candidate_hit

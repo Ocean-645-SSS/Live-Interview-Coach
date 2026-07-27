@@ -1,4 +1,13 @@
 """根据配置创建一条完整的实时语音处理流水线，并包装为LiveKit的AgentSession
+AppSettings.voice
+├── Volcengine BigModel STT
+├── OpenAI-compatible LLM
+├── DashScopeRealtimeTTS
+├── Silero VAD
+└── 回合结束与打断参数
+        ↓
+LiveKit AgentSession
+
 负责模型和音频的装配，流程如下：
 用户语音
   ↓
@@ -26,13 +35,14 @@ def build_agent_session(settings: AppSettings) -> AgentSession:
     """创建实时语音会话，保留当前线上链路调优参数。
     实现AppSettings
         ↓
-    创建 STT + LLM + TTS + VAD
+    创建 STT + LLM + TTS + VAD(检测用户什么时候开始、停止讲话)
         ↓
     配置打断和轮次检测参数
         ↓
     返回 AgentSession"""
 
     voice = settings.voice
+    #目前只支持火山引擎STT
     if voice.stt_provider != "volcengine_bigmodel":
         raise ValueError(f"当前只支持 volcengine_bigmodel STT，实际配置为：{voice.stt_provider}")
 
@@ -67,7 +77,7 @@ def build_agent_session(settings: AppSettings) -> AgentSession:
         min_endpointing_delay=0.1,  # STT判断说完，等待多久提交给LLM
         max_endpointing_delay=0.5,
         turn_detection="stt",  # 让STT provider的结束事件作为主要回合结束依赖
-        vad=silero.VAD.load(),  # 加载VAD模型
+        vad=silero.VAD.load(),  # 加载VAD模型:检测用户什么时候开始、停止讲话
     )
 
 
