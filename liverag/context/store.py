@@ -90,6 +90,116 @@ class ContextStore:
             },
         )
 
+    def list_sessions(self) -> list[dict[str,Any]]:
+        """列出所有合法且具有有效runtime状态的会话"""
+
+        sessions: list[dict[str, Any]] = []
+
+        if not self.paths.sessions_dir.exists():
+            return sessions
+
+        for directory in self.paths.sessions_dir.iterdir():
+            if not directory.is_dir():
+                continue
+
+            session_id = directory.name
+            try:
+                safe_session_id=self._safe_session_id(session_id)
+                runtime=self.read_runtime_state(safe_session_id)
+            except ValueError:
+                continue
+            if not runtime:
+                #没有runtime.json或runtime内容损坏
+                continue
+
+            sessions.append(
+                {
+                    "session_id":safe_session_id,
+                    "kb_id":runtime.get("kb_id"),
+                    "state":runtime.get("state","unknown"),
+                    "started_at":runtime.get("started_at"),
+                    "ended_at":runtime.get("ended_at"),
+                    "duration":runtime.get("duration")
+                }
+            )
+        #按开始时间顺序排序
+        sessions.sort(
+            key=lambda item: str(item.get("started_at") or ""),
+            reverse=True,
+        )
+        return sessions
+
+    def read_session_detail(self, session_id:str)->dict[str, Any]:
+        """读取指定session的运行状态和数据摘要"""
+
+        safe_session_id=self._safe_session_id(session_id=session_id)
+        runtime=self.read_runtime_state(safe_session_id)
+        if not runtime:
+            raise ValueError(f"session does not exist: {safe_session_id}")
+
+        messages=self.read_message(session_id=safe_session_id)
+        rag_context=self.read_rag_context(session_id=safe_session_id)
+        turns=self.read_session_turns(session_id=safe_session_id)
+        session_system_prompt=self.read_session_system_prompt(session_id=safe_session_id)
+
+
+        return {
+            **runtime,
+            "session_id":safe_session_id,
+            "summary":{
+                "message_count":len(messages),
+                "rag_context_count":len(rag_context),
+                "turns_out":len(turns),
+                "session_prompt_chars":len(session_system_prompt)
+            }
+        }
+
+    def export_session(self,session_id:str)->dict[str,Any]:
+        """导出一个指定session的完整可审计数据"""
+
+        safe_session_id=self._safe_session_id(session_id=session_id)
+        runtime=self.read_runtime_state(safe_session_id)
+        if not runtime:
+            raise ValueError(f"session does not exist: {safe_session_id}")
+        
+        return {
+            "session_id":safe_session_id,
+            "exported_at":self._now_iso(),
+            "runtime_state":runtime,
+            "messages":self.read_message(session_id=safe_session_id),
+            "rag_context": self.read_rag_context(session_id=safe_session_id),
+            "turns": self.read_session_turns(session_id=safe_session_id),
+            "session_system_prompt": (self.read_session_system_prompt(safe_session_id))
+        }
+    
+    def delete_session(self, session_id: str) -> None:
+        """删除一个指定 session对应的四个文件目录和session目录"""
+
+        safe_session_id = self._safe_session_id(session_id)
+        state = self.read_runtime_state(safe_session_id)
+
+        if not state:
+            raise ValueError(f"session does not exist: {safe_session_id}")
+
+        if state.get("state") == "active" and not state.get("ended_at"):
+            raise ValueError("active session cannot be deleted")
+
+        paths = self._session_paths(safe_session_id)
+
+        known_files = (
+            paths.messages_file,
+            paths.rag_context_file,
+            paths.system_prompt_file,
+            paths.runtime_file,
+        )
+
+        for path in known_files:
+            if path.is_file():
+                path.unlink()
+
+        # 只能删除已经为空的明确 Session 目录
+        paths.directory.rmdir()
+
     def end_session(self, session_id: str, state: str = "ended") -> None:
         """结束会话，只更新运行状态，不删除原始记录"""
 
@@ -209,6 +319,19 @@ class ContextStore:
             return {"kb_id": kb_id, "stale": True, "reason": "missing"}
 
         return data if isinstance(data, dict) else {"kb_id": kb_id, "stale": True, "reason": "invalid"}
+
+    def mark_knowledge_overview_stale(self, kb_id: str, *, reason: str) -> None:
+        """把指定知识库概览标记为过期。"""
+
+        current = self.read_knowledge_overview(kb_id)
+        self.write_knowledge_overview(
+            kb_id,
+            current,
+            stale=True,
+            reason=reason,
+            source="stale_marker",
+            source_job_id=None,
+        )
 
 
     def read_history_compress_prompt(self) -> str:

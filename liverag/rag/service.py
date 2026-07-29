@@ -108,20 +108,35 @@ def wait_for_rag_ready(
     *,
     timeout_ms:int=15000, #最长等待时间
     interval_ms:int=250, #两次检查之间的间隔
+    start_if_missing:bool=False, #默认只等待外部 RAG Core，不负责启动
 )->RagReadyState:
-    """确保 RAG Core已经启动，持续轮询/v1/readyz，直到服务ready或者等待超时"""
+    """持续轮询 /v1/readyz，直到 RAG Core ready 或等待超时。
 
-    #尝试启动RAG Core
-    start_status=start_embedded_rag_service()
+    默认只观察独立运行的 RAG Core；只有显式传入
+    start_if_missing=True 时才保留旧的嵌入式启动行为。
+    """
 
-    #如果服务被警用，直接返回失败
-    if start_status==RagServiceStartStatus.DISABLED:
+    #RAG 被禁用时，无论是否允许自动启动都直接返回失败。
+    if os.getenv("LIGHTRAG_ENABLED", "true").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
         return RagReadyState(
             ready=False,
             status="disabled",
             data=None,
             error="RAG 服务被禁用"
         )
+
+    if start_if_missing:
+        #显式允许时才尝试在后台线程启动 RAG Core。
+        start_status=start_embedded_rag_service()
+        service_status=start_status.value
+    else:
+        #默认：只等待外部 RAG Core，不管理其进程生命周期。
+        service_status="external"
 
     #读取配置
     settings=RAGSettings()
@@ -163,7 +178,7 @@ def wait_for_rag_ready(
             if (isinstance(data,dict) and data.get("ready") is True):
                 return RagReadyState(
                     ready=True,
-                    status=start_status.value,
+                    status=service_status,
                     data=data
                 )
             last_error="RAG 服务尚未 ready"
@@ -184,6 +199,6 @@ def wait_for_rag_ready(
     #超时返回
     return RagReadyState(
         ready=False,
-        status=start_status.value,
+        status=service_status,
         error=last_error or "等待 RAG ready 超时"
     )

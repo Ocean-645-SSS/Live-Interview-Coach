@@ -73,7 +73,8 @@ class MetadataStore:
         knowledge_bases 表：知识库的基本信息，包括kb_id，name，description，创建日期，最后更新时间。
         documents 表：文档的基本信息，包括document_id，所属知识库kb_id，原始文件名，原始文件保存路径，文件大小，SHA256哈希值，内容类型，扩展名，解析状态，LightRAG索引状态，错误信息，内容长度，块数，创建日期，最后更新时间。
         ingest_jobs 表：入库任务（上传/索引）的基本信息，包括job_id，所属知识库kb_id，任务状态，总文件数，已完成文件数，失败文件数，错误信息，创建日期，最后更新时间。
-        ingest_job_documents 表：入库任务与文档的关联关系，包括job_id，document_id，任务状态，错误信息，创建日期，最后更新时间。该表的主键是(job_id, document"""
+        ingest_job_documents 表：入库任务与文档的关联关系，包括job_id，document_id，任务状态，错误信息，创建日期，最后更新时间。该表的主键是(job_id, document
+        session_config表：下一场通话默认使用的知识库，包括key：配置项名称(knowledge_base)，value_json(配置的具体内容)，updated_at"""
         with self._connect() as conn:
             conn.execute("pragma foreign_keys = ON")
 
@@ -137,6 +138,12 @@ class MetadataStore:
                     FOREIGN KEY (document_id)
                         REFERENCES documents(document_id)
                         ON DELETE CASCADE
+                );
+
+                create table if not exists session_config (
+                    key TEXT PRIMARY KEY,
+                    value_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
                 """
             )
@@ -451,7 +458,17 @@ class MetadataStore:
         }
 
 
-  
+    def delete_document_metadata(self, kb_id: str, document_id: str) -> dict[str, Any]:
+            """删除单个文档元数据。"""
+    
+            document = self.get_document(kb_id, document_id)
+            with self._connect() as conn:
+                conn.execute(
+                    "DELETE FROM documents WHERE kb_id = ? AND document_id = ?",
+                    (kb_id, document_id),
+                )
+            return document
+    
     def list_documents(self, kb_id: str, *, page: int, page_size: int) -> dict[str, Any]:
         """分页读取知识库文档。"""
 

@@ -11,6 +11,7 @@ EXPECTED_TABLES = {
     "documents",
     "ingest_jobs",
     "ingest_job_documents",
+    "session_config",
 }
 
 

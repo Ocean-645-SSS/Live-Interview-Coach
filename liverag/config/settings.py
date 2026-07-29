@@ -864,6 +864,10 @@ def mask_secret(value: str, *, prefix_chars: int = 2, suffix_chars: int = 8) -> 
         return f"{clean[:prefix_chars]}{_MASKED_SECRET_MARKER}{clean[-short_suffix:] if short_suffix else ''}"
     return f"{clean[:prefix_chars]}{_MASKED_SECRET_MARKER}{clean[-suffix_chars:]}"
 
+def is_masked_secret(value: Any) -> bool:
+    """判断前端提交值是否是后端返回的密钥掩码。"""
+
+    return isinstance(value, str) and _MASKED_SECRET_MARKER in value
 
 def public_model_options() -> dict[str, Any]:
     """返回前端模型选择页使用的 provider、模型、音色和字段定义。"""

@@ -56,6 +56,11 @@ class KnowledgeBaseStore:
         """读取知识库内部元数据。"""
         return self.metadata.get_knowledge_base(kb_id)
 
+    def update(self, kb_id: str, *, name: str | None = None, description: str | None = None) -> KnowledgeBaseMeta:
+        """更新知识库元数据。"""
+
+        return self.metadata.update_knowledge_base(kb_id, name=name, description=description)
+    
     def delete(self, kb_id: str) -> None:
         """删除知识库目录和元数据。"""
 

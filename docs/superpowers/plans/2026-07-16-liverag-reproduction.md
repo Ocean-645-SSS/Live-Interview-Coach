@@ -334,12 +334,12 @@ tests/rag/test_doc_parser.py
 
 ## M3 工作包 A：统一管理 API（9821）
 
-- [ ] 实现 health/runtime、knowledge base、documents、jobs、query 代理接口。
-- [ ] 前端只访问 `9821`，内部 RAG Core `/v1/*` 保持内部依赖。
-- [ ] `RagGateway` 调用 `wait_for_rag_ready()` 只等待健康状态，不自动启动 RAG 服务。
-- [ ] 实现 SOUL、session 列表/详情/turn 聚合、当前 KB 选择和显式 session 导出。
-- [ ] session 删除只接受一个明确 `session_id`，逐个删除已知文件后移除空目录；不提供批量清空接口。
-- [ ] 提交：`feat: expose unified management api`。
+- [√] 实现 health/runtime、knowledge base、documents、jobs、query 代理接口。
+- [√] 前端只访问 `9821`，内部 RAG Core `/v1/*` 保持内部依赖。
+- [√] `RagGateway` 调用 `wait_for_rag_ready()` 只等待健康状态，不自动启动 RAG 服务。
+- [√] 实现 SOUL、session 列表/详情/turn 聚合、当前 KB 选择和显式 session 导出。
+- [√] session 删除只接受一个明确 `session_id`，逐个删除已知文件后移除空目录；不提供批量清空接口。
+- [√] 提交：`feat: expose unified management api`。
 
 ## M3 工作包 B：动态模型与 Prompt 配置
 

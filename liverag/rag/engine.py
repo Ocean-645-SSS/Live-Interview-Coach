@@ -60,7 +60,7 @@ def _is_followup_query(text: str) -> bool:
     return bool(stripped) and len(stripped) <= 12 and any(p in stripped for p in FOLLOWUP_PHRASES)
 
 
-def rewrite_query(query: str, conversation: ConversationOptions):
+def rewrite_query(query: str, conversation: ConversationOptions)->tuple[str,bool]:
     """改写问题"""
     if not conversation.rewrite_followup or not _is_followup_query(query):
         return query, False
@@ -755,7 +755,34 @@ class RagEngine:
             "kb_id": self.settings.kb_id,
             "kb_name": self.settings.kb_name,
         }
-    
+
+    async def query_data(
+        self,
+        query:str,
+        profile:str,
+        options: QueryOptions,
+        conversation:ConversationOptions
+    )->tuple[QueryResult, dict[str, Any]]:
+        """查询结构化数据"""
+
+        rag=self.ensure_ready()
+        resolved=self.resolve_options(profile=profile,options=options)
+        effective_query , rewritten=rewrite_query(query,conversation=conversation)
+        param = self.build_query_param(resolved, only_need_context=True)
+        result=await rag.aquery_data(effective_query,param=param)
+
+        started=time.perf_counter()
+        metrics=self._query_metrics(started, resolved, cache_hit=False)
+        metrics["chunks_count"] = len(result.get("data", {}).get("chunks", []) or [])
+
+        return {
+            "query": query,
+            "effective_query": effective_query,
+            "rewritten": rewritten,
+            "result": _to_jsonable(result),
+        }, metrics
+
+        
     async def documents(self,page:int=1,page_size:int=50)->dict[str,Any]:
         """读取documents状态列侬阿婆"""
 
@@ -810,7 +837,23 @@ class RagEngine:
             "chunks_count": len(chunks),
         })
     
+    async def delete_document(
+        self,
+        document_id: str,
+        *,
+        delete_llm_cache: bool = False,
+    ) -> dict[str, Any]:
+        """删除单个文档及其派生文本块、实体、关系和向量数据。"""
 
+        rag = self.ensure_ready()
+        async with self._write_lock:
+            result = await rag.adelete_by_doc_id(
+                document_id,
+                delete_llm_cache=delete_llm_cache,
+            )
+        return _to_jsonable(result)
+
+    
     async def job(self, job_id: str) -> dict[str, Any]:
         """按照track_id(job_id)异步获取入库任务"""
         rag = self.ensure_ready()

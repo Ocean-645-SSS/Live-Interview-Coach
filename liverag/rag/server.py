@@ -13,7 +13,7 @@ from typing import Annotated, Any
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from lightrag.utils import generate_track_id
 from pydantic import BaseModel, Field
 
@@ -21,7 +21,7 @@ from liverag.rag.doc_parser import parse_file_content
 from liverag.rag.engine import RagEngineError, RagQueryTimeoutError
 from liverag.rag.engine_manager import RagEngineManager
 from liverag.rag.rag_settings import RAGSettings
-from liverag.rag.schemas import Envelope, QueryRequest
+from liverag.rag.schemas import Envelope, QueryRequest, TextDocumentRequest
 from liverag.rag.metadata_store import DEFAULT_KB_ID,DEFAULT_KB_NAME
 
 settings=RAGSettings()
@@ -39,6 +39,10 @@ class KnowledgeBasePatchRequest(BaseModel):
 
     name:str | None = None
     description:str | None = None
+
+
+class DocumentAlreadyExistsError(ValueError):
+    """前端指定的文档 ID 已存在。"""
 
 
 @asynccontextmanager #异步生命周期管理器
@@ -276,7 +280,25 @@ async def knowledge_base_detail(kb_id:str)->dict[str,Any]:
         raise HTTPException(status_code=404, detail=message) from exc
 
     return envelope(request_id=request_id,data=detail)
+ 
+@app.patch("/v1/knowledge-bases/{kb_id}",dependencies=[Depends(require_api_key)])
+async def patch_knowledge_base(kb_id:str,request:KnowledgeBasePatchRequest) -> dict[str,Any]:
+    """更新某个知识库元数据"""
 
+    request_id=str(uuid.uuid4())
+    try:
+        meta=manager.kb_store.update(kb_id,name=request.name,description=request.description)
+        engine=manager.get_engine(kb_id)
+        #更新engine配置
+        engine.settings=manager._settings_for(meta)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        return envelope(
+            request_id=request_id,
+            status="error",
+            error={"type": "KnowledgeBaseValidationError", "message": str(exc)},
+        )
 
 @app.post("/v1/knowledge-bases/{kb_id}/query/context",dependencies=[Depends(require_api_key)])
 async def query_context(kb_id:str,request:QueryRequest):
@@ -341,6 +363,29 @@ async def query_answer(kb_id:str,request:QueryRequest):
             detail=str(exc),
         ) from exc
 
+@app.post("/v1/knowledge-bases/{kb_id}/query/data", dependencies=[Depends(require_api_key)])
+async def query_data(kb_id: str, request: QueryRequest) -> dict[str, Any]:
+    """查询指定知识库的结构化数据"""
+
+    request_id = str(uuid.uuid4())
+    try:
+        engine = await manager.get_engine(kb_id)
+        data, metrics = await engine.query_data(
+            request.query,
+            request.profile,
+            request.merged_options(),
+            request.merged_conversation(),
+        )
+        return envelope(request_id=request_id, data=data, metrics=metrics)
+    
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        return envelope(
+            request_id=request_id,
+            status="error",
+            error={"type": type(exc).__name__, "message": str(exc)},
+        )
 #=============================documents 接口============================
 @app.post("/v1/knowledge-bases/{kb_id}/documents/files",dependencies=[Depends(require_api_key)])
 async def documents_files(
@@ -596,7 +641,319 @@ async def document_detail(kb_id:str,document_id:str)->dict[str,Any]:
             error={"type": type(exc).__name__, "message": str(exc)},
         )
 
+@app.post("/v1/knowledge-bases/{kb_id}/documents/text",dependencies=[Depends(require_api_key)])
+async def document_text(
+    kb_id: str,
+    request: TextDocumentRequest,
+) -> dict[str, Any] | JSONResponse:
+    """先保存成原文件，再把文本异步写入知识库"""
 
+    request_id = str(uuid.uuid4())
+    try:
+        #获得知识库元数据
+        meta = manager.kb_store.get(kb_id)
+
+        #清理document_id
+        document_id = (
+            _clean_document_id(request.document_id)
+            if request.document_id
+            else _new_document_id()
+        )
+        #确保文件不存在
+        _ensure_document_not_exists(kb_id, document_id)
+        #准备新文件参数：文件名，文本内容，文件路径
+        filename = _safe_filename(request.file_source or f"{document_id}.txt")
+        raw = request.text.encode("utf-8")
+        source_path = _write_source_file(
+            kb_id,
+            document_id,
+            filename,
+            raw,
+        )
+        #创建文件
+        manager.metadata.create_document(
+            document_id=document_id,
+            kb_id=kb_id,
+            original_filename=filename,
+            source_file_path=source_path,
+            source_file_size=len(raw),
+            source_sha256=_sha256(raw),
+            content_type="text/plain; charset=utf-8",
+            extension=Path(filename).suffix.lower() or ".txt",
+        )
+        #标记文件解析完成
+        manager.metadata.mark_document_parsed(
+            kb_id,
+            document_id,
+            content_length=len(request.text),
+        )
+
+        #创建入库任务
+        track_id = generate_track_id("insert")
+        manager.metadata.create_job(
+            job_id=track_id,
+            kb_id=kb_id,
+            total_files=1,
+        )
+        #job关联新文件
+        manager.metadata.link_job_document(
+            job_id=track_id,
+            document_id=document_id,
+            status="processing",
+        )
+
+        engine = await manager.get_engine(kb_id)
+        try:
+            #文档入队，提交异步索引
+            await engine.enqueue_documents(
+                texts=[request.text],
+                file_sources=[filename],
+                document_ids=[document_id],
+                track_id=track_id,
+            )
+            #标记开始建立索引
+            manager.metadata.mark_document_indexing(kb_id, document_id)
+            manager.metadata.update_job(
+                track_id,
+                status="processing",
+                parsed_count=1,
+                failed_count=0,
+            )
+        #索引失败
+        except Exception as exc:
+            error_msg = f"{type(exc).__name__}: {exc}"
+            manager.metadata.update_document_index_status(
+                kb_id,
+                document_id,
+                index_status="failed",
+                error_msg=error_msg,
+            )
+            manager.metadata.link_job_document(
+                job_id=track_id,
+                document_id=document_id,
+                status="failed",
+                error_msg=error_msg,
+            )
+            manager.metadata.update_job(
+                track_id,
+                status="failed",
+                parsed_count=1,
+                failed_count=1,
+                error_msg=error_msg,
+            )
+            return JSONResponse(
+                status_code=500,
+                content=envelope(
+                    request_id=request_id,
+                    status="error",
+                    data={
+                        "document": manager.metadata.get_document(
+                            kb_id,
+                            document_id,
+                        ),
+                        "track_id": track_id,
+                    },
+                    error={
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                ),
+            )
+
+        return envelope(
+            request_id=request_id,
+            data={
+                "track_id": track_id,
+                "processing_mode": "async",
+                "kb_id": meta.kb_id,
+                "kb_name": meta.name,
+                "document": manager.metadata.get_document(
+                    kb_id,
+                    document_id,
+                ),
+            },
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DocumentAlreadyExistsError as exc:
+        return JSONResponse(
+            status_code=409,
+            content=envelope(
+                request_id=request_id,
+                status="error",
+                error={
+                    "type": "DocumentAlreadyExists",
+                    "message": str(exc),
+                },
+            ),
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content=envelope(
+                request_id=request_id,
+                status="error",
+                error={
+                    "type": "DocumentValidationError",
+                    "message": str(exc),
+                },
+            ),
+        )
+    except Exception as exc:
+        logger.exception(
+            "Text document ingestion failed",
+            extra={
+                "request_id": request_id,
+                "kb_id": kb_id,
+                "error_type": type(exc).__name__,
+            },
+        )
+        return JSONResponse(
+            status_code=500,
+            content=envelope(
+                request_id=request_id,
+                status="error",
+                error={
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            ),
+        )
+
+
+@app.get("/v1/knowledge-bases/{kb_id}/documents/{document_id}/source", dependencies=[Depends(require_api_key)])
+async def document_source(
+    kb_id:str,
+    document_id:str,
+    disposition:str = Query(default="inline", pattern="^(inline|attachment)$"),
+)->FileResponse:
+    """读取指定文档的原文件，用于前端预览或下载。"""
+
+    try:
+        document=manager.metadata.get_document(kb_id=kb_id,document_id=document_id)
+
+        #解析文件原路径(resolve:转移成规范化的绝对路径)
+        source_file_path=document.get("source_file_path")
+        if not source_file_path:
+            raise HTTPException(
+                status_code=404,
+                detail="source file path is missing"
+            )
+        source_path=Path(str(source_file_path)).expanduser().resolve()
+
+        #安全路径
+        allowed_dir=manager.kb_store.source_document_dir(kb_id,document_id).expanduser().resolve()
+        if allowed_dir not in source_path.parents: #防止目录穿越
+            raise HTTPException(
+                status_code=403,
+                detail="surce file path is outside document source directory"
+            )
+        #检查文件是否存在
+        if not source_path.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail="source file not found"
+            )
+
+        #返回原文件
+        return FileResponse(
+            path=source_path,
+            #文件MIME类型
+            media_type=str(document.get("content_type") or "application/octet-stream"),
+            filename=str(document.get("original_filename") or source_path.name),
+            content_disposition_type=disposition    #预览/下载
+        )
+    
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+    except HTTPException:
+        raise
+        
+
+@app.delete("/v1/knowledge-bases/{kb_id}/documents/{document_id}",dependencies=[Depends(require_api_key)])
+async def delete_document(
+    kb_id:str,
+    document_id:str,
+    delete_llm_cache: bool = Query(default=False)   #是否删除LLM缓存
+)->dict[str,Any]:
+    """删除指定知识库内文档元数据、原文件目录和LightRAG派生索引
+    删索引->删元数据+原文件->删目录"""
+
+    request_id=str(uuid.uuid4())
+
+    try:
+        document=manager.metadata.get_document(kb_id,document_id)
+
+        #先删除索引，失败就停止，不删除本地文件和元数据
+        engine=await manager.get_engine(kb_id)
+        await engine.delete_document(document_id,delete_llm_cache=delete_llm_cache)
+
+        source_dir=(manager.metadata.source_document_dir(kb_id, document_id)
+                                        .expanduser().resolve())
+        source_file_path = document.get("source_file_path")
+        if source_file_path:
+            source_path = Path(str(source_file_path)).expanduser().resolve()
+            # 防止元数据被篡改后删除任意文件。
+            if source_dir not in source_path.parents:
+                raise HTTPException(
+                    status_code=403,
+                    detail="source file path is outside document source directory",
+                )
+            # 一次只删除元数据明确记录的这个文件。
+            if source_path.exists():
+                if not source_path.is_file():
+                    raise HTTPException(
+                        status_code=409,
+                        detail="source file path is not a regular file",
+                    )
+                source_path.unlink()
+        #只删除空目录
+        if source_dir.exists():
+            try:
+                source_dir.rmdir()
+            except OSError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="document source directory is not empty",
+                ) from exc
+
+        #文件删除成功后删除元数据
+        manager.metadata.delete_document_metadata(kb_id,document_id)
+        return JSONResponse(
+            status_code=200,
+            content=envelope(
+                request_id=request_id,
+                data={
+                    "deleted":True,
+                    "document":document
+                },
+            )
+        )
+    
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content=envelope(
+                request_id=request_id,
+                status="error",
+                error={
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            ),
+        )
 
 #几个同步函数的区别：
 #单篇详情查询 ──┐
@@ -767,6 +1124,28 @@ def _new_document_id()->str:
     """生成文档id"""
 
     return f"doc_{uuid.uuid4().hex[:16]}"
+
+
+def _clean_document_id(document_id: str) -> str:
+    """校验前端传入的文档 ID，避免路径穿越和非法标识符。"""
+
+    clean = document_id.strip()
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", clean):
+        raise ValueError("invalid document_id")
+    return clean
+
+
+def _ensure_document_not_exists(kb_id: str, document_id: str) -> None:
+    """避免指定 document_id 覆盖已有文档和原文件。"""
+
+    try:
+        manager.metadata.get_document(kb_id, document_id)
+    except KeyError:
+        return
+    raise DocumentAlreadyExistsError(
+        f"document already exists: {document_id}"
+    )
+
 
 def _write_source_file(kb_id:str,document_id:str,filename:str,raw:bytes)->Path:
     """保存上传原文件到sources目录"""

@@ -102,7 +102,7 @@ def test_returns_immediately_when_first_request_is_ready(
     state = service.wait_for_rag_ready(timeout_ms=1000, interval_ms=10)
 
     assert state.ready is True
-    assert state.status == "already_running"
+    assert state.status == "external"
     assert state.data == {"ready": True, "initialized": True}
     assert state.error is None
     assert fake_clock.sleeps == []
@@ -122,7 +122,7 @@ def test_retries_until_service_becomes_ready(
     state = service.wait_for_rag_ready(timeout_ms=1000, interval_ms=10)
 
     assert state.ready is True
-    assert state.status == "already_running"
+    assert state.status == "external"
     assert fake_clock.sleeps == [0.01]
 
 
@@ -143,7 +143,7 @@ def test_connection_failure_retries_until_timeout(
     state = service.wait_for_rag_ready(timeout_ms=25, interval_ms=10)
 
     assert state.ready is False
-    assert state.status == "already_running"
+    assert state.status == "external"
     assert state.error is not None
     assert "URLError" in state.error
     assert fake_clock.now == pytest.approx(0.025)
@@ -174,7 +174,7 @@ def test_http_error_retries_until_timeout(
     state = service.wait_for_rag_ready(timeout_ms=2, interval_ms=1)
 
     assert state.ready is False
-    assert state.status == "already_running"
+    assert state.status == "external"
     assert state.error == f"readyz 返回 HTTP {status_code}"
 
 
@@ -200,6 +200,30 @@ def test_sends_configured_api_key_header(
 
     assert state.ready is True
     assert captured_headers == ["test-secret"]
+
+
+def test_can_explicitly_start_embedded_service(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_settings: SimpleNamespace,
+    fake_clock: FakeClock,
+) -> None:
+    """显式允许时保留旧的嵌入式 RAG 启动行为。"""
+
+    assume_service_is_running(monkeypatch)
+    monkeypatch.setattr(
+        service.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: ready_response(True),
+    )
+
+    state = service.wait_for_rag_ready(
+        timeout_ms=100,
+        interval_ms=1,
+        start_if_missing=True,
+    )
+
+    assert state.ready is True
+    assert state.status == "already_running"
 
 
 def test_service_module_exposes_embedded_start_capability() -> None:
