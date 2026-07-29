@@ -538,6 +538,51 @@ def _read_runtime_rag_overrides(user_data_dir: Path | None = None) -> dict[str, 
         overrides["rag_tool_mode"] = "auto"
     return overrides
 
+def write_runtime_rag_config(
+    config:dict[str,Any],
+    user_data_dir:Path | None=None
+)->None:
+    """写入运行时RAG配置覆盖项"""
+
+    filtered = {
+        key: value
+        for key, value in config.items()
+        if key in _RAG_RUNTIME_FIELDS
+    }
+
+    rag_tool_mode = filtered.get("rag_tool_mode")
+    if rag_tool_mode is not None and rag_tool_mode not in {"auto", "never"}:
+        raise ValueError("rag_tool_mode must be one of: auto, never")
+
+    path = _runtime_rag_config_path(user_data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(filtered, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+def merge_runtime_rag_config(
+    updates: dict[str, Any],
+    user_data_dir: Path | None = None,
+) -> dict[str, Any]:
+    """合并 RAG 配置更新，同时保护已掩码的 API Key。"""
+
+    current = _read_runtime_rag_overrides(user_data_dir)
+    merged = dict(current)
+
+    for key, value in updates.items():
+        if key not in _RAG_RUNTIME_FIELDS:
+            continue
+
+        if key == "api_key" and is_masked_secret(value):
+            # 前端原样提交掩码时保留旧密钥。
+            continue
+
+        merged[key] = value
+
+    write_runtime_rag_config(merged, user_data_dir)
+    return merged
+
 
 def read_runtime_model_config(user_data_dir: Path | None = None) -> dict[str, Any]:
     """读取前端 API 写入的语音模型配置覆盖项。"""
@@ -551,7 +596,85 @@ def read_runtime_model_config(user_data_dir: Path | None = None) -> dict[str, An
         return {}
     return _filter_runtime_model_config(payload)
 
+def write_runtime_model_config(config: dict[str, Any], user_data_dir: Path | None = None) -> None:
+    """写入运行时语音模型配置。"""
 
+    path = runtime_model_config_path(user_data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    filtered = voice_config_for_storage(_filter_runtime_model_config(config))
+    path.write_text(json.dumps(filtered, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+def voice_config_for_storage(config: dict[str, Any]) -> dict[str, Any]:
+    """归一化运行时语音配置。"""
+
+    voice = config.get("voice")
+    if not isinstance(voice, dict):
+        return config
+
+    stt = voice.get("stt")
+    if isinstance(stt, dict):
+        provider = str(
+            stt.get("provider") or "volcengine_bigmodel"
+        ).strip().lower()
+
+        stt["provider"] = provider
+
+        if provider == "volcengine_bigmodel" and not stt.get("model"):
+            stt["model"] = "bigmodel"
+
+    tts = voice.get("tts")
+    if isinstance(tts, dict):
+        provider = str(
+            tts.get("provider") or "dashscope_realtime"
+        ).strip().lower()
+
+        if provider != "dashscope_realtime":
+            raise ValueError(
+                f"当前只支持 DashScope TTS，实际配置为：{provider}"
+            )
+
+        tts["provider"] = "dashscope_realtime"
+
+        if not tts.get("model"):
+            tts["model"] = _default_tts_model()
+
+        if not tts.get("voice"):
+            tts["voice"] = _default_tts_voice()
+
+        # 固定 endpoint 不允许前端配置。
+        tts.pop("base_url", None)
+
+    return config
+
+def validate_voice_config_selection(config: dict[str, Any]) -> None:
+    """校验前端提交的 provider/model/voice 是否属于后端已适配列表。"""
+
+    voice = config.get("voice")
+    if not isinstance(voice, dict):
+        return
+
+    stt = voice.get("stt")
+    if isinstance(stt, dict):
+        stt_provider = str(stt.get("provider") or "volcengine_bigmodel").lower()
+        if stt_provider != "volcengine_bigmodel":
+            raise ValueError("voice.stt.provider must be volcengine_bigmodel")
+        stt_model = str(stt.get("model") or "bigmodel")
+        if stt_model not in _stt_option_ids(stt_provider, "models"):
+            raise ValueError("voice.stt.model is not supported by selected provider")
+
+    tts_section = voice.get("tts")
+    if isinstance(tts_section, dict):
+        provider = _canonical_tts_provider(str(tts_section.get("provider") or "dashscope_realtime"))
+        if provider not in {item["provider"] for item in _TTS_PROVIDER_OPTIONS}:
+            raise ValueError("voice.tts.provider must be dashscope_realtime")
+        model = str(tts_section.get("model") or _default_tts_model())
+        if model not in _tts_option_ids(provider, "models"):
+            raise ValueError("voice.tts.model is not supported by selected provider")
+        voice_id = str(tts_section.get("voice") or _default_tts_voice())
+        if voice_id not in _tts_option_ids(provider, "voices"):
+            raise ValueError("voice.tts.voice is not supported by selected provider")
+
+        
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -796,6 +919,13 @@ def read_runtime_context_model_config(user_data_dir: Path | None = None) -> dict
         return {}
     return _filter_runtime_context_model_config(payload)
 
+def write_runtime_context_model_config(config: dict[str, Any], user_data_dir: Path | None = None) -> None:
+    """写入运行时上下文模型配置。"""
+
+    path = runtime_context_model_config_path(user_data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    filtered = _filter_runtime_context_model_config(config)
+    path.write_text(json.dumps(filtered, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 def _filter_runtime_context_model_config(payload: dict[str, Any]) -> dict[str, Any]:
     """只保留上下文模型运行时配置支持的字段。"""
@@ -888,8 +1018,36 @@ def public_model_options() -> dict[str, Any]:
         },
         "tts": {
             "providers": _TTS_PROVIDER_OPTIONS,
-            "default_provider": "minimax",
+            "default_provider": "dashscope_realtime",
         },
+    }
+
+def public_rag_client_config(config: RagClientSettings) -> dict[str, Any]:
+    """返回不泄露明文密钥的 RAG 客户端配置。"""
+
+    payload = dict(config.__dict__)
+    api_key_masked = mask_secret(config.api_key)
+    payload["api_key"] = api_key_masked
+    payload["api_key_masked"] = api_key_masked
+    payload["api_key_set"] = bool(config.api_key)
+    return payload
+
+def public_context_model_config(config: ContextModelSettings) -> dict[str, Any]:
+    """返回不泄露明文密钥的上下文模型配置。"""
+
+    api_key_masked = mask_secret(config.api_key)
+    return {
+        "model": config.model,
+        "base_url": config.base_url,
+        "api_key": api_key_masked,
+        "api_key_masked": api_key_masked,
+        "api_key_set": bool(config.api_key),
+        "temperature": config.temperature,
+        "max_tokens": config.max_tokens,
+        "max_session_chars": config.max_session_chars,
+        "history_reference_limit": config.history_reference_limit,
+        "timeout_ms": config.timeout_ms,
+        "effective": "next_session",
     }
 
 
@@ -963,6 +1121,10 @@ def _override_str(config: dict[str, Any], section: str, key: str, fallback: str)
         return value.strip()
     return fallback
 
+def _default_tts_provider() -> str:
+    """返回 DashScope 实时 TTS 默认供应商。"""
+
+    return "dashscope_realtime"
 
 def _default_tts_model() -> str:
     """返回 DashScope 实时 TTS 默认模型。"""
@@ -986,3 +1148,23 @@ def _default_tts_base_url() -> str:
     """返回 DashScope TTS 的 WebSocket 地址。"""
 
     return "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+
+def _stt_option_ids(provider: str, field_name: str) -> set[str]:
+    """读取 STT provider 的选项 ID 集合。"""
+
+    for item in _STT_PROVIDER_OPTIONS:
+        if item["provider"] == provider:
+            values = item.get(field_name, [])
+            if isinstance(values, list):
+                return {str(value.get("id")) for value in values if isinstance(value, dict)}
+    return set()
+
+def _tts_option_ids(provider: str, field_name: str) -> set[str]:
+    """读取 TTS provider 的选项 ID 集合。"""
+
+    for item in _TTS_PROVIDER_OPTIONS:
+        if item["provider"] == provider:
+            values = item.get(field_name, [])
+            if isinstance(values, list):
+                return {str(value.get("id")) for value in values if isinstance(value, dict)}
+    return set()

@@ -11,11 +11,13 @@ LightRAG、文档存储、索引与查询"""
 
 import asyncio
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from typing import Any, AsyncIterator
+from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Response, UploadFile
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel,Field
 
 from liverag.api.rag_gateway import RagGateway,GatewayResponse,envelope
 from liverag.config.settings import (
@@ -37,6 +39,7 @@ from liverag.config.settings import (
     voice_config_for_storage,
     write_runtime_context_model_config,
     write_runtime_model_config,
+    merge_runtime_rag_config,
 )
 from liverag.context.store import ContextStore
 from liverag.runtime.paths import build_runtime_paths
@@ -53,6 +56,12 @@ metadata_store.initialize()
 store=ContextStore(paths)
 store.initialize()
 rag_gateway = RagGateway(settings)
+
+_SECRET_FIELDS = {
+    "api_key",
+    "access_token",
+    "app_id",
+}
 
 @asynccontextmanager
 async def lifespan(
@@ -95,6 +104,19 @@ class TextPayload(BaseModel):
 
     content: str
 
+class RagConfigPayload(BaseModel):
+    """RAG配置更新请求"""
+    enabled: bool | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    query_mode: str | None = None
+    timeout_ms: int | None = None
+    top_k: int | None = None
+    chunk_top_k: int | None = None
+    context_max_chars: int | None = None
+    cache_ttl_s: float | None = None
+    enable_rerank: bool | None = None
+    rag_tool_mode: RagToolMode | None = None
 
 class SessionKnowledgeBasePayload(BaseModel):
     """会话知识库选择请求。"""
@@ -105,6 +127,55 @@ class KnowledgeBasePayload(BaseModel):
 
     name:str|None=None
     description:str|None=None
+
+class ModelSttPayload(BaseModel):
+    """语音 STT 模型配置更新请求。"""
+
+    provider: str | None = None
+    model: str | None = None
+    app_id: str | None = None
+    access_token: str | None = None
+
+
+class ModelLlmPayload(BaseModel):
+    """语音 LLM 模型配置更新请求。"""
+
+    model: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+
+
+class ModelTtsPayload(BaseModel):
+    """语音 TTS 模型配置更新请求。"""
+
+    provider: str | None = None
+    model: str | None = None
+    voice: str | None = None
+    api_key: str | None = None
+
+class ModelVoicePayload(BaseModel):
+    """语音模型配置更新请求。"""
+
+    stt: ModelSttPayload | None = None
+    llm: ModelLlmPayload | None = None
+    tts: ModelTtsPayload | None = None
+
+class ModelConfigPayload(BaseModel):
+    """模型配置更新请求。"""
+
+    voice: ModelVoicePayload | None = None
+
+class ContextModelPayload(BaseModel):
+    """上下文模型配置更新请求。"""
+
+    model: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    temperature: float | None = Field(default=None,ge=0,le=2)
+    max_tokens: int | None = Field(default=None, gt=0)
+    max_session_chars: int | None = Field(default=None, gt=0)
+    history_reference_limit: int | None = Field(default=None,ge=0)
+    timeout_ms: int | None = Field(default=None, gt=0)
 
 
 @app.get("/health")
@@ -136,6 +207,101 @@ async def runtime_state(session_id:str)->dict[str,Any]:
 
     return state
 
+
+#================================ /model/... ================================
+@app.get("/model/config")
+async def model_config()->dict[str,Any]:
+    """读取下一次通话的语音记录"""
+
+    voice=load_voice_settings(settings.user_data_dir)
+    return envelope(
+        data={
+            "voice":public_voice_config(voice,effective="next_session"),
+            "options":public_model_options()
+        }
+    )
+
+@app.put("/model/config")
+async def put_model_config(payload:ModelConfigPayload)->dict[str,Any]:
+    """更新下一次通话的语音记录"""
+
+    #删除前端回填的掩码秘钥
+    updates=_drop_masked_secret_updates(payload.model_dump(exclude_none=True))
+    #校验请求字段
+    _validate_model_config_updates(updates)
+    #读取现有JSON覆盖配置
+    current=read_runtime_model_config(settings.user_data_dir)
+
+    try:
+        #深度合并局部更新和旧设置
+        merged=voice_config_for_storage(_deep_merge_dict(current,updates))
+        #归一化Provider/model/voice
+        validate_voice_config_selection(merged)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    #校验成功后一次性写入
+    write_runtime_model_config(merged,settings.user_data_dir)
+    voice=load_voice_settings(settings.user_data_dir)
+
+    #返回下一场通话生效的配置
+    return envelope(
+        data={
+            "voice": public_voice_config(voice, effective="next_session"),
+            "options": public_model_options(),
+        }
+    )
+
+@app.get("/model/options")
+async def model_options()->dict[str,Any]:
+    """读取前端模型选择页可用 provider、模型和音色"""
+
+    return envelope(data=public_model_options())
+
+@app.get("/model/effective-state/{session_id}")
+async def model_effective_state(session_id:str)->dict[str,Any]:
+    """读取当前模型配置和本次/最近通话实际生效状态"""
+
+    #用户刚保存，下一次通话将用的配置
+    configured={
+        "voice":public_voice_config(load_voice_settings(settings.user_data_dir),effective="next_session"),
+        "options":public_model_options()
+    }
+
+    #当前或最近通话真正用的配置
+    active_session=store.read_runtime_state(session_id).get("active_session")
+    if not isinstance(active_session,dict):
+        active_session=None
+
+    return envelope(
+        data={
+            "configured": configured,
+            "active_session": active_session,
+            #两者是否不同
+            "pending_reconnect": _model_pending_reconnect(
+                active_session.get("voice") if active_session else None
+            ),
+        }
+    )
+
+@app.get("/model/context-config")
+async def context_model_config() -> dict[str, Any]:
+    """读取上下文模型配置。"""
+
+    config = load_context_model_settings(settings.user_data_dir)
+    return envelope(data={"context_model": public_context_model_config(config)})
+
+@app.put("/model/context-config")
+async def put_context_model_config(payload:ContextModelPayload) -> dict[str, Any]:
+    """更改上下文模型配置。"""
+
+    updates=_drop_masked_secret_updates(payload.model_dump(exclude_none=True))
+    _validate_context_model_updates(updates)
+    current=read_runtime_context_model_config(settings.user_data_dir)
+    merged = {**current, **updates}
+    write_runtime_context_model_config(merged,settings.user_data_dir)
+    config=load_context_model_settings(settings.user_data_dir)
+    return envelope(data={"context_model":public_context_model_config(config)})
 
 #================================ /prompt/...================================
 @app.get("/prompt/soul")
@@ -490,6 +656,26 @@ async def rag_session_query_data(session_id:str,payload: QueryRequest)->JSONResp
     kb = await _effective_session_knowledge_base(session_id)
     return await rag_kb_query_data(kb["kb_id"], payload=payload)
 
+@app.get("/rag/config")
+async def get_rag_config()->dict[str,Any]:
+    """获取当前语音链路的 RAG 配置"""
+
+    config=load_rag_client_settings(settings.user_data_dir)
+    return envelope(data={"config":public_rag_client_config(config)})
+    
+@app.put("/rag/config")
+async def put_rag_config(payload: RagConfigPayload) -> dict[str, Any]:
+    """更新语音链路 RAG 配置"""
+    updates = payload.model_dump(exclude_none=True)
+
+    merge_runtime_rag_config(updates, settings.user_data_dir)
+    configured = load_rag_client_settings(settings.user_data_dir)
+
+    return envelope(
+        status="ok",
+        data={"config":public_rag_client_config(configured)}
+    )
+
 #===========================辅助函数==============================
 def _json_response(result: GatewayResponse) -> JSONResponse:
     """把 RagGateway 封装的下游响应，转换成 FastAPI 可以直接返回给前端的 JSONResponse"""
@@ -679,3 +865,101 @@ async def _generate_overview_for_completed_job(kb_id:str,job_id:str)->None:
         # 后台概览生成失败不影响任务查询接口；具体失败会在 generator 内部写入 meta。
         return 
     
+def _drop_masked_secret_updates(payload:dict[str,Any])->dict[str,Any]:
+    """移除前端原样回传的密钥掩码，避免覆盖真实密钥。"""
+    
+    cleaned: dict[str, Any] = {}
+    for key, value in payload.items():
+        if isinstance(value, dict):
+            #遇到嵌套对象，递归处理
+            nested = _drop_masked_secret_updates(value)
+            if nested:
+                cleaned[key] = nested
+            continue
+        #跳过api_key
+        if key in _SECRET_FIELDS and is_masked_secret(value):
+            continue
+        cleaned[key] = value
+    return cleaned
+
+def _validate_model_config_updates(updates:dict[str,Any])->None:
+    """校验当前模型配置更新请求字段"""
+
+    for path, value in _walk_model_update_values(updates):
+        #不准为空字符串
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(status_code=422, detail=f"{path} cannot be empty")
+        #限制stt供应商
+        if path == "voice.stt.provider" and value.strip().lower() != "volcengine_bigmodel":
+            raise HTTPException(status_code=422, detail="voice.stt.provider must be volcengine_bigmodel")
+        #限制tts供应商
+        if path == "voice.tts.provider" and value.strip().lower()!="dashscope_realtime":
+            raise HTTPException(status_code=422, detail="voice.tts.provider must be dashscope_realtime")
+        #检查url
+        if path.endswith(".base_url") and not _is_http_url(value):
+            raise HTTPException(status_code=422, detail=f"{path} must be an http(s) URL")
+
+def _validate_context_model_updates(updates: dict[str, Any]) -> None:
+    """校验 Context Model 字符串字段。"""
+
+    for key in ("model", "base_url", "api_key"):
+        value = updates.get(key)
+        if value is not None:
+            if not isinstance(value, str) or not value.strip():
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{key} cannot be empty",
+                )
+
+    base_url = updates.get("base_url")
+    if base_url is not None and not _is_http_url(base_url):
+        raise HTTPException(
+            status_code=422,
+            detail="base_url must be an http(s) URL",
+        )
+    
+def _walk_model_update_values(payload: dict[str, Any], prefix: str = "") -> list[tuple[str, Any]]:
+    """展开模型配置更新字段。
+    例子：
+        {
+        "voice": {
+            "stt": {
+                "provider": "volcengine_bigmodel"
+            },
+            "llm": {
+                "base_url": "https://example.com/v1"
+            }
+        }
+    }
+    变成：
+        [
+        ("voice.stt.provider", "volcengine_bigmodel"),
+        ("voice.llm.base_url", "https://example.com/v1"),
+        ]
+    """
+
+    items: list[tuple[str, Any]] = []
+    for key, value in payload.items():
+        path = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            items.extend(_walk_model_update_values(value, path))
+        else:
+            items.append((path, value))
+    return items
+
+def _is_http_url(value: str) -> bool:
+    """判断字符串是否是 http(s) URL。"""
+
+    parsed = urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+def _deep_merge_dict(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    """递归合并配置字典。"""
+
+    result = deepcopy(base)
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge_dict(result[key], value)
+        else:
+            result[key] = value
+    return result

@@ -343,11 +343,11 @@ tests/rag/test_doc_parser.py
 
 ## M3 工作包 B：动态模型与 Prompt 配置
 
-- [ ] 在现有 `.env` 默认值之上增加 runtime model/context config JSON 覆盖层。
-- [ ] 实现模型、STT、TTS、Context Model、SOUL 和 RAG `auto/never` 配置接口。
-- [ ] 实现 API Key 掩码输出与掩码值回填保护。
-- [ ] 明确语音 provider 变更“下一次通话生效”，不得在进行中的 session 热切换。
-- [ ] 配置校验失败返回稳定字段级错误，不写入部分配置。
+- [√] 在现有 `.env` 默认值之上增加 runtime model/context config JSON 覆盖层。
+- [√] 实现模型、STT、TTS、Context Model、SOUL 和 RAG `auto/never` 配置接口。
+- [√] 实现 API Key 掩码输出与掩码值回填保护。
+- [√] 明确语音 provider 变更“下一次通话生效”，不得在进行中的 session 热切换。
+- [√] 配置校验失败返回稳定字段级错误，不写入部分配置。
 - [ ] 提交：`feat: add runtime model and prompt management`。
 
 ## M3 工作包 C：Knowledge Overview 与 Job 管理

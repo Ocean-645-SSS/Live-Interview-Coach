@@ -17,20 +17,6 @@ def api_server(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 
     import liverag.config.settings as settings_module
 
-    # server.py 中尚未实现的 M3-B 配置接口不属于本测试包；
-    # 提供仅用于完成模块导入的占位符，测试不会调用这些名称。
-    missing_m3b_names = (
-        "public_context_model_config",
-        "public_rag_client_config",
-        "validate_voice_config_selection",
-        "voice_config_for_storage",
-        "write_runtime_context_model_config",
-        "write_runtime_model_config",
-    )
-    for name in missing_m3b_names:
-        if not hasattr(settings_module, name):
-            monkeypatch.setattr(settings_module, name, lambda *args, **kwargs: None, raising=False)
-
     import liverag.rag.service as service_module
     from liverag.runtime.paths import build_runtime_paths, ensure_runtime_dirs
 

@@ -10,7 +10,14 @@ from pydantic import ValidationError
 from liverag.config.settings import (
     Settings,
     VoiceSettings,
+    load_context_model_settings,
+    load_rag_client_settings,
     load_voice_settings,
+    merge_runtime_rag_config,
+    public_context_model_config,
+    public_rag_client_config,
+    read_runtime_context_model_config,
+    write_runtime_context_model_config,
 )
 
 MODEL_ENV = {
@@ -171,3 +178,92 @@ def test_voice_settings_is_frozen():
 
     with pytest.raises((AttributeError, ValidationError)):
         settings.tts_voice = "Serena"
+
+
+def test_context_model_runtime_config_overrides_environment_and_masks_secret(
+    monkeypatch,
+    tmp_path,
+):
+    """Context Model JSON 覆盖环境默认值，对外响应不泄露密钥。"""
+
+    monkeypatch.setenv("CONTEXT_MODEL_MODEL", "env-model")
+    monkeypatch.setenv("CONTEXT_MODEL_API_KEY", "env-secret")
+    write_runtime_context_model_config(
+        {
+            "model": "runtime-model",
+            "api_key": "runtime-secret",
+            "temperature": 0.25,
+            "max_tokens": 1234,
+        },
+        tmp_path,
+    )
+
+    loaded = load_context_model_settings(tmp_path)
+    public = public_context_model_config(loaded)
+
+    assert loaded.model == "runtime-model"
+    assert loaded.api_key == "runtime-secret"
+    assert loaded.temperature == 0.25
+    assert loaded.max_tokens == 1234
+    assert public["api_key"] != "runtime-secret"
+    assert public["api_key_set"] is True
+
+
+def test_context_model_writer_filters_unknown_fields(tmp_path):
+    """Context Model JSON 只保存后端支持的配置字段。"""
+
+    write_runtime_context_model_config(
+        {
+            "model": "qwen-max",
+            "unknown": "discard-me",
+        },
+        tmp_path,
+    )
+
+    assert read_runtime_context_model_config(tmp_path) == {
+        "model": "qwen-max"
+    }
+
+
+def test_rag_runtime_merge_preserves_masked_api_key(monkeypatch, tmp_path):
+    """RAG 局部更新时，前端掩码不会覆盖已有真实密钥。"""
+
+    monkeypatch.setenv("LIGHTRAG_API_KEY", "")
+    merge_runtime_rag_config(
+        {
+            "api_key": "rag-real-secret",
+            "top_k": 8,
+            "rag_tool_mode": "auto",
+        },
+        tmp_path,
+    )
+    first = public_rag_client_config(
+        load_rag_client_settings(tmp_path)
+    )
+
+    merge_runtime_rag_config(
+        {
+            "api_key": first["api_key"],
+            "top_k": 2,
+            "rag_tool_mode": "never",
+        },
+        tmp_path,
+    )
+    loaded = load_rag_client_settings(tmp_path)
+
+    assert loaded.api_key == "rag-real-secret"
+    assert loaded.top_k == 2
+    assert loaded.rag_tool_mode == "never"
+
+
+def test_rag_runtime_rejects_unknown_tool_mode(tmp_path):
+    """运行时 RAG 工具模式只允许 auto 或 never。"""
+
+    with pytest.raises(
+        ValueError,
+        match="rag_tool_mode must be one of",
+    ):
+        merge_runtime_rag_config(
+            {"rag_tool_mode": "always"},
+            tmp_path,
+        )

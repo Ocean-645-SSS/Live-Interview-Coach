@@ -15,6 +15,7 @@ tts-debug.txt
 .vscode
 *.egg-info
 .pytest_cache
+.pytest-runs/
 .ruff_cache
 
 # Claude Code
