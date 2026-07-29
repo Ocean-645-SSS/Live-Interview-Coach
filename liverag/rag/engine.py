@@ -7,7 +7,9 @@
 """
 
 import asyncio
+from collections import Counter
 from math import ceil
+import re
 import time
 from asyncio.log import logger
 from dataclasses import asdict, is_dataclass
@@ -52,7 +54,13 @@ FOLLOWUP_PHRASES = {
     "讲详细点",
     "说详细点",
 }
+
 NO_EVIDENCE_ANSWER = "知识库中没有足够依据"
+
+CODE_LIKE_ENTITY_RE = re.compile(
+    r"(^src/|^chunk-|^doc-|https?://|[/\\].+\.(ts|tsx|js|jsx|py|md|json|ya?ml|toml|sh|go|rs|java|kt|swift|rb|php|c|cpp|h|hpp)$)",
+    re.IGNORECASE,
+)
 
 def _is_followup_query(text: str) -> bool:
     """判断是否为追问"""
@@ -78,6 +86,27 @@ def _strip_chunk_content(chunks, include_content: bool):
     # 复制每个chunk，但是删除"content"字段内容
     return [{k: v for k, v in chunk.items() if k != "content"} for chunk in chunks]
 
+def _is_topic_entity(name: str) -> bool:
+    """判断一个实体名是否适合作为知识库主题展示。"""
+
+    text = name.strip()
+    if len(text) < 2 or len(text) > 80:
+        return False
+    if CODE_LIKE_ENTITY_RE.search(text):
+        return False
+    if text.count("/") or text.count("\\"):
+        return False
+    if sum(ch in "*`{}[]<>" for ch in text) >= 2:
+        return False
+    return sum(ch.isalpha() for ch in text) != 0
+
+
+def _build_topic_preview(candidates: list[str]) -> str:
+    """把一组实体名压缩成文档主题预览。"""
+
+    filtered = [item for item in candidates if _is_topic_entity(item)]
+    picked = filtered[:3] if filtered else candidates[:3]
+    return " / ".join(picked)
 
 #================异常类===============
 class RagEngineError(RuntimeError):
@@ -201,7 +230,7 @@ class RagEngine:
             "kb_id": self.settings.kb_id,
             "kb_name": self.settings.kb_name,
         }
-    
+
     async def finalize(self):
         """释放LiveRAG存储资源"""
         for task in list(self._background_jobs):
@@ -866,4 +895,237 @@ class RagEngine:
             "total": len(docs),
             "kb_id": self.settings.kb_id,
             "kb_name": self.settings.kb_name,
+        }
+
+    async def knowledge_overview(
+        self,
+        *,
+        entity_limit: int = 20,
+        relation_limit: int = 12,
+        document_limit: int = 10,
+        topic_limit: int = 8,
+    ) -> dict[str, Any]:
+        """返回知识库的实体、关系和文档主题概览。
+        获取全部文档状态
+            ↓
+        筛选已完成索引的文档
+            ↓
+        读取这些文档的实体和关系
+            ↓
+        统计并排序实体、主题和关系
+            ↓
+        生成每个文档的简要介绍
+            ↓
+        返回结构化 JSON"""
+
+        #读取知识库有多少文档、哪些processed、哪些失败、哪些等待
+        rag = self.ensure_ready()
+        status_counts = await rag.doc_status.get_all_status_counts()
+        total_documents = int(status_counts.get("all", 0) or 0)
+        docs, _ = await rag.doc_status.get_docs_paginated(
+            page=1,
+            page_size=max(total_documents or 0, 1),
+        )
+        if total_documents == 0:
+            total_documents = len(docs)
+        documents = [(doc_id, _to_jsonable(status)) for doc_id, status in docs]
+        processed = [(doc_id, status) for doc_id, status in documents if status.get("status") == "processed"]
+        processed_ids = [doc_id for doc_id, _ in processed]
+
+        if not processed_ids:
+            return {
+                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "summary": {
+                    "total_documents": total_documents,
+                    "processed_documents": status_counts.get("processed", 0),
+                    "failed_documents": status_counts.get("failed", 0),
+                    "pending_documents": total_documents
+                    - status_counts.get("processed", 0)
+                    - status_counts.get("failed", 0),
+                    "total_chunks": 0,
+                    "total_entities": 0,
+                    "total_relationships": 0,
+                },
+                "topics": [],
+                "top_entities": [],
+                "top_relationships": [],
+                "documents": [
+                    {
+                        "document_id": doc_id,
+                        "kb_id": self.settings.kb_id,
+                        "kb_name": self.settings.kb_name,
+                        "file_path": status.get("file_path"),
+                        "status": status.get("status"),
+                        "chunks_count": status.get("chunks_count", 0),
+                        "updated_at": status.get("updated_at") or status.get("created_at"),
+                        "topic_preview": "",
+                        "top_entities": [],
+                    }
+                    for doc_id, status in documents[:document_limit]
+                ],
+            }
+
+        full_entities_raw = await rag.full_entities.get_by_ids(processed_ids)
+        full_relations_raw = await rag.full_relations.get_by_ids(processed_ids)
+        full_entities = [_to_jsonable(item or {}) for item in full_entities_raw]
+        full_relations = [_to_jsonable(item or {}) for item in full_relations_raw]
+
+        #文档包含哪些实体、关系
+        entity_mentions = Counter[str]()
+        entity_documents = Counter[str]()
+        relation_mentions = Counter[tuple[str, str]]()
+        relation_documents = Counter[tuple[str, str]]()
+        doc_entities: dict[str, list[str]] = {}
+
+        for (doc_id, _status), entity_payload in zip(processed, full_entities, strict=False):
+            unique_entities: list[str] = []
+            seen_entities: set[str] = set()
+            for raw_name in entity_payload.get("entity_names") or []:
+                name = str(raw_name).strip()
+                if not name:
+                    continue
+                entity_mentions[name] += 1
+                if name in seen_entities:
+                    continue
+                seen_entities.add(name)
+                entity_documents[name] += 1
+                unique_entities.append(name)
+            doc_entities[doc_id] = unique_entities
+
+        for relation_payload in full_relations:
+            seen_pairs: set[tuple[str, str]] = set()
+            for raw_pair in relation_payload.get("relation_pairs") or []:
+                if not isinstance(raw_pair, (list, tuple)) or len(raw_pair) != 2:
+                    continue
+                source = str(raw_pair[0]).strip()
+                target = str(raw_pair[1]).strip()
+                if not source or not target:
+                    continue
+                pair = (source, target)
+                relation_mentions[pair] += 1
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                relation_documents[pair] += 1
+
+        unique_entities = list(entity_documents.keys())
+        entity_chunk_payloads = await rag.entity_chunks.get_by_ids(unique_entities) if unique_entities else []
+        entity_chunk_map = {
+            name: _to_jsonable(payload or {})
+            for name, payload in zip(unique_entities, entity_chunk_payloads, strict=False)
+        }
+
+        #统计并且排序：出现次数、关联多少文本块、覆盖多少文档
+        ranked_entities = sorted(
+            unique_entities,
+            key=lambda name: (
+                entity_documents[name],
+                entity_chunk_map.get(name, {}).get("count", 0),
+                entity_mentions[name],
+                name.lower(),
+            ),
+            reverse=True,
+        )
+
+        #最重要的实体
+        top_entities: list[dict[str, Any]] = []
+        for name in ranked_entities[:entity_limit]:
+            try:
+                degree = await rag.chunk_entity_relation_graph.node_degree(name)
+            except Exception:
+                degree = 0
+            top_entities.append(
+                {
+                    "name": name,
+                    "mention_count": entity_mentions[name],
+                    "document_count": entity_documents[name],
+                    "chunk_count": entity_chunk_map.get(name, {}).get("count", 0),
+                    "degree": degree,
+                    "is_topic_like": _is_topic_entity(name),
+                }
+            )
+
+        ranked_topics = [
+            name
+            for name in ranked_entities
+            if _is_topic_entity(name)
+        ]
+        topics = [
+            {
+                "name": name,
+                "document_count": entity_documents[name],
+                "chunk_count": entity_chunk_map.get(name, {}).get("count", 0),
+                "mention_count": entity_mentions[name],
+            }
+            for name in ranked_topics[:topic_limit]
+        ]
+
+        ranked_relations = sorted(
+            relation_documents.keys(),
+            key=lambda pair: (
+                relation_documents[pair],
+                relation_mentions[pair],
+                pair[0].lower(),
+                pair[1].lower(),
+            ),
+            reverse=True,
+        )
+
+        #最重要的关系
+        top_relationships = [
+            {
+                "source": source,
+                "target": target,
+                "document_count": relation_documents[(source, target)],
+                "mention_count": relation_mentions[(source, target)],
+            }
+            for source, target in ranked_relations[:relation_limit]
+        ]
+
+        document_items: list[dict[str, Any]] = []
+        for doc_id, status in documents[:document_limit]:
+            entities = doc_entities.get(doc_id, [])
+            ranked_doc_entities = sorted(
+                entities,
+                key=lambda name: (
+                    entity_documents[name],
+                    entity_chunk_map.get(name, {}).get("count", 0),
+                    entity_mentions[name],
+                    name.lower(),
+                ),
+                reverse=True,
+            )
+            topic_preview = _build_topic_preview(ranked_doc_entities)
+            document_items.append(
+                {
+                    "document_id": doc_id,
+                    "kb_id": self.settings.kb_id,
+                    "kb_name": self.settings.kb_name,
+                    "file_path": status.get("file_path"),
+                    "status": status.get("status"),
+                    "chunks_count": status.get("chunks_count", 0),
+                    "updated_at": status.get("updated_at") or status.get("created_at"),
+                    "topic_preview": topic_preview,
+                    "top_entities": ranked_doc_entities[:5],
+                }
+            )
+
+        pending_documents = total_documents - status_counts.get("processed", 0) - status_counts.get("failed", 0)
+        total_chunks = sum((status.get("chunks_count") or 0) for _, status in processed)
+
+        return {
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "summary": {
+                "total_documents": total_documents,
+                "processed_documents": status_counts.get("processed", 0),
+                "failed_documents": status_counts.get("failed", 0),
+                "pending_documents": pending_documents,
+                "total_chunks": total_chunks,
+                "total_entities": len(unique_entities),
+                "total_relationships": len(relation_documents),
+            },
+            "topics": topics,
+            "top_entities": top_entities,
+            "top_relationships": top_relationships,
+            "documents": document_items,
         }

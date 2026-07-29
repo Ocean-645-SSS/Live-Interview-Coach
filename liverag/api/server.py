@@ -12,6 +12,7 @@ LightRAG、文档存储、索引与查询"""
 import asyncio
 from contextlib import asynccontextmanager
 from copy import deepcopy
+import logging
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
 
@@ -42,11 +43,14 @@ from liverag.config.settings import (
     merge_runtime_rag_config,
 )
 from liverag.context.store import ContextStore
+from liverag.context.overview import KnowledgeOverviewGenerator
 from liverag.runtime.paths import build_runtime_paths
 from liverag.rag.metadata_store import MetadataStore
 from liverag.rag.schemas import QueryRequest,TextDocumentRequest
 from liverag.rag.service import wait_for_rag_ready
 
+
+logger = logging.getLogger("liverag.api.server")
 
 load_environment() #导入.env.local
 settings=load_app_settings()
@@ -676,6 +680,45 @@ async def put_rag_config(payload: RagConfigPayload) -> dict[str, Any]:
         data={"config":public_rag_client_config(configured)}
     )
 
+@app.get("/rag/knowledge-bases/{kb_id}/context/overview")
+async def rag_kb_context_overview(kb_id:str)->dict[str,Any]:
+    """读取指定知识库的固定上下文概览。"""
+
+    #确保知识库真实存在
+    await _knowledge_base_detail(kb_id)
+    return envelope(
+        data={
+            "kb_id": kb_id,
+            "content": store.read_knowledge_overview(kb_id),
+            "meta": store.read_knowledge_overview_meta(kb_id),
+        }
+    )
+
+@app.put("/rag/knowledge-bases/{kb_id}/context/overview")
+async def put_rag_kb_context_overview(kb_id: str, payload: TextPayload) -> dict[str, Any]:
+    """手动覆盖指定知识库的固定上下文概览。"""
+
+    kb=await _knowledge_base_detail(kb_id)
+
+    content=payload.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="content cannot be empty")
+
+    store.write_knowledge_overview(
+        kb_id=kb_id,
+        content=content,
+        stale=False,
+        reason="manual_update", #手动更新
+        source="manual",
+    )
+    return envelope(
+        data={
+            "kb_id":kb["kb_id"],
+            "kb_name":kb["name"],
+            "content":store.read_knowledge_overview(kb_id),
+            "meta":store.read_knowledge_overview_meta(kb_id)
+        }
+    )
 #===========================辅助函数==============================
 def _json_response(result: GatewayResponse) -> JSONResponse:
     """把 RagGateway 封装的下游响应，转换成 FastAPI 可以直接返回给前端的 JSONResponse"""
@@ -843,7 +886,6 @@ def _job_has_new_processed_documents(data:dict[str,Any]) ->bool:
             return True
     return False
 
-#TODO
 async def _generate_overview_for_completed_job(kb_id:str,job_id:str)->None:
     """为已完成索引任务生成知识库概览。"""
 
@@ -861,10 +903,43 @@ async def _generate_overview_for_completed_job(kb_id:str,job_id:str)->None:
             reason="index_completed",
             source_job_id=job_id,
         )
-    except Exception:
-        # 后台概览生成失败不影响任务查询接口；具体失败会在 generator 内部写入 meta。
-        return 
-    
+    except Exception as exc:
+        # 后台概览生成失败不影响任务查询接口，但必须保留可诊断信息。
+        logger.exception(
+            "knowledge_overview.background_generation_failed",
+            extra={
+                "kb_id": kb_id,
+                "job_id": job_id,
+                "error": str(exc),
+            },
+        )
+        return
+
+async def _raw_knowledge_overview(kb_id:str)->dict[str,Any]:
+    """读取内部 RAG Core 的结构化知识库概览。"""
+
+    result = await rag_gateway.get(
+        f"/v1/knowledge-bases/{kb_id}/overview",
+        params={
+            "entity_limit": 20,
+            "relation_limit": 12,
+            "document_limit": 20,
+            "topic_limit": 12,
+        },
+    )
+    if result.body.get("status") != "ok":
+        error = result.body.get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+        raise RuntimeError(
+            message
+            or f"RAG Core overview request failed with HTTP {result.status_code}"
+        )
+
+    data = result.body.get("data")
+    if not isinstance(data, dict):
+        raise RuntimeError("RAG Core returned invalid overview data")
+    return data
+
 def _drop_masked_secret_updates(payload:dict[str,Any])->dict[str,Any]:
     """移除前端原样回传的密钥掩码，避免覆盖真实密钥。"""
     

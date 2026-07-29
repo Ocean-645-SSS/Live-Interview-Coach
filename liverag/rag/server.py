@@ -386,6 +386,37 @@ async def query_data(kb_id: str, request: QueryRequest) -> dict[str, Any]:
             status="error",
             error={"type": type(exc).__name__, "message": str(exc)},
         )
+
+@app.get("/v1/knowledge-bases/{kb_id}/overview",dependencies=[Depends(require_api_key)])
+async def knowledge_overview(
+    kb_id:str,
+    entity_limit:int=Query(default=20, ge=0, le=100),
+    relation_limit:int=Query(default=12, ge=0, le=100),
+    document_limit:int=Query(default=10, ge=0, le=100),
+    topic_limit:int=Query(default=8, ge=0, le=100),
+)->dict[str,Any]:
+    """读取指定知识库概览"""
+
+    request_id=str(uuid.uuid4())
+
+    try:
+        engine=await manager.get_engine(kb_id)
+        data=await engine.knowledge_overview(
+            entity_limit=entity_limit,
+            relation_limit=relation_limit,
+            document_limit=document_limit,
+            topic_limit=topic_limit,
+        )
+        return envelope(request_id=request_id,data=data)
+
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        return envelope(
+            request_id=request_id,
+            status="error",
+            error={"type": type(exc).__name__, "message": str(exc)},
+        )
 #=============================documents 接口============================
 @app.post("/v1/knowledge-bases/{kb_id}/documents/files",dependencies=[Depends(require_api_key)])
 async def documents_files(
@@ -402,7 +433,7 @@ async def documents_files(
     try:
         #创建上传任务
         meta=manager.kb_store.get(kb_id) #确认知识库存在
-        track_id=generate_track_id("insert") #TODO
+        track_id=generate_track_id("insert")
         #创建上传任务
         manager.metadata.create_job(job_id=track_id,kb_id=kb_id,total_files=len(files))
 
@@ -641,7 +672,11 @@ async def document_detail(kb_id:str,document_id:str)->dict[str,Any]:
             error={"type": type(exc).__name__, "message": str(exc)},
         )
 
-@app.post("/v1/knowledge-bases/{kb_id}/documents/text",dependencies=[Depends(require_api_key)])
+@app.post(
+    "/v1/knowledge-bases/{kb_id}/documents/text",
+    dependencies=[Depends(require_api_key)],
+    response_model=None,
+)
 async def document_text(
     kb_id: str,
     request: TextDocumentRequest,

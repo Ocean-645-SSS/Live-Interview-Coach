@@ -352,10 +352,10 @@ tests/rag/test_doc_parser.py
 
 ## M3 工作包 C：Knowledge Overview 与 Job 管理
 
-- [ ] 索引 job 完成且有新 processed 文档时，后台调用独立 Context Model 生成 overview。
-- [ ] 上传或删除文档后把 overview 标记 stale；生成失败写降级 overview，不影响文档和通话。
-- [ ] 管理 API 提供 job 查询、文档状态、错误原因和 overview 状态。
-- [ ] job 管理只观察/同步任务，不承担 RAG Core 进程生命周期。
+- [√] 索引 job 完成且有新 processed 文档时，后台调用独立 Context Model 生成 overview。
+- [√] 上传或删除文档后把 overview 标记 stale；生成失败写降级 overview，不影响文档和通话。
+- [√] 管理 API 提供 job 查询、文档状态、错误原因和 overview 状态。
+- [√] job 管理只观察/同步任务，不承担 RAG Core 进程生命周期。
 - [ ] 提交：`feat: add knowledge overview and job management`。
 
 ## M3 工作包 D：多格式文档解析
