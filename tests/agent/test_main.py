@@ -144,7 +144,7 @@ def install_job_dependencies(
             pass
 
         def render(self, **kwargs: Any) -> SimpleNamespace:
-            assert kwargs["session_id"] == "job-id"
+            assert kwargs["session_id"] == "room-name"
             assert kwargs["kb_id"] == "kb-1"
             return SimpleNamespace(
                 prompt="固定系统提示词",
@@ -207,7 +207,7 @@ async def test_agent_job_starts_and_finalizes_one_session(
     await main.my_agent(ctx)
 
     assert dependencies.store.initialized is True
-    assert dependencies.store.started == [("job-id", "kb-1")]
+    assert dependencies.store.started == [("room-name", "kb-1")]
     assert ctx.connected is True
     assert len(dependencies.session.start_calls) == 1
     assert dependencies.session.start_calls[0]["room"] is ctx.room
@@ -217,21 +217,21 @@ async def test_agent_job_starts_and_finalizes_one_session(
 
     assert dependencies.history_calls == [
         {
-            "session_id": "job-id",
+            "session_id": "room-name",
             "kb_id": "kb-1",
             "kb_name": "测试知识库",
         }
     ]
-    assert dependencies.store.ended == [("job-id", "ended")]
-    assert dependencies.store.runtime["job-id"]["state"] == "ended"
-    assert dependencies.store.runtime["job-id"]["history_compaction"] == {
+    assert dependencies.store.ended == [("room-name", "ended")]
+    assert dependencies.store.runtime["room-name"]["state"] == "ended"
+    assert dependencies.store.runtime["room-name"]["history_compaction"] == {
         "updated": True,
         "reason": "appended",
     }
     assert (
         "session.finalized",
         {
-            "session_id": "job-id",
+            "session_id": "room-name",
             "result": {"updated": True, "reason": "appended"},
             "reason": "normal shutdown",
         },
@@ -261,13 +261,13 @@ async def test_agent_job_persists_non_updated_history_result(
     await main.my_agent(ctx)
     await ctx.shutdown_callbacks[0]("normal shutdown")
 
-    assert dependencies.store.runtime["job-id"]["history_compaction"] == result
-    assert dependencies.store.runtime["job-id"]["state"] == "ended"
-    assert dependencies.store.ended == [("job-id", "ended")]
+    assert dependencies.store.runtime["room-name"]["history_compaction"] == result
+    assert dependencies.store.runtime["room-name"]["state"] == "ended"
+    assert dependencies.store.ended == [("room-name", "ended")]
     assert (
         "session.finalized",
         {
-            "session_id": "job-id",
+            "session_id": "room-name",
             "result": result,
             "reason": "normal shutdown",
         },
@@ -296,13 +296,13 @@ async def test_agent_job_records_unexpected_history_compaction_failure(
         "reason": "history_compaction_failed",
         "error": "RuntimeError: unexpected compactor failure",
     }
-    assert dependencies.store.runtime["job-id"]["history_compaction"] == expected
-    assert dependencies.store.runtime["job-id"]["state"] == "ended"
-    assert dependencies.store.ended == [("job-id", "ended")]
+    assert dependencies.store.runtime["room-name"]["history_compaction"] == expected
+    assert dependencies.store.runtime["room-name"]["state"] == "ended"
+    assert dependencies.store.ended == [("room-name", "ended")]
     assert (
         "session.finalized",
         {
-            "session_id": "job-id",
+            "session_id": "room-name",
             "result": expected,
             "reason": "room disconnected",
         },
@@ -348,6 +348,6 @@ async def test_agent_job_marks_session_failed_when_start_raises(
     with pytest.raises(RuntimeError, match="session start failed"):
         await main.my_agent(ctx)
 
-    assert dependencies.store.started == [("job-id", "kb-1")]
-    assert dependencies.store.ended == [("job-id", "failed")]
-    assert dependencies.store.runtime["job-id"]["state"] == "failed"
+    assert dependencies.store.started == [("room-name", "kb-1")]
+    assert dependencies.store.ended == [("room-name", "failed")]
+    assert dependencies.store.runtime["room-name"]["state"] == "failed"

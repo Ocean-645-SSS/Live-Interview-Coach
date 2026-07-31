@@ -31,6 +31,12 @@ class FakeLightRAG:
         self.pipeline_process_calls = 0
         self.query_calls: list[tuple[str, Any]] = []
         self.query_results: list[dict[str, Any] | BaseException] = []
+        self.llm_model_calls: list[str] = []
+
+    async def llm_model_func(self, prompt: str) -> str:
+        """模拟 LightRAG 暴露给证据相关性判断的 LLM 回调。"""
+        self.llm_model_calls.append(prompt)
+        return "true"
 
     async def initialize_storages(self) -> None:
         self.initialize_calls += 1

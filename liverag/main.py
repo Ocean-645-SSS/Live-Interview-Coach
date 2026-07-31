@@ -88,7 +88,7 @@ async def my_agent(ctx:JobContext)->None:   #ctx:本次通话在哪个房间(roo
     knowledge_base=await _resolve_knowledge_base(settings,metadata_store)
 
     #创建本次不可变session，以及对应的四个session文件目录
-    session_id=ctx.job.id   #获取session_id
+    session_id=ctx.room.name   #获取session_id
     store.start_session(session_id=session_id,kb_id=knowledge_base["kb_id"])
 
     try:

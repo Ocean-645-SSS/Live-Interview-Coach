@@ -364,15 +364,15 @@ tests/rag/test_doc_parser.py
 - [√] 每种格式使用最小 fixture 验证关键文字、空文件、损坏文件和加密文件错误。
 - [√] PDF 优先使用稳定解析路径；可选 Docling 使用延迟导入，缺失时回退到 pypdf。
 - [√] 解析失败保留原文件与错误元数据，不提交 LightRAG。
-- [ ] 提交：`feat: add office and pdf document parsers`。
+- [√] 提交：`feat: add office and pdf document parsers`。
 
 ## M3 验收标准
 
-- [ ] 所有产品管理操作都能经 `9821` 完成。
-- [ ] M1 文本 RAG 与 M2 Agent 在管理 API 未启动时仍可独立运行。
-- [ ] 动态配置只影响后续 session，密钥不会在 API 响应中泄露。
-- [ ] 多格式文档可上传、解析、索引、查看状态和查询。
-- [ ] 原始 session 可审计、导出，并按明确 session ID 管理。
+- [√] 所有产品管理操作都能经 `9821` 完成。
+- [√] M1 文本 RAG 与 M2 Agent 在管理 API 未启动时仍可独立运行。
+- [√] 动态配置只影响后续 session，密钥不会在 API 响应中泄露。
+- [√] 多格式文档可上传、解析、索引、查看状态和查询。
+- [√] 原始 session 可审计、导出，并按明确 session ID 管理。
 
 ---
 
@@ -399,19 +399,19 @@ tests/e2e/
 
 ## M4 工作包 A：适配已有 Next.js 前端
 
-- [ ] 先对照 `docs/API.md` 修正现有 TypeScript 类型和 API client，不重写页面架构。
-- [ ] 复用已有 `/` 语音页、`/knowledge` 管理页、知识库组件和 voice components。
-- [ ] 保留同源 `/api/liverag/*` 代理，浏览器不得直接访问 RAG Core。
-- [ ] 保留服务端 LiveKit token 签发，API secret 不进入浏览器。
-- [ ] 修复知识库选择锁定、job 轮询、上传失败、RAG evidence 展示等现有交互问题。
-- [ ] 展示 `not_queried/hit/miss/failed`、命中文档、片段和错误；cache hit 只有 M4 真正引入缓存后才展示。
-- [ ] 运行 `corepack pnpm lint`、`corepack pnpm typecheck`、`corepack pnpm build`。
+- [√] 先对照 `docs/API.md` 修正现有 TypeScript 类型和 API client，不重写页面架构。
+- [√] 复用已有 `/` 语音页、`/knowledge` 管理页、知识库组件和 voice components。
+- [√] 保留同源 `/api/liverag/*` 代理，浏览器不得直接访问 RAG Core。
+- [√] 保留服务端 LiveKit token 签发，API secret 不进入浏览器。
+- [√] 修复知识库选择锁定、job 轮询、上传失败、RAG evidence 展示等现有交互问题。
+- [√] 展示 `not_queried/hit/miss/failed`、命中文档、片段和错误；cache hit 只有 M4 真正引入缓存后才展示。
+- [√] 运行 `corepack pnpm lint`、`corepack pnpm typecheck`、`corepack pnpm build`。
 - [ ] 提交：`fix: adapt existing frontend to staged backend`。
 
 ## M4 工作包 B：Docker Compose 五服务部署
 
-- [ ] 复用共享后端镜像，部署 livekit、liverag-rag、liverag-api、liverag-agent、liverag-frontend。
-- [ ] RAG Core、API 和 Agent 共享 `/data`，但各自是独立进程。
+- [√] 复用共享后端镜像，部署 livekit、liverag-rag、liverag-api、liverag-agent、liverag-frontend。
+- [√] RAG Core、API 和 Agent 共享 `/data`，但各自是独立进程。
 - [ ] Compose 用 `depends_on` 与 healthcheck 管理启动顺序；应用代码不启动子进程。
 - [ ] RAG Core 暴露 ready healthcheck，API/Agent 仅等待 ready。
 - [ ] 验证 Compose 重启后 SQLite、workspaces、sessions 和 history 均保留。

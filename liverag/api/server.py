@@ -360,6 +360,12 @@ async def delete_session(session_id:str) -> dict[str,Any]:
         "session_id":session_id,
     }
 
+@app.get("/session/knowledge-base")
+async def get_configured_knowledge_base() -> dict[str, Any]:
+    """初始页面读取下次通话配置和当前通话锁定的知识库。"""
+
+    return await _session_knowledge_base_state(None)
+
 @app.get("/sessions/{session_id}/knowledge-base")
 async def get_session_knowledge_base(session_id:str) -> dict[str,Any]:
     """读取指定 Session 锁定的知识库及当前预选配置"""
@@ -405,12 +411,7 @@ async def put_session_knowledge_base(payload:SessionKnowledgeBasePayload)->dict[
     )
 
     #返回最新选择状态
-    return {
-        "configured":{
-            "kb_id":kb["kb_id"],
-            "name":kb["name"],
-        }
-    }
+    return await _session_knowledge_base_state(None)
 
 @app.get("/sessions")
 async def list_sessions()->dict[str,Any]:
@@ -762,11 +763,21 @@ def _voice_config_identity(config:dict[str,Any])->dict[str,Any]:
     return identity
 
 
-async def _session_knowledge_base_state(session_id:str)->dict[str,Any]:
+async def _session_knowledge_base_state(session_id:str|None=None)->dict[str,Any]:
     """返回session中知识库配置和锁定状态"""
-
+    
     #管理后台选中的知识库，下一场新通话准备用
     configured=await _configured_knowledge_base()
+
+    #传入空，返回默认知识库
+    if session_id is None:
+        return {
+            "configured":{"kb_id":configured["kb_id"],"name":configured["name"]},
+            "active_session":None,
+            "locked":False,
+            "pending_reconnect":False
+        }
+    
     #当前正在进行的通话已经锁定的知识库
     active=_active_knowledge_base(session_id)
 

@@ -1,0 +1,118 @@
+name: liverag
+
+x-liverag-env: &liverag-env
+  LIVERAG_USER_DATA_DIR: /data
+  LIVERAG_LOG_DIR: /data/logs
+  LIGHTRAG_KNOWLEDGE_BASES_DIR: /data/rag/knowledge_bases
+  LIGHTRAG_BASE_URL: http://liverag-rag:9721
+  KB_SERVICE_HOST: liverag-rag
+  KB_SERVICE_PORT: 9721
+  LIVEKIT_URL: ws://livekit:7880
+
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: liverag-livekit
+    restart: unless-stopped
+    ports:
+      - "7880:7880/tcp"
+      - "7881:7881/tcp"
+      - "7882:7882/udp"
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-my-dev-key}: ${LIVEKIT_API_SECRET:-my-dev-secret}"
+      NODE_IP: "${LIVEKIT_NODE_IP:-127.0.0.1}"
+      LIVEKIT_CONFIG: |
+        port: 7880
+        bind_addresses:
+          - 0.0.0.0
+        logging:
+          level: info
+        rtc:
+          tcp_port: 7881
+          udp_port: 7882
+          use_external_ip: false
+    command: ["--dev"]
+
+  liverag-rag:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: liverag-backend:local
+    container_name: liverag-rag
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    environment:
+      <<: *liverag-env
+      KB_SERVICE_HOST: 0.0.0.0
+      LIGHTRAG_BASE_URL: http://liverag-rag:9721
+    command: ["liverag-rag-service"]
+    volumes:
+      - liverag-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import json,os,urllib.request; headers={}; key=os.getenv('KB_SERVICE_API_KEY') or os.getenv('LIGHTRAG_API_KEY'); headers.update({'X-API-Key': key} if key else {}); req=urllib.request.Request('http://127.0.0.1:9721/v1/readyz', headers=headers); data=json.load(urllib.request.urlopen(req, timeout=3)); raise SystemExit(0 if data.get('status') == 'ok' and data.get('data', {}).get('ready') is True else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  liverag-api:
+    image: liverag-backend:local
+    container_name: liverag-api
+    restart: unless-stopped
+    depends_on:
+      liverag-rag:
+        condition: service_healthy
+    env_file:
+      - .env.local
+    environment:
+      <<: *liverag-env
+      LIVERAG_API_HOST: 0.0.0.0
+      LIVERAG_API_PORT: 9821
+    command: ["liverag-api"]
+    ports:
+      - "9821:9821"
+    volumes:
+      - liverag-data:/data
+
+  liverag-agent:
+    image: liverag-backend:local
+    container_name: liverag-agent
+    restart: unless-stopped
+    depends_on:
+      livekit:
+        condition: service_started
+      liverag-rag:
+        condition: service_healthy
+    env_file:
+      - .env.local
+    environment:
+      <<: *liverag-env
+    command: ["python", "-m", "liverag.main", "dev"]
+    volumes:
+      - liverag-data:/data
+
+  liverag-frontend:
+    build:
+      context: ../../LiveRAG-Fronted/agent-starter-react
+      dockerfile: Dockerfile
+    image: liverag-frontend:local
+    container_name: liverag-frontend
+    restart: unless-stopped
+    depends_on:
+      livekit:
+        condition: service_started
+      liverag-api:
+        condition: service_started
+    ports:
+      - "3001:3000"
+    environment:
+      LIVEKIT_URL: ${LIVEKIT_PUBLIC_URL:-ws://127.0.0.1:7880}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-my-dev-key}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-my-dev-secret}
+      AGENT_NAME: ${AGENT_NAME:-my-agent}
+      LIVERAG_API_BASE: http://liverag-api:9821
+      ALLOW_INSECURE_TOKEN_API: ${ALLOW_INSECURE_TOKEN_API:-true}
+
+volumes:
+  liverag-data:

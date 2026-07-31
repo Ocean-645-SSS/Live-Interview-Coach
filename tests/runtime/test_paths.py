@@ -1,12 +1,12 @@
-"""测试./runtime/path.py路径
+"""测试 runtime/paths.py 路径
 ·build_runtime_paths 函数能正确派生所有路径。"""
 
 from pathlib import Path
 
-from liverag.runtime.path import (
-    RunTimePaths,
+from liverag.runtime.paths import (
+    RuntimePaths,
     build_runtime_paths,
-    ensure_runtime_paths_exist,
+    ensure_runtime_dirs,
 )
 
 
@@ -16,7 +16,7 @@ def test_build_runtime_paths_uses_given_root(tmp_path: Path):
 
     paths = build_runtime_paths(root)
 
-    assert isinstance(paths, RunTimePaths)
+    assert isinstance(paths, RuntimePaths)
     assert paths.user_data_dir == root
     assert paths.db_file == root / "liverag.db"
     assert paths.rag_knowledge_bases_dir == root / "rag" / "knowledge_bases"
@@ -43,16 +43,16 @@ def test_build_runtime_paths_does_not_create_directories(tmp_path: Path):
     assert not root.exists()
 
 
-def test_ensure_runtime_paths_exist_creates_directories(tmp_path: Path):
-    """测试 ensure_runtime_paths_exist 函数是否创建所需的目录。"""
+def test_ensure_runtime_dirs_creates_directories(tmp_path: Path):
+    """测试 ensure_runtime_dirs 函数是否创建所需的目录。"""
     paths = build_runtime_paths(tmp_path / "live-rag")
 
-    ensure_runtime_paths_exist(paths)
+    ensure_runtime_dirs(paths)
 
     assert paths.prompts_dir.is_dir()
     assert paths.history_dir.is_dir()
     assert paths.context_dir.is_dir()
-    assert paths.session_dir.is_dir()
+    assert paths.sessions_dir.is_dir()
     assert paths.model_dir.is_dir()
     assert paths.rag_knowledge_bases_dir.is_dir()
     assert paths.logs_dir.is_dir()
