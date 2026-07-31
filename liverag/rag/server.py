@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
@@ -425,6 +425,7 @@ async def documents_files(
         list[UploadFile],
         File(json_schema_extra={"items": {"type": "string", "format": "binary"}}),
     ],
+    pdf_password: str | None = Form(default=None),
 )->dict[str,Any]:
     """批量向指定知识库上传文档、解析并且导入"""
 
@@ -477,7 +478,7 @@ async def documents_files(
 
             #解析文件内容
             try:
-                text=parse_file_content(raw,extension)
+                text = parse_file_content(raw, extension, password=pdf_password)
             except ValueError as exc:
                 failed_count+=1
                 error_msg=str(exc)

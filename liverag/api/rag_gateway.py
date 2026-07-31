@@ -177,7 +177,13 @@ class RagGateway:
             ) 
 
 
-    async def post_files(self, path: str, *, files: list[UploadFile]) -> GatewayResponse:
+    async def post_files(
+        self,
+        path: str,
+        *,
+        files: list[UploadFile],
+        pdf_password: str | None = None,
+    ) -> GatewayResponse:
         """把前端上传到管理API的文件，继续转发给RAG Core
         前端上传文件
         ↓ multipart/form-data
@@ -200,6 +206,8 @@ class RagGateway:
                 filename=uploaded.filename or "uploaded_file",
                 content_type=uploaded.content_type or "application/octet-stream",
             )
+        if pdf_password is not None:
+            form.add_field("pdf_password", pdf_password)
         #发给RAG Core
         return await self._request("POST", path, form_data=form, upload=True)
 

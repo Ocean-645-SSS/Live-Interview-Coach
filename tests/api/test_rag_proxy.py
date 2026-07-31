@@ -102,6 +102,100 @@ def test_query_context_forwards_path_and_payload(
     assert response.json()["data"]["context"] == "命中的上下文"
 
 
+def test_query_answer_forwards_path_and_complete_payload(
+    api_client: TestClient,
+    api_server: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_post_json(
+        path: str,
+        *,
+        payload: dict[str, Any],
+    ) -> GatewayResponse:
+        captured["path"] = path
+        captured["payload"] = payload
+        return GatewayResponse(
+            status_code=200,
+            body=_envelope(
+                status="ok",
+                data={
+                    "kb_id": "kb-1",
+                    "answer": "这是知识库生成的答案。",
+                    "hit": True,
+                },
+            ),
+        )
+
+    monkeypatch.setattr(api_server.rag_gateway, "post_json", fake_post_json)
+
+    request_payload = {
+        "query": " 测试问题 ",
+        "profile": "voice",
+        "options": {
+            "mode": "hybrid",
+            "top_k": 8,
+            "chunk_top_k": 3,
+            "include_references": True,
+            "include_chunk_content": True,
+            "context_max_chars": 2400,
+        },
+        "conversation": {
+            "last_query": "上一轮问题",
+            "rewrite_followup": True,
+        },
+    }
+    response = api_client.post(
+        "/rag/knowledge-bases/kb-1/query/answer",
+        json=request_payload,
+    )
+
+    assert response.status_code == 200
+    assert captured["path"] == "/v1/knowledge-bases/kb-1/query/answer"
+    assert captured["payload"] == {
+        "query": "测试问题",
+        "profile": "voice",
+        "options": {
+            **request_payload["options"],
+            "hl_keywords": [],
+            "ll_keywords": [],
+        },
+        "conversation": request_payload["conversation"],
+    }
+    assert response.json()["data"]["answer"] == "这是知识库生成的答案。"
+
+
+def test_query_answer_preserves_upstream_error_envelope(
+    api_client: TestClient,
+    api_server: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upstream_body = _envelope(
+        status="error",
+        error={"type": "RagQueryTimeoutError", "message": "RAG 查询超时"},
+    )
+
+    async def fake_post_json(
+        path: str,
+        *,
+        payload: dict[str, Any],
+    ) -> GatewayResponse:
+        assert path == "/v1/knowledge-bases/kb-1/query/answer"
+        assert payload["query"] == "测试问题"
+        return GatewayResponse(status_code=504, body=upstream_body)
+
+    monkeypatch.setattr(api_server.rag_gateway, "post_json", fake_post_json)
+
+    response = api_client.post(
+        "/rag/knowledge-bases/kb-1/query/answer",
+        json={"query": "测试问题"},
+    )
+
+    assert response.status_code == 504
+    assert response.json() == upstream_body
+
+
 def test_text_document_forwards_path_and_payload(
     api_client: TestClient,
     api_server: ModuleType,
@@ -147,6 +241,46 @@ def test_text_document_forwards_path_and_payload(
         "file_source": "notes.txt",
         "document_id": "doc-notes",
     }
+
+
+def test_file_upload_forwards_files_and_pdf_password(
+    api_client: TestClient,
+    api_server: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_post_files(
+        path: str,
+        *,
+        files: list[Any],
+        pdf_password: str | None = None,
+    ) -> GatewayResponse:
+        captured["path"] = path
+        captured["filenames"] = [item.filename for item in files]
+        captured["pdf_password"] = pdf_password
+        return GatewayResponse(
+            status_code=200,
+            body=_envelope(status="ok", data={"parsed_count": 1}),
+        )
+
+    monkeypatch.setattr(api_server.rag_gateway, "post_files", fake_post_files)
+    monkeypatch.setattr(
+        api_server,
+        "_mark_overview_stale_if_ok",
+        lambda *_args, **_kwargs: None,
+    )
+
+    response = api_client.post(
+        "/rag/knowledge-bases/kb-1/documents/files",
+        files={"files": ("secret.pdf", b"pdf bytes", "application/pdf")},
+        data={"pdf_password": "correct-password"},
+    )
+
+    assert response.status_code == 200
+    assert captured["path"] == "/v1/knowledge-bases/kb-1/documents/files"
+    assert captured["filenames"] == ["secret.pdf"]
+    assert captured["pdf_password"] == "correct-password"
 
 
 def test_document_source_forwards_file_response(

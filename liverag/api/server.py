@@ -16,7 +16,7 @@ import logging
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
 
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Response, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel,Field
 
@@ -558,13 +558,18 @@ async def rag_kb_document_detail(kb_id: str, document_id: str) -> JSONResponse:
     )
 
 
-@app.post("/rag/knowledge-bases/{kb_id}/documents/files}")
-async def rag_kb_documents_files(kb_id: str, files:list[UploadFile]=UPLOAD_FILES)->JSONResponse:
+@app.post("/rag/knowledge-bases/{kb_id}/documents/files")
+async def rag_kb_documents_files(
+    kb_id: str,
+    files: list[UploadFile] = UPLOAD_FILES,
+    pdf_password: str | None = Form(default=None),
+) -> JSONResponse:
     """向指定知识库上传文档"""
 
     response=await rag_gateway.post_files(
         f"/v1/knowledge-bases/{kb_id}/documents/files",
         files=files,
+        pdf_password=pdf_password,
     )
 
     #标记当前知识库概览过期：因为文档更新
@@ -642,6 +647,16 @@ async def rag_kb_query_data(kb_id:str,payload:QueryRequest)->JSONResponse:
 
     response=await rag_gateway.post_json(
         f"/v1/knowledge-bases/{kb_id}/query/data",
+        payload=payload.model_dump(exclude_none=True),
+    )
+    return _json_response(response)
+
+@app.post("/rag/knowledge-bases/{kb_id}/query/answer")
+async def rag_kb_query_answer(kb_id:str,payload:QueryRequest)->JSONResponse:
+    """查询指定知识库并且生成答案"""
+
+    response=await rag_gateway.post_json(
+        f"/v1/knowledge-bases/{kb_id}/query/answer",
         payload=payload.model_dump(exclude_none=True),
     )
     return _json_response(response)

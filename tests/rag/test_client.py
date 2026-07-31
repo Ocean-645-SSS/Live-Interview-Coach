@@ -1,15 +1,74 @@
 """验证 RAG Core HTTP API 的统一响应 envelope。"""
 
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 import pytest
+from docx import Document
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
+from pptx import Presentation
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 import liverag.rag.server as server
+from liverag.rag import doc_parser
 from liverag.rag.knowledge_base import KnowledgeBaseStore
 from liverag.rag.metadata_store import MetadataStore
+
+
+def _pdf_bytes(text: str, *, password: str | None = None) -> bytes:
+    buffer = BytesIO()
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=200, height=100)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {
+            NameObject("/Font"): DictionaryObject(
+                {NameObject("/F1"): writer._add_object(font)}
+            )
+        }
+    )
+    stream = DecodedStreamObject()
+    stream.set_data(f"BT /F1 12 Tf 20 50 Td ({text}) Tj ET".encode("ascii"))
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    if password is not None:
+        writer.encrypt(password)
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+def _docx_bytes(text: str) -> bytes:
+    buffer = BytesIO()
+    document = Document()
+    document.add_paragraph(text)
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def _pptx_bytes(text: str) -> bytes:
+    buffer = BytesIO()
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+    slide.shapes.title.text = text
+    presentation.save(buffer)
+    return buffer.getvalue()
+
+
+def _xlsx_bytes(text: str) -> bytes:
+    buffer = BytesIO()
+    workbook = Workbook()
+    workbook.active.append([text])
+    workbook.save(buffer)
+    return buffer.getvalue()
 
 
 class FakeHttpRagEngine:
@@ -398,3 +457,149 @@ def test_http_rag_flow_keeps_two_knowledge_bases_isolated(
     assert "PURPLE" not in alpha_answer_result["answer"]
     assert "PURPLE" in beta_answer_result["answer"]
     assert "ORANGE" not in beta_answer_result["answer"]
+
+
+def test_mixed_file_upload_preserves_failure_and_indexes_only_valid_document(
+    isolated_http_client: TestClient,
+) -> None:
+    """同批文件部分失败时保留原件和错误，但只索引成功文档。"""
+
+    response = isolated_http_client.post(
+        "/v1/knowledge-bases/default/documents/files",
+        headers=_auth_headers(),
+        files=[
+            ("files", ("valid.txt", b"valid searchable content", "text/plain")),
+            (
+                "files",
+                (
+                    "broken.docx",
+                    b"not a valid office package",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ),
+            ),
+        ],
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    data = payload["data"]
+    assert data["parsed_count"] == 1
+    assert data["error_count"] == 1
+    assert data["total_files"] == 2
+
+    documents = {item["original_filename"]: item for item in data["files"]}
+    failed = documents["broken.docx"]
+    successful = documents["valid.txt"]
+    assert failed["status"] == "parse_failed"
+    assert failed["error_msg"]
+    assert Path(failed["source_file_path"]).read_bytes() == b"not a valid office package"
+    assert Path(successful["source_file_path"]).read_bytes() == b"valid searchable content"
+
+    manager = server.manager
+    job = manager.metadata.job_detail("default", data["track_id"])
+    assert job["parsed_count"] == 1
+    assert job["failed_count"] == 1
+    job_documents = {item["document_id"]: item for item in job["documents"]}
+    assert job_documents[failed["document_id"]]["status"] == "parse_failed"
+    assert job_documents[failed["document_id"]]["error_msg"]
+
+    engine = manager.engines["default"]
+    assert set(engine.documents) == {successful["document_id"]}
+    assert failed["document_id"] not in engine.documents
+
+
+@pytest.mark.parametrize(
+    ("filename", "content_type", "raw", "expected_text"),
+    [
+        ("sample.pdf", "application/pdf", _pdf_bytes("PDF_FACT"), "PDF_FACT"),
+        (
+            "sample.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            _docx_bytes("DOCX_FACT"),
+            "DOCX_FACT",
+        ),
+        (
+            "sample.pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            _pptx_bytes("PPTX_FACT"),
+            "PPTX_FACT",
+        ),
+        (
+            "sample.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            _xlsx_bytes("XLSX_FACT"),
+            "XLSX_FACT",
+        ),
+    ],
+    ids=["pdf", "docx", "pptx", "xlsx"],
+)
+def test_binary_format_upload_indexes_and_queries(
+    isolated_http_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    content_type: str,
+    raw: bytes,
+    expected_text: str,
+) -> None:
+    """每种 M3-D 格式均可通过 HTTP 上传、索引、查看状态并查询。"""
+
+    def unavailable_docling(_):
+        raise ModuleNotFoundError("docling")
+
+    monkeypatch.setattr(doc_parser, "_extract_pdf_with_docling", unavailable_docling)
+
+    upload = isolated_http_client.post(
+        "/v1/knowledge-bases/default/documents/files",
+        headers=_auth_headers(),
+        files={"files": (filename, raw, content_type)},
+    )
+
+    assert upload.status_code == 200
+    upload_data = upload.json()["data"]
+    assert upload_data["parsed_count"] == 1
+    assert upload_data["error_count"] == 0
+    document = upload_data["files"][0]
+    assert document["source_file_exists"] is True
+
+    job = isolated_http_client.get(
+        f"/v1/knowledge-bases/default/jobs/{upload_data['track_id']}",
+        headers=_auth_headers(),
+    )
+    assert job.status_code == 200
+    assert job.json()["data"]["status"] == "processed"
+    assert job.json()["data"]["documents"][0]["index_status"] == "processed"
+
+    query = isolated_http_client.post(
+        "/v1/knowledge-bases/default/query/context",
+        headers=_auth_headers(),
+        json={"query": "事实是什么？", "include_chunk_content": True},
+    )
+    assert query.status_code == 200
+    assert expected_text in query.json()["data"]["context"]
+
+
+def test_encrypted_pdf_upload_accepts_password(
+    isolated_http_client: TestClient,
+) -> None:
+    """RAG Core multipart 字段会把正确密码交给 PDF 解析器。"""
+
+    response = isolated_http_client.post(
+        "/v1/knowledge-bases/default/documents/files",
+        headers=_auth_headers(),
+        files={
+            "files": (
+                "encrypted.pdf",
+                _pdf_bytes("SECRET_PDF_FACT", password="correct-password"),
+                "application/pdf",
+            )
+        },
+        data={"pdf_password": "correct-password"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["parsed_count"] == 1
+    assert data["error_count"] == 0
+    engine = server.manager.engines["default"]
+    assert "SECRET_PDF_FACT" in next(iter(engine.documents.values()))["text"]

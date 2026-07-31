@@ -245,7 +245,7 @@ Context Model 独立于语音 LLM，用于：
 
 ## 会话数据
 
-### GET /session/messages
+### GET /session/{session_id}/messages
 
 读取当前通话 messages。挂断后后端会清空 messages，因此该接口主要用于通话中调试。
 
@@ -278,7 +278,7 @@ assistant 消息 metadata：
 }
 ```
 
-### GET /session/rag-context
+### GET /session/{session_id}/rag-context
 
 读取当前通话 RAG 工具调用事实日志。
 
@@ -340,7 +340,7 @@ assistant 消息 metadata：
 - `miss`
 - `failed`
 
-### POST /session/clear
+### DELETE /session/{session_id}
 
 清空当前 session messages、rag_context、session_system_prompt 和 runtime state。
 
