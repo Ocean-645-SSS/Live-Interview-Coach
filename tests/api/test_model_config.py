@@ -44,7 +44,7 @@ def test_model_config_partial_update_preserves_and_masks_secrets(
         json={
             "voice": {
                 "tts": {
-                    "voice": "Serena",
+                    "voice": "Ethan",
                     "api_key": first_voice["tts"]["api_key"],
                 }
             }
@@ -53,7 +53,7 @@ def test_model_config_partial_update_preserves_and_masks_secrets(
 
     assert second.status_code == 200
     voice = second.json()["data"]["voice"]
-    assert voice["tts"]["voice"] == "Serena"
+    assert voice["tts"]["voice"] == "Ethan"
     assert voice["tts"]["api_key"] == first_voice["tts"]["api_key"]
     assert voice["llm"]["model"] == "qwen-flash"
 
@@ -68,6 +68,16 @@ def test_model_config_rejects_unsupported_tts_provider(
 
     assert response.status_code == 422
     assert "dashscope_realtime" in response.json()["detail"]
+
+
+def test_model_config_rejects_voice_outside_public_allowlist(api_client: TestClient) -> None:
+    response = api_client.put(
+        "/model/config",
+        json={"voice": {"tts": {"voice": "Serena"}}},
+    )
+
+    assert response.status_code == 422
+    assert "voice.tts.voice" in response.json()["detail"]
 
 
 def test_model_config_rejects_invalid_llm_url(api_client: TestClient) -> None:
@@ -96,7 +106,7 @@ def test_model_effective_state_reports_pending_reconnect(
 
     changed = api_client.put(
         "/model/config",
-        json={"voice": {"tts": {"voice": "Serena"}}},
+        json={"voice": {"tts": {"voice": "Ethan"}}},
     )
     assert changed.status_code == 200
 
@@ -107,5 +117,5 @@ def test_model_effective_state_reports_pending_reconnect(
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["active_session"]["voice"]["tts"]["voice"] == "Cherry"
-    assert data["configured"]["voice"]["tts"]["voice"] == "Serena"
+    assert data["configured"]["voice"]["tts"]["voice"] == "Ethan"
     assert data["pending_reconnect"] is True

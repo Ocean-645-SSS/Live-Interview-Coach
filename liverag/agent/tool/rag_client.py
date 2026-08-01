@@ -53,6 +53,7 @@ class RagEvidenceDocument:
 
     document_id: str | None = None
     file_path: str | None = None
+    original_filename: str | None = None
 
 
 @dataclass(slots=True)
@@ -545,7 +546,8 @@ class RagClient:
         metrics = {
             **service_metrics,  # 服务端指标
             # 客户端指标
-            "latency_ms": self._elapsed_ms(start),
+            "network_total_ms": self._elapsed_ms(start),
+            "latency_ms": service_metrics.get("request_total_ms", self._elapsed_ms(start)),
             "mode": service_metrics.get(
                 "mode",
                 self.settings.query_mode,
@@ -663,9 +665,13 @@ class RagClient:
 
                 raw_document_id = raw.get("document_id")
                 raw_file_path = raw.get("file_path")
+                raw_original_filename = raw.get("original_filename")
 
                 document_id = str(raw_document_id) if raw_document_id is not None else None
                 file_path = str(raw_file_path) if raw_file_path is not None else None
+                original_filename = (
+                    str(raw_original_filename) if raw_original_filename is not None else file_path
+                )
 
                 key = document_id or file_path
                 if not key:
@@ -673,6 +679,7 @@ class RagClient:
                 documents[key] = RagEvidenceDocument(
                     document_id=document_id,
                     file_path=file_path,
+                    original_filename=original_filename,
                 )
 
         # references不完整，从chunks补充文档ID

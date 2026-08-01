@@ -286,22 +286,11 @@ async def my_agent(ctx:JobContext)->None:   #ctx:本次通话在哪个房间(roo
         raise
 
 async def _resolve_knowledge_base(settings:Any,metadata_store:MetadataStore) -> dict[str,str]:
-    """读取并且预热本次会话锁定的知识库。
-    1.读取之前选择的知识库。
-    2.向 RAG Core 查询它是否存在。
-    3.不存在则退回 default。
-    4.预热最终选定的知识库。
-    5.返回知识库 ID 和名称。"""
+    """读取、校验并预热本次会话锁定的预选知识库。"""
 
-    #读取之前保存的知识库
     configured=metadata_store.get_session_config("knowledge_base")
-
-    #清洗知识库ID
     kb_id=(str(configured.get("kb_id") or "default").strip() or "default")
-
-    #查询知识库详情
     detail=await _fetch_knowledge_base(settings,kb_id)
-    #首选知识库失败时回退
     if detail is None and kb_id!="default":
         kb_id="default"
         detail=await _fetch_knowledge_base(settings,kb_id)

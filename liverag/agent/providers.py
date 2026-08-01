@@ -28,6 +28,7 @@ from livekit.agents import AgentSession
 from livekit.plugins import openai, silero, volcengine
 
 from liverag.agent.dashscope_tts import DashScopeRealtimeTTS
+from liverag.agent.turn_detector import SemanticTurnDetector
 from liverag.config.settings import AppSettings
 
 
@@ -59,7 +60,7 @@ def build_agent_session(settings: AppSettings) -> AgentSession:
             enable_ddc=False,  # 是否开启语义顺滑
             # 语音切句/判停
             vad_segment_duration=1200,  # VAD语音分句的最大静音阈值
-            end_window_size=900,  # 连续禁音多久强制判定用户说完
+            end_window_size=1200,  # 给短暂停顿留出合并窗口，避免半句话提前提交
             force_to_speech_time=1000,  # 音频持续多久后，才允许按照静音阈值强制判停
             # 流式结果
             interim_results=True,  # 是否持续返回最终尚未确认的中间识别结果
@@ -74,9 +75,10 @@ def build_agent_session(settings: AppSettings) -> AgentSession:
         tts=_build_tts(settings),
         preemptive_generation=False,  # 本轮完全确认结束前，提前启动LLM生成
         min_interruption_duration=0.3,  # 判断用户发声多久秒才打断助手说话
-        min_endpointing_delay=0.1,  # STT判断说完，等待多久提交给LLM
-        max_endpointing_delay=0.5,
-        turn_detection="stt",  # 让STT provider的结束事件作为主要回合结束依赖
+        min_endpointing_delay=0.8,  # 短暂停顿后继续等待，避免把换气当成新问题
+        max_endpointing_delay=2.5,
+        # STT final 只是片段边界；语义模型确认完整后才提交逻辑轮次并触发 RAG。
+        turn_detection=SemanticTurnDetector(),
         vad=silero.VAD.load(),  # 加载VAD模型:检测用户什么时候开始、停止讲话
     )
 

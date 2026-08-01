@@ -125,6 +125,71 @@ class VoiceAssistant(Agent):
             },
         )
 
+    async def on_user_turn_completed(
+        self,
+        turn_ctx: llm.ChatContext,
+        new_message: llm.ChatMessage,
+    ) -> None:
+        """Retrieve the locked knowledge base before the LLM answers.
+
+        Tool choice is probabilistic and some compatible models never select the
+        RAG tool.  This lifecycle hook is the deterministic boundary guaranteed
+        by LiveKit: the user's final turn exists, but generation has not started.
+        """
+
+        if self.rag_tool_mode == "never":
+            return
+
+        query = (new_message.text_content or "").strip()
+        if not query:
+            return
+
+        turn_index = self._ensure_user_turns_recorded(self._user_texts(turn_ctx))
+        if turn_index <= 0:
+            turn_index = self.record_committed_user_transcript(query)
+
+        try:
+            result = await self.context_manager.query_knowledge_base(
+                query=query,
+                source="pre_answer",
+                turn_index=turn_index,
+                tool_name="search_knowledge_base",
+            )
+        except Exception as exc:
+            logger.warning("knowledge_base.prefetch_failed", exc_info=exc)
+            instruction = (
+                "本轮知识库检索失败。不得声称已经查到知识库内容，不得猜测或编造；"
+                "请明确告诉用户当前暂时无法检索知识库。"
+            )
+        else:
+            if result.error is not None:
+                instruction = (
+                    "本轮知识库检索失败。不得声称已经查到知识库内容，不得猜测或编造；"
+                    "请明确告诉用户当前暂时无法检索知识库。"
+                )
+            elif result.has_context and result.context.strip():
+                instruction = (
+                    "本轮知识库检索已经命中，以下知识库上下文是回答当前问题的有效证据。"
+                    "回答只能依据这些内容；不要把历史对话中的猜测当成知识库事实。"
+                    "如果证据直接写出了用户询问的姓名、学校、专业、喜好或其他个人信息，"
+                    "必须依据该证据直接回答；知识库原文中的第一人称自我介绍明确指向当前用户。"
+                    "有直接答案时，禁止回答‘你没有告诉过我’、‘我没有记录’或其他拒答内容。\n\n"
+                    f"{result.context.strip()}"
+                )
+            else:
+                instruction = (
+                    "本轮在当前会话锁定的知识库中没有找到足够依据。"
+                    "不得猜测或编造答案，请明确说明知识库未提供相关信息。"
+                )
+
+        turn_ctx.add_message(
+            # Some OpenAI-compatible providers (including the configured
+            # DashScope endpoint) reject the newer `developer` role.
+            role="system",
+            content=instruction,
+            extra={"liverag_rag_prefetch": True, "turn_index": turn_index},
+        )
+
     @llm.function_tool( #装饰器作用：把该函数方法描述成 LLM 可调用的 Function Tool
         name="search_knowledge_base",
         description=(

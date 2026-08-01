@@ -14,11 +14,19 @@ from liverag.config.settings import (
     load_rag_client_settings,
     load_voice_settings,
     merge_runtime_rag_config,
+    public_model_options,
     public_context_model_config,
     public_rag_client_config,
     read_runtime_context_model_config,
     write_runtime_context_model_config,
 )
+
+
+def test_public_tts_options_are_limited_to_cherry_and_ethan():
+    provider = public_model_options()["tts"]["providers"][0]
+
+    assert [item["id"] for item in provider["voices"]] == ["Cherry", "Ethan"]
+    assert provider["default_voice"] == "Cherry"
 
 MODEL_ENV = {
     "LIVERAG_RAG_LLM_MODEL": "qwen-plus",
@@ -267,3 +275,13 @@ def test_rag_runtime_rejects_unknown_tool_mode(tmp_path):
             {"rag_tool_mode": "always"},
             tmp_path,
         )
+
+
+def test_rag_client_timeout_cannot_expire_before_rag_core(tmp_path):
+    """A stale short runtime override must not abort a healthy core query."""
+
+    merge_runtime_rag_config({"timeout_ms": 5000}, tmp_path)
+
+    loaded = load_rag_client_settings(tmp_path)
+
+    assert loaded.timeout_ms == 15000

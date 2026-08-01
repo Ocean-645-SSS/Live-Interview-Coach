@@ -181,6 +181,10 @@ class FakeHttpRagManager:
         self.kb_store.get(kb_id)
         return self.engines.setdefault(kb_id, FakeHttpRagEngine(kb_id))
 
+    @staticmethod
+    def _settings_for(meta: object) -> object:
+        return {"kb_id": getattr(meta, "kb_id"), "kb_name": getattr(meta, "name")}
+
 
 @pytest.fixture
 def client() -> TestClient:
@@ -234,6 +238,29 @@ def test_healthz_returns_success_envelope(client: TestClient) -> None:
     assert payload["data"] == {"service": "ok"}
     assert payload["metrics"] == {}
     assert payload["error"] is None
+
+
+def test_patch_knowledge_base_updates_metadata_and_returns_detail(
+    isolated_http_client: TestClient,
+) -> None:
+    created = isolated_http_client.post(
+        "/v1/knowledge-bases",
+        headers=_auth_headers(),
+        json={"name": "修改前", "description": "旧描述"},
+    ).json()["data"]
+
+    response = isolated_http_client.patch(
+        f"/v1/knowledge-bases/{created['kb_id']}",
+        headers=_auth_headers(),
+        json={"name": "test", "description": "测试类"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["data"]["kb_id"] == created["kb_id"]
+    assert payload["data"]["name"] == "test"
+    assert payload["data"]["description"] == "测试类"
 
 
 def test_unhandled_exception_returns_error_envelope(

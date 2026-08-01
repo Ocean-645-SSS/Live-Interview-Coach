@@ -406,14 +406,14 @@ tests/e2e/
 - [√] 修复知识库选择锁定、job 轮询、上传失败、RAG evidence 展示等现有交互问题。
 - [√] 展示 `not_queried/hit/miss/failed`、命中文档、片段和错误；cache hit 只有 M4 真正引入缓存后才展示。
 - [√] 运行 `corepack pnpm lint`、`corepack pnpm typecheck`、`corepack pnpm build`。
-- [ ] 提交：`fix: adapt existing frontend to staged backend`。
+- [√] 提交：`fix: adapt existing frontend to staged backend`。
 
 ## M4 工作包 B：Docker Compose 五服务部署
 
 - [√] 复用共享后端镜像，部署 livekit、liverag-rag、liverag-api、liverag-agent、liverag-frontend。
 - [√] RAG Core、API 和 Agent 共享 `/data`，但各自是独立进程。
-- [ ] Compose 用 `depends_on` 与 healthcheck 管理启动顺序；应用代码不启动子进程。
-- [ ] RAG Core 暴露 ready healthcheck，API/Agent 仅等待 ready。
+- [√] Compose 用 `depends_on` 与 healthcheck 管理启动顺序；应用代码不启动子进程。
+- [√] RAG Core 暴露 ready healthcheck，API/Agent 仅等待 ready。
 - [ ] 验证 Compose 重启后 SQLite、workspaces、sessions 和 history 均保留。
 - [ ] 提交：`ops: add five-service compose deployment`。
 

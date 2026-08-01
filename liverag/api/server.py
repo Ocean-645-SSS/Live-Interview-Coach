@@ -341,6 +341,23 @@ async def session_rag_context(session_id:str,limit: int | None = None) -> list[d
 
     return store.read_rag_context(session_id=session_id,limit=limit)
 
+@app.post("/sessions/{session_id}/end")
+async def end_session(session_id: str) -> dict[str, Any]:
+    """Immediately mark a user-ended call as ended."""
+
+    state = store.read_runtime_state(session_id=session_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"session not found: {session_id}")
+
+    if state.get("state") == "active" and not state.get("ended_at"):
+        store.end_session(session_id=session_id, state="ended")
+
+    return {
+        "status": "ok",
+        "session_id": session_id,
+        "state": "ended",
+    }
+
 @app.delete("/sessions/{session_id}")
 async def delete_session(session_id:str) -> dict[str,Any]:
     """删除一个指定且已经结束的session"""
@@ -374,21 +391,7 @@ async def get_session_knowledge_base(session_id:str) -> dict[str,Any]:
 
 @app.put("/session/knowledge-base")
 async def put_session_knowledge_base(payload:SessionKnowledgeBasePayload)->dict[str,Any]:
-    """管理页面选择下一场通话要使用的知识库
-
-    前端选择知识库 B
-    ↓
-    PUT /session/knowledge-base
-    ↓
-    确认知识库 B 存在
-    ↓
-    预热知识库 B
-    ↓
-    保存 configured = B
-    ↓
-    下一场新通话读取 B
-    ↓
-    新 Session 锁定 B"""
+    """选择下一场通话使用的知识库，不改变已锁定的活动会话。"""
 
     #获取当前知识库信息
     kb=await _knowledge_base_detail(kb_id=payload.kb_id)
@@ -790,9 +793,8 @@ async def _session_knowledge_base_state(session_id:str|None=None)->dict[str,Any]
     }
 
 async def _configured_knowledge_base()->dict[str,Any]:
-    """返回后台选中的知识库，如果没有则返回default"""
+    """返回后台选中的知识库，如果不存在则回退 default。"""
 
-    #获取新session的知识库配置
     configured=metadata_store.get_session_config("knowledge_base")
     kb_id=str(configured.get("kb_id") or "default")
 

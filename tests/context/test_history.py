@@ -8,6 +8,7 @@ import pytest
 
 import liverag.context.history as history_module
 from liverag.config.settings import ContextModelSettings
+from liverag.context.defaults import HISTORY_FACT_GROUNDING_RULES
 from liverag.context.history import HistoryCompactor
 from liverag.context.store import ContextStore
 from liverag.runtime.paths import build_runtime_paths
@@ -161,7 +162,8 @@ async def test_compact_appends_traceable_history_and_preserves_raw_messages(
     assert call["model"] == "test-context-model"
     assert call["temperature"] == 0.0
     assert call["max_tokens"] == 256
-    assert call["messages"][0]["content"] == store.read_history_compress_prompt()
+    assert store.read_history_compress_prompt().strip() in call["messages"][0]["content"]
+    assert HISTORY_FACT_GROUNDING_RULES.strip() in call["messages"][0]["content"]
     prompt = call["messages"][1]["content"]
     assert "kb_id: kb-one" in prompt
     assert "kb_name: 项目知识库" in prompt

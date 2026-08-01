@@ -10,6 +10,7 @@ from liverag.config.settings import RagToolMode
 from liverag.context.defaults import (
     DEFAULT_KNOWLEDGE_OVERVIEW_FALLBACK,
     DEFAULT_RAG_TOOL_DESCRIPTION,
+    PERSONAL_FACT_GROUNDING_RULES,
     RAG_DISABLED_DESCRIPTION,
 )
 from liverag.context.renderer import SessionPromptRenderer
@@ -155,6 +156,7 @@ def test_render_auto_includes_all_context_and_tool_rules(
     assert "用户正在开发 LiveRAG。" in result.prompt
     assert "包含 LiveRAG 架构资料。" in result.prompt
     assert DEFAULT_RAG_TOOL_DESCRIPTION.strip() in result.prompt
+    assert PERSONAL_FACT_GROUNDING_RULES.strip() in result.prompt
     assert RAG_DISABLED_DESCRIPTION.strip() not in result.prompt
     assert result.history_count == 1
     assert result.prompt_chars == len(result.prompt)

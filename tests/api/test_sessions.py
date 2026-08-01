@@ -56,6 +56,33 @@ def test_active_session_cannot_be_deleted(
     assert api_server.store.read_runtime_state("session-active")["state"] == "active"
 
 
+def test_active_session_can_be_ended_immediately(
+    api_client: TestClient,
+    api_server: ModuleType,
+) -> None:
+    _create_session(api_server, session_id="session-to-end")
+
+    response = api_client.post("/sessions/session-to-end/end")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "session_id": "session-to-end",
+        "state": "ended",
+    }
+    state = api_server.store.read_runtime_state("session-to-end")
+    assert state["state"] == "ended"
+    assert state["ended_at"]
+
+
+def test_ending_unknown_session_returns_not_found(
+    api_client: TestClient,
+) -> None:
+    response = api_client.post("/sessions/missing-session/end")
+
+    assert response.status_code == 404
+
+
 def test_ended_session_can_be_deleted(
     api_client: TestClient,
     api_server: ModuleType,

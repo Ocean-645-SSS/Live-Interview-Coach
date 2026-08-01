@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from livekit.agents import Agent
+from livekit.agents import Agent, llm
 
 from liverag.agent.assistant import VoiceAssistant, register_session_context_hooks
 
@@ -123,6 +123,73 @@ async def test_query_tool_returns_stable_miss_text() -> None:
 
     assert "未找到足够依据" in result
     assert "不要编造" in result
+
+
+async def test_completed_user_turn_prefetches_rag_evidence() -> None:
+    manager = FakeContextManager()
+    assistant = make_assistant(manager)
+    turn_ctx = llm.ChatContext.empty()
+    new_message = turn_ctx.add_message(role="user", content="项目代号是什么？")
+
+    await assistant.on_user_turn_completed(turn_ctx, new_message)
+
+    assert manager.queries == [
+        {
+            "query": "项目代号是什么？",
+            "source": "pre_answer",
+            "turn_index": 1,
+            "tool_name": "search_knowledge_base",
+        }
+    ]
+    injected = turn_ctx.messages()[-1]
+    assert injected.role == "system"
+    assert "知识库上下文" in (injected.text_content or "")
+
+
+async def test_completed_user_turn_treats_direct_personal_rag_hit_as_valid_evidence() -> None:
+    manager = FakeContextManager()
+    manager.query_result = SimpleNamespace(
+        error=None,
+        has_context=True,
+        context='{"content": "我是 susie，在华东理工读计算机专业"}',
+    )
+    assistant = make_assistant(manager)
+    turn_ctx = llm.ChatContext.empty()
+    new_message = turn_ctx.add_message(role="user", content="我的名字是什么？")
+
+    await assistant.on_user_turn_completed(turn_ctx, new_message)
+
+    injected = turn_ctx.messages()[-1].text_content or ""
+    assert "本轮知识库检索已经命中" in injected
+    assert "第一人称自我介绍明确指向当前用户" in injected
+    assert "禁止回答‘你没有告诉过我’" in injected
+    assert "我是 susie" in injected
+
+
+async def test_completed_user_turn_injects_safe_miss_instruction() -> None:
+    manager = FakeContextManager()
+    manager.query_result = SimpleNamespace(error=None, has_context=False, context="")
+    assistant = make_assistant(manager)
+    turn_ctx = llm.ChatContext.empty()
+    new_message = turn_ctx.add_message(role="user", content="未知事实是什么？")
+
+    await assistant.on_user_turn_completed(turn_ctx, new_message)
+
+    injected = turn_ctx.messages()[-1].text_content or ""
+    assert "没有找到足够依据" in injected
+    assert "不得猜测或编造" in injected
+
+
+async def test_completed_user_turn_skips_rag_in_never_mode() -> None:
+    manager = FakeContextManager()
+    assistant = make_assistant(manager, rag_tool_mode="never")
+    turn_ctx = llm.ChatContext.empty()
+    new_message = turn_ctx.add_message(role="user", content="项目代号是什么？")
+
+    await assistant.on_user_turn_completed(turn_ctx, new_message)
+
+    assert manager.queries == []
+    assert len(turn_ctx.messages()) == 1
 
 
 def test_user_messages_are_recorded_only_once() -> None:

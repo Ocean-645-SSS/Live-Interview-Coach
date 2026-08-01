@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from liverag.rag.doc_parser import parse_file_content
 from liverag.rag.engine import RagEngineError, RagQueryTimeoutError
 from liverag.rag.engine_manager import RagEngineManager
+from liverag.rag.filenames import decode_transport_filename
 from liverag.rag.rag_settings import RAGSettings
 from liverag.rag.schemas import Envelope, QueryRequest, TextDocumentRequest
 from liverag.rag.metadata_store import DEFAULT_KB_ID,DEFAULT_KB_NAME
@@ -288,7 +289,7 @@ async def patch_knowledge_base(kb_id:str,request:KnowledgeBasePatchRequest) -> d
     request_id=str(uuid.uuid4())
     try:
         meta=manager.kb_store.update(kb_id,name=request.name,description=request.description)
-        engine=manager.get_engine(kb_id)
+        engine=await manager.get_engine(kb_id)
         #更新engine配置
         engine.settings=manager._settings_for(meta)
     except KeyError as exc:
@@ -299,6 +300,8 @@ async def patch_knowledge_base(kb_id:str,request:KnowledgeBasePatchRequest) -> d
             status="error",
             error={"type": "KnowledgeBaseValidationError", "message": str(exc)},
         )
+
+    return envelope(request_id=request_id,data=manager.kb_store.public_detail(kb_id))
 
 @app.post("/v1/knowledge-bases/{kb_id}/query/context",dependencies=[Depends(require_api_key)])
 async def query_context(kb_id:str,request:QueryRequest):
@@ -1143,7 +1146,7 @@ def _map_lightrag_status(payload:dict[str,Any]):
 def _safe_filename(filename:str)->str:
     """将文件名转换为安全的文件名"""
 
-    name=Path(filename).name.strip() or "uploaded_file" #去除了目录部分，只保留文件名
+    name=Path(decode_transport_filename(filename)).name.strip() or "uploaded_file" #去除了目录部分，只保留文件名
     name=_FILENAME_RE.sub("_",name) #清理特殊字符
     name=name.strip(".")[:180] #限制长度
 

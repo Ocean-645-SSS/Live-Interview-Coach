@@ -77,6 +77,7 @@ class ContextManager:
         # 当前进程内按轮次汇总 RAG 使用情况，避免保存助手消息时重复全量扫描 rag_context.jsonl。
         # rag_context.jsonl 仍然是完整、持久、可审计的事实来源。
         self._rag_state_by_turn: dict[int, dict[str, bool]] = {}
+        self._rag_result_by_turn: dict[tuple[int, str], RagQueryResult] = {}
 
 
     def record_user_message(self,*,content:str,turn_index:int)->None:
@@ -138,6 +139,15 @@ class ContextManager:
         last_query=self._last_rag_query or None
         rag_query=self._build_rag_query(query)
 
+        cache_key = (turn_index, " ".join(rag_query.casefold().split()))
+        cached = self._rag_result_by_turn.get(cache_key)
+        if cached is not None:
+            result = cached.model_copy(deep=True)
+            result.metrics["cache_hit"] = True
+            self._update_turn_rag_state(turn_index=turn_index, result=result)
+            self._write_runtime_state(turn_index=turn_index, rag_result=result)
+            return result
+
         #发送HTTP请求，调用RAG Core
         result=await self.rag_client.query_context(
             query=rag_query,
@@ -147,6 +157,9 @@ class ContextManager:
             tool_name=tool_name,
             turn_index=turn_index
             )
+
+        if result.error is None:
+            self._rag_result_by_turn[cache_key] = result.model_copy(deep=True)
 
         # RagClient 已将完整查询结果追加到 rag_context.jsonl；
         # 这里额外维护轻量的轮次摘要，供助手消息元数据 O(1) 读取。

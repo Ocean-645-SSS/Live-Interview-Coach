@@ -128,7 +128,7 @@ class RAGSettings:
     embedding_dim: int = _int_env("LIGHTRAG_EMBEDDING_DIM", _int_env("EMBEDDING_DIM", 1024))
     max_embed_tokens: int = _int_env("LIGHTRAG_MAX_EMBED_TOKENS", _int_env("MAX_EMBED_TOKENS", 8192))
     #查询超时限制（毫秒）
-    query_timeout_ms: int = _int_env("LIGHTRAG_TIMEOUT_MS",10000)
+    query_timeout_ms: int = max(15000, _int_env("LIGHTRAG_TIMEOUT_MS", 15000))
 
     
     #====================文档切块配置==============================

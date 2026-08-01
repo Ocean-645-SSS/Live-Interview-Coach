@@ -436,13 +436,16 @@ class RagEngine:
         rag = self.ensure_ready()
 
         # 合并profile默认参数和请求参数
+        request_started = time.perf_counter()
         resolved = self.resolve_options(profile, options)
 
         # 根据上一轮对话改写追问
+        rewrite_started = time.perf_counter()
         effective_query, rewritten = rewrite_query(query, conversation)
+        rewrite_ms = round((time.perf_counter() - rewrite_started) * 1000, 1)
 
         # 开始时间
-        started = time.perf_counter()
+        started = request_started
 
         # 检查问题是否过短:减少无异议调用，避免浪费tokens
         if len(effective_query.strip()) < 3:
@@ -461,7 +464,14 @@ class RagEngine:
                 duration=time.perf_counter()-started
             )
             metrics = self._query_metrics(started, resolved, cache_hit=False)
-            return result, metrics | {"chunks_count": 0}
+            return result, metrics | {
+                "chunks_count": 0,
+                "rewrite_ms": rewrite_ms,
+                "retrieval_ms": 0.0,
+                "extraction_ms": 0.0,
+                "evidence_gate_ms": 0.0,
+                "request_total_ms": metrics["latency_ms"],
+            }
 
         # bypass:不使用RAG检索，直接回答
         if resolved.mode == "bypass":
@@ -480,12 +490,20 @@ class RagEngine:
                 duration=time.perf_counter() - started,
             )
             metrics = self._query_metrics(started, resolved, cache_hit=False)
-            return result, metrics | {"chunks_count": 0}
+            return result, metrics | {
+                "chunks_count": 0,
+                "rewrite_ms": rewrite_ms,
+                "retrieval_ms": 0.0,
+                "extraction_ms": 0.0,
+                "evidence_gate_ms": 0.0,
+                "request_total_ms": metrics["latency_ms"],
+            }
 
         # 构造QueryParam
         param = self.build_query_param(resolved, only_need_context=True)
 
         # 调用LigthRAG检索，增加timeout
+        retrieval_started = time.perf_counter()
         try:
             result = await asyncio.wait_for(
                 rag.aquery_llm(effective_query, param=param),
@@ -502,9 +520,13 @@ class RagEngine:
             ) from exc
 
         # 提取context/references/chunks结构化上下文
+        retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000, 1)
+        extraction_started = time.perf_counter()
         payload = self._extract_context_payload(result, resolved)
+        extraction_ms = round((time.perf_counter() - extraction_started) * 1000, 1)
 
         #判断当前context是否能回答query
+        evidence_gate_started = time.perf_counter()
         relevant = await self._evidence_is_relevant(
             effective_query,
             payload["context"],
@@ -516,6 +538,7 @@ class RagEngine:
             payload["references"] = []
             payload["chunks"] = []
 
+        evidence_gate_ms = round((time.perf_counter() - evidence_gate_started) * 1000, 1)
         payload.update({"query": query, "effective_query": effective_query, "rewritten": rewritten})
         query_result = QueryResult(
             kb_id=self.settings.kb_id,
@@ -533,6 +556,13 @@ class RagEngine:
         )
         # 计算查询指标
         metrics = self._query_metrics(started, resolved, cache_hit=False)
+        metrics.update({
+            "rewrite_ms": rewrite_ms,
+            "retrieval_ms": retrieval_ms,
+            "extraction_ms": extraction_ms,
+            "evidence_gate_ms": evidence_gate_ms,
+            "request_total_ms": metrics["latency_ms"],
+        })
         data = result.get("data") or {}
         chunks = data.get("chunks") or []
         metrics["chunks_count"] = len(chunks)

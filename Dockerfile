@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.12-slim AS base
+FROM python:3.12-slim-bookworm AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    UV_HTTP_TIMEOUT=120 \
+    UV_HTTP_TIMEOUT=1200 \
     PIP_DEFAULT_TIMEOUT=120 \
     HTTP_PROXY= \
     HTTPS_PROXY= \
@@ -37,9 +37,11 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --profile minimal
 ENV PATH="/root/.cargo/bin:$PATH"
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
 COPY liverag ./liverag
-RUN uv sync --frozen --no-dev
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
 
 FROM base AS runtime
 ARG BUILD_HTTP_PROXY=

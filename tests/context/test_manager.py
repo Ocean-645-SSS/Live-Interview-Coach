@@ -148,6 +148,26 @@ async def test_query_knowledge_base_passes_session_turn_and_tool_metadata() -> N
     ]
 
 
+async def test_same_turn_same_query_reuses_prefetched_result() -> None:
+    client = FakeRagClient(result=hit_result())
+    manager = ContextManager(
+        rag_client=client,  # type: ignore[arg-type]
+        session_id="session-1",
+        rag_tool_mode="auto",
+    )
+
+    first = await manager.query_knowledge_base(
+        query="M2-C 是什么？", source="pre_answer", turn_index=1,
+    )
+    second = await manager.query_knowledge_base(
+        query="  M2-C   是什么？ ", source="tool", turn_index=1,
+    )
+
+    assert len(client.calls) == 1
+    assert first.metrics.get("cache_hit") is not True
+    assert second.metrics["cache_hit"] is True
+
+
 async def test_search_knowledge_base_returns_agent_tool_payload() -> None:
     client = FakeRagClient(result=miss_result())
     manager = ContextManager(

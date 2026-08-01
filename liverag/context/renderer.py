@@ -9,7 +9,11 @@ SessionPromptRenderer 在会话开始时读取系统模板、SOUL、当前知识
 from dataclasses import dataclass
 
 from liverag.config.settings import RagToolMode
-from liverag.context.defaults import DEFAULT_RAG_TOOL_DESCRIPTION, RAG_DISABLED_DESCRIPTION
+from liverag.context.defaults import (
+    DEFAULT_RAG_TOOL_DESCRIPTION,
+    PERSONAL_FACT_GROUNDING_RULES,
+    RAG_DISABLED_DESCRIPTION,
+)
 from liverag.context.store import ContextStore
 
 
@@ -88,6 +92,9 @@ class SessionPromptRenderer:
         #替换kb_id/name
         prompt = prompt.replace("{{KB_ID}}", kb_id)
         prompt = prompt.replace("{{KB_NAME}}", kb_name)
+        # Append in code so persisted templates from older installations also
+        # receive the non-hallucination rule on every newly started session.
+        prompt = f"{prompt.rstrip()}\n\n{PERSONAL_FACT_GROUNDING_RULES.strip()}\n"
         #保存最终prompt
         locked_prompt=self.store.lock_session_system_prompt(session_id=session_id,content=prompt)
 

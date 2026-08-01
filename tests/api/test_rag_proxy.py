@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from liverag.api.rag_gateway import GatewayFileResponse, GatewayResponse
+from liverag.api.rag_gateway import GatewayFileResponse, GatewayResponse, RagGateway
 
 
 def _envelope(
@@ -354,6 +354,21 @@ def test_delete_document_forwards_query_parameter(
     assert response.status_code == 200
     assert captured["path"] == "/v1/knowledge-bases/kb-1/documents/doc-1"
     assert captured["params"] == {"delete_llm_cache": True}
+
+
+def test_document_summary_prefers_original_filename_and_hides_internal_path() -> None:
+    payload = RagGateway._normalize_document_summary(
+        {
+            "document_id": "doc-1",
+            "original_filename": "Fino-Net 项目说明 v1.docx",
+            "file_path": "documents/doc-1/source/uuid.docx",
+            "source_file_path": "C:/private/documents/doc-1/source/uuid.docx",
+        }
+    )
+
+    assert payload["original_filename"] == "Fino-Net 项目说明 v1.docx"
+    assert payload["file_path"] == "Fino-Net 项目说明 v1.docx"
+    assert "source_file_path" not in payload
 
 
 @pytest.mark.parametrize(

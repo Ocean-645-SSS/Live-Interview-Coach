@@ -16,6 +16,7 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from liverag.config.settings import ContextModelSettings
+from liverag.context.defaults import HISTORY_FACT_GROUNDING_RULES
 from liverag.context.store import ContextStore
 
 logger = logging.getLogger("agent.context.history")
@@ -109,7 +110,13 @@ class HistoryCompactor:
             response=await client.chat.completions.create(
                 model=self.settings.model,
                 messages=[
-                    {"role": "system", "content": self.store.read_history_compress_prompt()},
+                    {
+                        "role": "system",
+                        "content": (
+                            f"{self.store.read_history_compress_prompt().rstrip()}\n\n"
+                            f"{HISTORY_FACT_GROUNDING_RULES.strip()}"
+                        ),
+                    },
                     {"role": "user", "content": prompt},
                 ],
                 temperature=self.settings.temperature,

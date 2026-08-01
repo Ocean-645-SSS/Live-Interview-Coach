@@ -436,53 +436,7 @@ _TTS_PROVIDER_OPTIONS=[
             ],
             "voices": _verified_voice_options(
                 "Cherry",
-                "Serena",
                 "Ethan",
-                "Chelsie",
-                "Momo",
-                "Vivian",
-                "Moon",
-                "Maia",
-                "Kai",
-                "Nofish",
-                "Bella",
-                "Jennifer",
-                "Ryan",
-                "Katerina",
-                "Aiden",
-                "Eldric Sage",
-                "Mia",
-                "Mochi",
-                "Bellona",
-                "Vincent",
-                "Bunny",
-                "Neil",
-                "Elias",
-                "Arthur",
-                "Nini",
-                "Seren",
-                "Pip",
-                "Stella",
-                "Bodega",
-                "Sonrisa",
-                "Alek",
-                "Dolce",
-                "Sohee",
-                "Ono Anna",
-                "Lenn",
-                "Emilien",
-                "Andre",
-                "Radio Gol",
-                "Jada",
-                "Dylan",
-                "Li",
-                "Marcus",
-                "Roy",
-                "Peter",
-                "Sunny",
-                "Eric",
-                "Rocky",
-                "Kiki",
                 metadata=_DASHSCOPE_VOICE_METADATA,
             ),
             "default_model": "qwen3-tts-flash-realtime",
@@ -704,7 +658,7 @@ class RagClientSettings:
     base_url: str = _str_env("LIGHTRAG_BASE_URL", "http://127.0.0.1:9721").rstrip("/")
     api_key: str = _str_env("LIGHTRAG_API_KEY", _str_env("KB_SERVICE_API_KEY", ""))
     query_mode: str = _str_env("LIGHTRAG_QUERY_MODE", _str_env("LIGHTRAG_VOICE_MODE", "naive"))
-    timeout_ms: int = _int_env("LIGHTRAG_TIMEOUT_MS", 900)
+    timeout_ms: int = _int_env("LIGHTRAG_TIMEOUT_MS", 15000)
     top_k: int = _int_env("LIGHTRAG_TOP_K", _int_env("LIGHTRAG_VOICE_TOP_K", 4))
     chunk_top_k: int = _int_env("LIGHTRAG_CHUNK_TOP_K", _int_env("LIGHTRAG_VOICE_CHUNK_TOP_K", 4))
     context_max_chars: int = _int_env(
@@ -883,6 +837,10 @@ def load_rag_client_settings(user_data_dir: Path | None = None) -> RagClientSett
     base = RagClientSettings()
     overrides = _read_runtime_rag_overrides(user_data_dir)
     values = {**base.__dict__, **overrides}
+    # RAG Core itself may spend up to ten seconds on retrieval. A shorter
+    # client timeout makes healthy queries look unavailable before the server
+    # can return its structured hit/miss result.
+    values["timeout_ms"] = max(15000, int(values["timeout_ms"]))
     return RagClientSettings(**values)
 
 

@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 import json
 import logging
+from pathlib import Path
 from typing import Any
 import uuid
 
@@ -11,6 +12,7 @@ import aiohttp
 from fastapi import UploadFile
 
 from liverag.config.settings import AppSettings,load_rag_client_settings
+from liverag.rag.filenames import decode_transport_filename
 from liverag.rag.service import wait_for_rag_ready
 
 
@@ -510,13 +512,16 @@ class RagGateway:
         if chunks_count is None:
             chunks_list = item.get("chunks_list")
             chunks_count = len(chunks_list) if isinstance(chunks_list, list) else 0
+        public_path = item.get("file_path") or item.get("file_source") or item.get("source") or ""
+        original_filename = decode_transport_filename(str(item.get("original_filename") or ""))
+        if not original_filename and public_path:
+            original_filename = Path(str(public_path).replace("\\", "/")).name
         return {
             "document_id": item.get("document_id") or item.get("doc_id") or item.get("id") or "",
             "kb_id": item.get("kb_id") or "",
             "kb_name": item.get("kb_name") or "",
-            "original_filename": item.get("original_filename") or "",
-            "file_path": item.get("file_path") or item.get("file_source") or item.get("source") or "",
-            "source_file_path": item.get("source_file_path") or "",
+            "original_filename": original_filename,
+            "file_path": original_filename,
             "source_file_exists": bool(item.get("source_file_exists")),
             "source_file_size": item.get("source_file_size") or 0,
             "source_sha256": item.get("source_sha256") or "",

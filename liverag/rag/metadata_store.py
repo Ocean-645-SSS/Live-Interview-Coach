@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from liverag.rag.filenames import decode_transport_filename
+
 DEFAULT_KB_ID = "default"
 DEFAULT_KB_NAME = "默认知识库"
 _KB_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$") #预编译正则
@@ -438,8 +440,8 @@ class MetadataStore:
             "document_id": row["document_id"],
             "kb_id": row["kb_id"],
             "kb_name": row["kb_name"],
-            "original_filename": row["original_filename"],
-            "file_path": row["original_filename"],
+            "original_filename": decode_transport_filename(str(row["original_filename"])),
+            "file_path": decode_transport_filename(str(row["original_filename"])),
             "source_file_path": str(source_path),
             "source_file_exists": source_path.is_file(),
             "source_file_size": int(row["source_file_size"] or 0),

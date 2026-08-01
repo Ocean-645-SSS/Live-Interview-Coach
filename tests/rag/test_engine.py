@@ -215,6 +215,9 @@ async def test_query_context_maps_options_and_returns_structured_evidence(
     assert result.chunks[0].content == "Alpha 是项目的检索模块。"
     assert result.duration >= 0
     assert metrics["chunks_count"] == 1
+    for key in ("rewrite_ms", "retrieval_ms", "extraction_ms", "evidence_gate_ms", "request_total_ms"):
+        assert metrics[key] >= 0
+    assert metrics["request_total_ms"] >= metrics["retrieval_ms"]
 
 
 @pytest.mark.asyncio

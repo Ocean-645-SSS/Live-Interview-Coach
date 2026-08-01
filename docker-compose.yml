@@ -1,4 +1,4 @@
-name: liverag
+name: my-liverag
 
 x-liverag-env: &liverag-env
   LIVERAG_USER_DATA_DIR: /data
@@ -19,7 +19,7 @@ services:
       - "7881:7881/tcp"
       - "7882:7882/udp"
     environment:
-      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-my-dev-key}: ${LIVEKIT_API_SECRET:-my-dev-secret}"
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-liverag-local}: ${LIVEKIT_API_SECRET:-liverag-local-development-secret-0001}"
       NODE_IP: "${LIVEKIT_NODE_IP:-127.0.0.1}"
       LIVEKIT_CONFIG: |
         port: 7880
@@ -31,7 +31,10 @@ services:
           tcp_port: 7881
           udp_port: 7882
           use_external_ip: false
-    command: ["--dev"]
+    # Use LIVEKIT_CONFIG and LIVEKIT_KEYS above. `--dev` replaces the configured
+    # credentials with LiveKit's built-in devkey/secret pair and makes the
+    # Agent/Frontend credentials fail with HTTP 401.
+    command: []
 
   liverag-rag:
     build:
@@ -88,6 +91,10 @@ services:
       - .env.local
     environment:
       <<: *liverag-env
+      # Override cloud credentials from .env.local whenever Compose points the
+      # worker at the bundled local LiveKit server.
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-liverag-local}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-liverag-local-development-secret-0001}
     command: ["python", "-m", "liverag.main", "dev"]
     volumes:
       - liverag-data:/data
@@ -108,8 +115,8 @@ services:
       - "3001:3000"
     environment:
       LIVEKIT_URL: ${LIVEKIT_PUBLIC_URL:-ws://127.0.0.1:7880}
-      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-my-dev-key}
-      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-my-dev-secret}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-liverag-local}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-liverag-local-development-secret-0001}
       AGENT_NAME: ${AGENT_NAME:-my-agent}
       LIVERAG_API_BASE: http://liverag-api:9821
       ALLOW_INSECURE_TOKEN_API: ${ALLOW_INSECURE_TOKEN_API:-true}
