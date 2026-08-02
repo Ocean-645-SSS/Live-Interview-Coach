@@ -1,4 +1,6 @@
-# 架构说明
+# 当前运行架构说明
+
+本文描述现有 LiveRAG 运行时。面向公网、多用户、支持异步任务的 Interview Coach 目标架构见 [Interview Coach 目标架构](./INTERVIEW_COACH_ARCHITECTURE.md)。
 
 ## 总体结构
 

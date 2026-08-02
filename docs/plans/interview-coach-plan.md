@@ -4,16 +4,23 @@
 
 **Goal:** 在现有 LiveRAG 上增加“个性化准备—受控实时面试—结构化评价—训练反馈”闭环，而不是另建一套语音聊天系统。
 
-**Architecture:** 保留现有 FastAPI、LiveKit Agents、LightRAG、SQLite/文件存储和 Next.js BFF；新增一个独立 Interview Agent worker 与若干无状态业务 Service。实时链路只读取面试前准备好的计划和题目，MCP 情报采集、文档画像及重型评价均位于准备或异步阶段。
+**Architecture:** 目标是可部署到公网的多用户 Interview Coach，而不是完整多租户 SaaS。技术演进必须严格分四步：先用 FastAPI + SQLAlchemy + SQLite 接通 LiveKit 与 LightRAG；再引入 Alembic + PostgreSQL；随后增加 Redis + Background Worker；最后实现用户隔离、配额、并发治理和公网部署。后一步不得反向成为前一步的前置依赖。
 
-**Tech Stack:** Python、FastAPI、Pydantic、sqlite3、LiveKit Agents、LightRAG、Next.js、TypeScript、Docker Compose；MCP Python SDK 仅在 V2 引入。
+**Tech Stack:** Python、FastAPI、Pydantic、SQLAlchemy、SQLite、LiveKit Agents、LightRAG；第二步增加 Alembic/PostgreSQL，第三步增加 Redis/Background Worker，第四步增加身份隔离、配额、并发治理和公网部署；前端继续使用 Next.js、TypeScript。
+
+目标组件边界、同步/异步划分和最终部署形态参考 [Interview Coach 目标架构](../INTERVIEW_COACH_ARCHITECTURE.md)；实际实施先后顺序以本文第 13 节的四步路线为唯一依据。
 
 ## Global Constraints
 
 - 本文是架构与实施规划，不要求当前阶段修改产品代码。
 - 不重写 RAG、文档解析、实时语音、Session、History、Context 或 Docker 基础设施。
 - MVP 使用一个 Interview Agent 加多个业务 Service，不引入 AutoGen、CrewAI、CAMEL 等多 Agent 框架。
-- MVP 不引入 Redis、PostgreSQL、Kafka、Celery；出现经过测量的并发或可靠性瓶颈后再评估。
+- 实施顺序固定为：① FastAPI + SQLAlchemy + SQLite + LiveKit + LightRAG；② Alembic + PostgreSQL；③ Redis + Background Worker；④ 用户隔离、配额、并发和公网部署。
+- 第一步不得引入 Alembic、PostgreSQL、Redis、Background Worker 或用户体系；先完成单机业务闭环。
+- 第二步只完成数据库迁移体系和 PostgreSQL 等价运行，不提前引入 Redis 或用户隔离。
+- 第三步只把耗时任务迁移到一套 Background Worker，并用 Redis 承担队列、短期锁和临时协调；Redis 不保存权威业务状态。
+- 第四步才增加身份认证、`user_id` 数据隔离、配额、并发控制和公网部署；不实现组织租户、复杂 RBAC、支付或套餐。
+- 不引入 Kafka、Kubernetes 或微服务化基础设施。
 - MCP 不进入实时语音问答主链路；MCP 失败不得阻止基础模拟面试，根据用户上传的简历、面试知识库来回答。
 - 所有 LLM 结构化输出必须经过 Pydantic 校验，原始外部文本视为不可信数据。
 
@@ -31,7 +38,7 @@
 | `liverag/context/` | 会话 prompt、消息和 RAG context 持久化 | 语音转录可复用；面试权威状态另存结构化数据库 |
 | `liverag/runtime/` | worker/runtime 状态和联动 | 增加 interview worker 的独立运行入口与健康状态 |
 | `liverag/config/` | 环境变量与 settings | 增加 feature flag、MCP、超时及配额配置 |
-| `liverag/storage/` | SQLite、JSONL/文件型数据访问 | 延续 sqlite3 模式，新增 interview 专用 schema/store |
+| `liverag/storage/` | SQLite、JSONL/文件型数据访问 | 第一步收敛为 SQLAlchemy repository + SQLite；第二步再由 Alembic 管理 schema 并接入 PostgreSQL |
 | `tests/` | 以单元、fake、FastAPI TestClient 为主 | 增加状态机、并发幂等、MCP mock、评价一致性和 E2E |
 
 前端实际为独立 Next.js 工程。当前主要页面是实时 LiveKit 页面和知识库页面；浏览器经 Next.js `/api/liverag/*` BFF 转发管理请求，LiveKit token/连接信息由 server route 生成。状态主要由 React hooks/local state 管理，没有全局 Redux/Zustand。Interview Coach 应延续 BFF 和局部状态模式。
@@ -78,13 +85,13 @@ Interview Coach 只把简历、项目介绍、README、技术总结等非结构�
 - 管理元数据：`liverag.db`，原生 sqlite3，WAL。
 - RAG：LightRAG 的每知识库物理 workspace 与文件。
 - 会话上下文与历史：目录、Markdown、JSON/JSONL。
-- 当前缺少统一 ORM 和迁移框架。
+- Interview 已建立统一 ORM；正式迁移框架留到第二步引入 Alembic。
 
-Interview 数据建议使用独立 `~/.LiveRAG/interview/interview.db`，避免污染现有表和生命周期；仍使用 sqlite3/WAL，但必须增加 `schema_migrations`、事务边界、唯一约束和乐观版本字段。
+Interview 数据已切换为 SQLAlchemy Repository，并在第一步继续只连接 SQLite。原生 `sqlite3` Store 和自定义 migration runner 已移除，当前由 ORM metadata 初始化开发/测试数据库；第二步再引入 Alembic，并让同一数据模型连接 PostgreSQL。状态事件、关键唯一约束和少量乐观版本字段继续保留。
 
 ### 1.7 当前测试现状
 
-后端现有测试以单元测试、fake 和 TestClient 为主；扫描到 33 个测试文件、约 224 个测试函数。当前没有清晰分层的 integration/e2e 目录。前端未发现完整的自动化测试配置。因此 V0 需要先冻结核心契约，V1 再建立 Interview 专属测试金字塔。
+后端现有测试以单元测试、fake 和 TestClient 为主；扫描到 33 个测试文件、约 224 个测试函数。当前没有清晰分层的 integration/e2e 目录。前端未发现完整的自动化测试配置。因此 V0 需要先冻结核心契约，第一步再建立 Interview 专属测试金字塔。
 
 ### 1.8 可直接复用能力
 
@@ -129,12 +136,17 @@ flowchart LR
     UI <--> LK[LiveKit]
     LK <--> IA[Independent Interview Agent Worker]
     IA --> OR
-    OR --> DB[(Interview SQLite)]
+    OR --> DB[(SQLite Step 1 / PostgreSQL Step 2+)]
+    API --> REDIS[(Redis Step 3+)]
+    REDIS --> BW[Background Worker Step 3+]
+    BW --> DB
     EV --> DB
     RP --> DB
 ```
 
 核心边界：FastAPI 负责管理与准备；Interview Agent 负责低延迟实时交互；Orchestrator 是状态机的唯一写入口；Service 负责可测试的业务决策；数据库保存权威状态；RAG 和 MCP 都是输入来源，不拥有面试流程。
+
+上图展示最终组件关系，不表示所有组件同时实施。第一步只启用 API、SQLAlchemy/SQLite、LiveKit/Agent 和 LightRAG；第二步替换数据库迁移与部署后端；第三步才启用 Redis/Background Worker；第四步才开放多用户公网访问。
 
 ---
 
@@ -146,13 +158,20 @@ flowchart LR
 liverag/
   interview/
     schemas.py
-    models.py
+    records.py
     migrations.py
     store.py
     prompts.py
     artifact_reader.py
     profile_service.py
-    question_bank.py
+    question_bank/
+      __init__.py
+      catalog.py
+      converter.py
+      enricher.py
+      builder.py
+      cli.py
+      data/question_bank.v1.json
     planner.py
     state_machine.py
     orchestrator.py
@@ -160,7 +179,6 @@ liverag/
     follow_up.py
     report.py
     service.py
-    data/question_bank.v1.json
     intelligence/
       provider.py
       mcp_client.py
@@ -174,7 +192,7 @@ liverag/
 tests/interview/
 ```
 
-现有文件只做最小接线：`liverag/api/server.py` 注册 router；settings 增加配置；`pyproject.toml` 在 V2 增加 MCP 依赖；Docker Compose 增加独立 interview worker 服务。不能把状态机嵌入现有通用 VoiceAssistant，也不能让 route 直接调用 MCP adapter。
+现有文件只做最小接线：`liverag/api/server.py` 注册 router；settings 增加配置；第一步由 Docker Compose 增加独立 Interview Agent worker，第三步才在 `pyproject.toml` 增加 MCP/Background Worker 依赖和后台 worker 服务。不能把状态机嵌入现有通用 VoiceAssistant，也不能让 route 直接调用 MCP adapter。
 
 ---
 
@@ -236,7 +254,7 @@ CREATED -> PREPARING -> READY -> INTRODUCTION
 
 - `interview_events.event_id` 全局唯一；消费使用 at-least-once，效果由幂等保证。
 - session 带 `version`；更新使用 `WHERE id=? AND version=?`，冲突后重读。
-- 关键迁移使用 SQLite `BEGIN IMMEDIATE`，状态、事件和 cursor 在同一事务提交。
+- 关键迁移使用数据库事务，状态、事件和 cursor 在同一事务提交。第一步在 SQLAlchemy + SQLite 上验证条件更新和 `version`；第二步再验证 PostgreSQL 下的等价并发行为。
 - TTS 播报不能保证 exactly-once；保存 delivery id，恢复时由客户端确认是否重播。
 - 每个状态有 deadline；超时可进入 PAUSED、跳过当前题或 FAILED，策略写入 InterviewConfig。
 - ABORTED/FAILED/COMPLETED 为终态，不允许普通事件复活；恢复必须创建显式的新 session 或 retry job。
@@ -311,10 +329,11 @@ class InterviewIntelligenceProvider(Protocol):
 
 ### 7.2 数据库取舍
 
-- **继续 SQLite：** MVP 单机/单用户或低并发部署足够，且与项目现状一致。
-- **暂不引入 ORM：** 现有代码使用 sqlite3；新增 repository/store 封装和显式 row mapper 即可。避免只为新模块引入两套数据访问范式。
-- **MVP 必须有迁移：** 不必立即引入 Alembic，但必须有版本化 SQL migration runner、`schema_migrations` 和升级测试；不能靠启动时散落的 `CREATE TABLE IF NOT EXISTS` 演进生产 schema。
-- **升级条件：** 当需要多实例并发写、强租户隔离、远程数据库运维或 SQLite 锁等待成为实测瓶颈时，再迁移 PostgreSQL/ORM。
+- **第一步统一数据访问：** Interview Application Layer 先使用 SQLAlchemy + SQLite，不长期维护原生 `sqlite3` Store；这一阶段不引入 Alembic 或 PostgreSQL。
+- **第二步统一迁移：** SQLAlchemy 模型稳定后引入 Alembic，并让相同 repository 支持 PostgreSQL。Alembic baseline 必须直接来自现有 ORM metadata，不再维护手写迁移 runner。
+- **开发与部署分离：** 第二步完成后，本地开发和轻量测试继续使用 SQLite，集成测试与后续部署使用 PostgreSQL；查询和迁移必须保持跨方言兼容。
+- **并发控制：** 第一步只为 Interview Session 等当前关键竞争记录保留 `version`；第三步增加 Background Job 后再为 Job 增加相应条件更新。永久幂等由数据库唯一约束保证。
+- **验证要求：** 第一步运行 SQLite 测试；第二步增加 PostgreSQL 集成测试，覆盖 Alembic upgrade、事务、唯一约束、时间类型和并发更新。
 
 ### 7.3 RAG 边界
 
@@ -432,7 +451,7 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 | `/interview/[id]/plan` | 准备进度、画像摘要、情报来源、计划预览与确认 |
 | `/interview/[id]/live` | LiveKit 音频、当前阶段、题号/时间、字幕、暂停和退出 |
 | `/interview/[id]/report` | 分数、rubric 证据、薄弱点、训练建议 |
-| `/interview/progress` | 技能趋势与历史证据（V3） |
+| `/interview/progress` | 技能趋势与历史证据（第四步完成后的增强能力） |
 
 沿用现有连接组件和 local hooks，新增 `types/interview.ts`、API client 与 `useInterviewSession`；复杂状态由服务端状态机驱动，前端 reducer 只投影服务端状态。Live 页视觉上应突出“问题轨道、剩余时间、连接/评价状态”，而不是通用聊天气泡列表。
 
@@ -461,14 +480,14 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 
 ### 12.4 集成测试
 
-- FastAPI + 临时 SQLite + fake RAG/provider/LLM。
+- 第一步使用 FastAPI + SQLAlchemy + 临时 SQLite + fake RAG/provider/LLM；第二步增加 Alembic + PostgreSQL 集成测试。
 - prepare 到 plan、session 到 report 的完整服务调用。
 - worker 通过 fake STT/TTS/LiveKit event 验证 orchestration，不调用真实云服务。
 
 ### 12.5 E2E 测试
 
 - Playwright 覆盖创建、准备、进入 Live 页、注入测试 transcript、掉线恢复、完成和报告。
-- Compose smoke 验证 API、RAG Core、通用 worker、interview worker 的健康和路由隔离。
+- 第一步验证 API、RAG Core、通用 LiveKit worker 和 interview worker；第三步增加 Background Worker/Redis smoke；第四步增加带身份、配额和并发限制的公网部署 smoke。
 
 ### 12.6 评价一致性测试
 
@@ -500,56 +519,99 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 
 **Git commit 建议：** `docs: freeze current LiveRAG runtime contracts`；`test: add LiveRAG extension regression baseline`。
 
-### V1：最小模拟面试闭环
+### 第一步：FastAPI + SQLAlchemy + SQLite + LiveKit + LightRAG
 
-**目标：** 使用手工配置/结构化题库完成创建计划、实时问答、受控追问、暂停恢复和报告。
+**目标：** 不引入 PostgreSQL、Redis、Background Worker 或用户体系，先完成单机 Interview Coach 闭环，并把 Interview 数据访问统一到 SQLAlchemy + SQLite。
 
-**修改文件：** `liverag/api/server.py`、settings 文件、`docker-compose.yml`、必要的镜像启动配置；前端导航和 API proxy 配置。
+**本阶段内部顺序：** 先建立 SQLAlchemy engine/session、ORM models 和 SQLite repository，再把状态机迁移到 Repository Protocol，最后实施 Orchestrator、评价、追问、报告和 LiveKit 接线。数据库基础与状态机接线已经完成，后续代码不得重新引入原生 `sqlite3` Store。
 
-**新增文件：** `liverag/interview/{schemas,models,migrations,store,question_bank,state_machine,orchestrator,evaluator,follow_up,report,service,prompts}.py`、`liverag/interview/data/question_bank.v1.json`、`liverag/agent/interview_agent.py`、`liverag/api/interview_routes.py`、`liverag/interview_main.py`、`tests/interview/`；前端 interview pages/types/hooks/client。
+**修改文件：** `pyproject.toml`、`liverag/api/server.py`、Interview settings、现有 API/LiveKit/LightRAG Compose 服务，以及前端导航和 API proxy 配置。
 
-- [ ] 建立独立 interview SQLite schema 和 migration runner。
-- [ ] 实现状态转移、事件幂等、version 乐观锁、attempt 恢复。
-- [ ] 接入版本化题库与 rubric。
-- [ ] 实现一个 Interview Agent 与独立 worker process。
-- [ ] 实现逐题评价、规则化追问和最终报告。
-- [ ] 完成创建、Live、报告三个最小前端页面。
+**新增文件：** `liverag/interview/{db,models,repository,sqlalchemy_repository,orchestrator,evaluator,follow_up,report,service,prompts}.py`、`liverag/agent/interview_agent.py`、`liverag/api/interview_routes.py`、`liverag/interview_main.py`、对应 `tests/interview/`；前端 interview pages/types/hooks/client。
 
-**测试：** 单元、状态机、API 集成、fake voice worker、Playwright happy path 与掉线恢复；完整 LiveRAG 回归。
+- [√] 建立 Interview SQLite 领域原型、版本化题库、状态机、事件幂等、version 乐观锁和暂停恢复。
+- [√] 引入 SQLAlchemy engine/session 和 Interview ORM models，只连接 SQLite。
+- [√] 建立 Interview Repository Protocol 和 SQLAlchemy 实现，保持现有 Record/Pydantic 契约。
+- [√] 将旧 `InterviewStore` 行为迁移为 Repository 契约测试。
+- [√] 让状态机依赖 Repository Protocol，并注入 SQLAlchemy Repository。
+- [√] 移除原生 `sqlite3` Store 和自定义 migration runner，使 ORM metadata 成为唯一 schema 来源。
+- [ ] 完成 Orchestrator、逐题评价、规则化追问和最终报告。
+- [ ] 通过 FastAPI 暴露创建计划、Session、Answer、Event 和 Report 接口。
+- [ ] 实现独立 LiveKit Interview Agent worker，并复用 RagGateway/LightRAG 查询候选人资料。
+- [ ] 完成创建、Live、报告三个最小前端页面，但不增加登录和多用户逻辑。
 
-**验收标准：** 10–20 分钟面试可完成；Agent 不自由换题；重复事件不产生重复答案/报告；断线能恢复；MCP 和个性化材料均缺失时仍可运行。
+**测试：** SQLAlchemy + 临时 SQLite、状态机、API TestClient、fake voice worker、LightRAG fake、Playwright happy path 与掉线恢复；完整 LiveRAG 回归。
 
-**Git commit 建议：** 按 schema/store、state machine、services、worker、API、frontend、E2E 分成原子提交，例如 `feat(interview): add durable interview state machine`。
+**验收标准：** 单机环境可完成 10–20 分钟面试；FastAPI、SQLAlchemy/SQLite、LiveKit 和 LightRAG 全链路跑通；没有 PostgreSQL、Alembic、Redis、Background Worker 或用户系统依赖。
 
-### V2：简历/JD 个性化与 MCP 面经增强
+**阶段门槛：** 本阶段完成前不得开始 Alembic/PostgreSQL 接入。
 
-**目标：** 从现有知识库生成候选人画像，分析 JD，并以可替换 provider 获取公司岗位情报，生成证据化计划。
+### 第二步：Alembic + PostgreSQL
 
-**修改文件：** `pyproject.toml`（固定 MCP v1 兼容范围）、settings、Compose env、上传/知识库选择 UI、计划页。
+**目标：** 在第一步 SQLAlchemy 模型和 repository 稳定后，建立正式迁移体系，并让同一业务代码在 PostgreSQL 上等价运行。
 
-**新增文件：** `artifact_reader.py`、`profile_service.py`、`planner.py`、`intelligence/{provider,mcp_client,nowcoder_mcp,normalizer,aggregator,service}.py`、对应 migrations、fixtures 和测试。
+- [ ] 以第一步 SQLAlchemy metadata 建立 Alembic baseline；不得从原生建表 SQL 维护第二套模型。
+- [ ] 配置 SQLite 开发 URL 和 PostgreSQL 集成/部署 URL，repository 不按数据库类型分叉业务逻辑。
+- [ ] 在 PostgreSQL 上运行 `alembic upgrade head`，验证空库初始化和连续升级。
+- [ ] 验证事件 + Session + Answer 原子事务、唯一幂等、外键、UTC 时间和 `version` 条件更新。
+- [ ] 为现有 SQLite 数据提供一次性导出/导入路径，或明确标记可重建的开发数据。
+- [ ] Compose 增加 PostgreSQL 健康检查和持久化卷；FastAPI/Agent 只等待 ready，不管理数据库进程。
+- [ ] CI 保留 SQLite 快速测试，并增加真实 PostgreSQL 的 Alembic、repository、并发更新和 API 集成测试。
 
-- [ ] 通过 RagGateway 获取候选人证据，不绕过现有 RAG。
-- [ ] 生成带引用的 CandidateProfile 和结构化 JobProfile。
-- [ ] 实现 provider protocol 与 generic MCP client。
-- [ ] 在契约明确后实现默认关闭的 Nowcoder adapter。
-- [ ] 实现标准化、去重、可信度、缓存和降级。
-- [ ] Planner 综合五类来源并记录每题 provenance。
-- [ ] UI 展示情报来源、更新时间、可信度和降级状态。
+**验收标准：** 同一业务测试契约在 SQLite 和 PostgreSQL 通过；部署配置使用 PostgreSQL，本地仍可使用 SQLite。
 
-**测试：** RAG fake、prompt golden、MCP mock/contract、恶意外部文本注入、provider 超时降级、个性化 E2E。
+**阶段门槛：** 本阶段不引入 Redis、Background Worker、用户隔离、配额或公网开放；完成后才能进入第三步。
 
-**验收标准：** 每个个性化问题可追溯到候选人证据、JD、题库或情报来源；MCP 不出现在实时调用日志；provider 故障不阻塞面试。
+### 第三步：Redis + Background Worker
 
-**Git commit 建议：** `feat(interview): build evidence-backed candidate and job profiles`；`feat(intelligence): add provider-neutral MCP ingestion`；`feat(interview): personalize plans with provenance`。
+**目标：** 在 PostgreSQL 成为可靠业务数据库后，引入 Redis 和一套 Background Worker，把耗时准备与报告任务移出 FastAPI 请求和实时 LiveKit 主链路。
 
-### V3：长期能力画像与评估系统
+**修改文件：** `pyproject.toml`、settings、Compose、FastAPI lifespan、Interview Application Service、任务状态 API 和计划/报告前端轮询。
+
+**新增文件：** `liverag/interview/jobs/{models,repository,queue,tasks,worker}.py`、`artifact_reader.py`、`profile_service.py`、`planner.py`、`intelligence/{provider,mcp_client,nowcoder_mcp,normalizer,aggregator,service}.py`、对应 migrations、fixtures 和测试。
+
+- [ ] PostgreSQL 增加持久化 Job 记录，保存类型、状态、幂等键、输入业务 ID、尝试次数、错误和时间；Redis 只保存队列与可重建协调状态。
+- [ ] 固定一套 Background Worker 实现，定义有限重试、任务超时、失败状态和安全关闭语义。
+- [ ] 将简历/JD 结构化、Candidate/Job Profile、Interview Plan 和最终报告生成迁移到后台任务。
+- [ ] 通过 RagGateway 获取候选人证据，不绕过现有 LightRAG。
+- [ ] 实现 provider-neutral MCP client；牛客 adapter 只在 capability discovery 和契约测试通过后启用，并始终在准备任务中运行。
+- [ ] 使用 Redis 短期锁减少相同 preparation/report job 的重复执行；最终幂等由 PostgreSQL 唯一约束保证。
+- [ ] FastAPI 创建任务后返回 `job_id`；前端查询 PostgreSQL 中的持久化状态。
+- [ ] 实时 LiveKit 链路继续同步处理提问、final transcript 和状态迁移，不把逐轮语音事件放入 Redis 队列。
+
+**测试：** Redis/Worker 集成、重复投递、Worker 重启、超时、有限重试、MCP mock/contract、provider 降级、报告幂等，以及实时链路无 Redis round-trip 的回归测试。
+
+**验收标准：** FastAPI 重启后 Job 状态仍在 PostgreSQL；Redis 重启不会丢失已完成业务结果；MCP 不出现在实时调用日志；Worker 故障不破坏基础实时面试。
+
+**阶段门槛：** 本阶段仍不实现用户隔离、配额或公网开放；完成后才能进入第四步。
+
+### 第四步：用户隔离、配额、并发和公网部署
+
+**目标：** 在数据库、任务和实时链路稳定后，把单用户系统升级为可部署到公网、支持多个独立账号的产品 MVP。
+
+**修改文件：** 认证 settings/middleware、全部 Interview/RAG API 查询、SQLAlchemy models 和 Alembic migrations、LiveKit token route、Redis coordination、Compose/反向代理和前端登录态。
+
+**新增文件：** 用户/身份关联模型、resource ownership service、usage ledger、quota service、rate limiter、并发面试控制、越权测试和公网部署文档。
+
+- [ ] 接入简单账号身份，核心资源通过 `user_id` 归属；不引入 Organization、Team 或通用 Tenant 层。
+- [ ] 所有按 ID 读取/修改的 Interview、Session、Attempt、Answer、Report、Job、知识库和文档同时校验资源所有权。
+- [ ] 记录 LLM 输入/输出 Token、Embedding 调用、STT/TTS 音频秒数、面试时长、任务次数和失败重试。
+- [ ] PostgreSQL 保存永久用量，Redis 保存短周期计数；实现用户/IP 限流、并发面试上限和异步任务配额。
+- [ ] LiveKit token 只能绑定当前用户有权访问的 Session/Attempt/room，浏览器不能指定任意 Agent 或 room。
+- [ ] 增加并发 resume、重复 final transcript、过期 version、重复 Job 和资源耗尽测试。
+- [ ] 完成 HTTPS、密钥管理、持久化卷、健康检查、日志脱敏、备份恢复和 Docker Compose 公网部署验收。
+
+**测试：** 越权访问矩阵、用户数据隔离、限流/配额、并发状态迁移、Token/音频用量、LiveKit token ownership、Redis 故障降级和公网 E2E。
+
+**验收标准：** 两个账号的数据和实时房间互不可见；并发事件不会覆盖状态；超额请求得到明确错误；公网环境可完成准备、面试和报告闭环。
+
+**非目标：** 支付、套餐、复杂 RBAC、组织租户、Kafka、Kubernetes 和微服务拆分。
+
+### 后续增强 A：长期能力画像与评估系统
+
+**前置条件：** 严格在第四步完成后开始。
 
 **目标：** 跨面试积累可解释 SkillProgress，建立评价校准、趋势分析和训练闭环。
-
-**修改文件：** evaluator/report/service、报告页和导航、配置与观测指标。
-
-**新增文件：** skill progress service、calibration runner、去标识化 evaluation fixtures、progress API/page、评价对比报告生成器。
 
 - [ ] 定义技能 taxonomy、证据衰减和置信度更新规则。
 - [ ] SkillProgress 只由已持久化评价更新，并可回溯来源。
@@ -557,13 +619,11 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 - [ ] 展示趋势、置信度和推荐训练题。
 - [ ] 增加成本、延迟、评价失败和分布漂移监控。
 
-**测试：** 历史聚合、重复报告幂等、时间衰减、评价一致性、版本对比和进度页 E2E。
+**测试与验收：** 覆盖历史聚合、报告幂等、时间衰减、评价一致性、版本对比和进度页 E2E；分数变化必须有证据和版本解释。
 
-**验收标准：** 分数变化有证据和版本解释；同一 golden dataset 的关键指标稳定在预设阈值内；用户可从弱项跳转到下一次训练计划。
+### 后续增强 B：PI Agent / GitHub 项目分析（可选，非 MVP）
 
-**Git commit 建议：** `feat(interview): add evidence-backed skill progression`；`test(evaluation): add calibration regression suite`。
-
-### V4：PI Agent / GitHub 项目分析（可选，非 MVP）
+**前置条件：** 严格在第四步完成后开始。
 
 **目标：** 在用户明确授权后分析 GitHub 仓库，生成代码级、可引用的问题。
 
@@ -579,7 +639,7 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 
 **测试：** 小型 fixture repos、恶意仓库、超大仓库截断、secret 遮蔽、引用准确率、授权撤销和降级。
 
-**验收标准：** 能提出类似“为什么采用 workspace 隔离而非 metadata filter”的代码级问题；每题有稳定代码引用；功能关闭或分析失败不影响 V1–V3。
+**验收标准：** 能提出类似“为什么采用 workspace 隔离而非 metadata filter”的代码级问题；每题有稳定代码引用；功能关闭或分析失败不影响四步主流程。
 
 **Git commit 建议：** `feat(code-intelligence): add sandboxed repository analysis provider`；`feat(interview): generate code-grounded project questions`。
 

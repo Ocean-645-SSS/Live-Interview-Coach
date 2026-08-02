@@ -1,197 +1,404 @@
-"""Live Interview Coach V1 的持久化记录模型。
-
-本文件中的 dataclass 与数据库表一一对应，用来承接 SQLite 查询结果。
-它们只描述“数据库中保存了什么”，不执行 SQL，也不决定面试状态如何迁移。
-
-`schemas.py` 与本文件的区别：
-
-- `schemas.py` 定义业务输入、输出和校验规则；
-- `models.py` 定义从数据库读取后在 Python 中使用的不可变记录。
-"""
+"""Interview 领域的 SQLAlchemy ORM 模型。"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import Enum
-from uuid import uuid4
 
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy import Enum as SqlEnum
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from liverag.interview.records import AnswerState, AttemptState, ReportState
 from liverag.interview.schemas import InterviewState
 
 
-class AttemptState(str, Enum):
-    """表示一次 LiveKit 房间连接尝试的生命周期。"""
-
-    CREATED = "CREATED"
-    CONNECTED = "CONNECTED"
-    DISCONNECTED = "DISCONNECTED"
-    FAILED = "FAILED"
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-class AnswerState(str, Enum):
-    """表示一份回答是否已经完成评价。"""
-
-    RECEIVED = "RECEIVED"
-    EVALUATING = "EVALUATING"
-    EVALUATED = "EVALUATED"
-    FAILED = "FAILED"
+class Base(DeclarativeBase):
+    """Interview ORM metadata 的统一基类。"""
 
 
-class ReportState(str, Enum):
-    """表示面试报告的生成状态。"""
+class InterviewModel(Base):
+    """一场面试的配置、计划和顶层状态。"""
 
-    PENDING = "PENDING"
-    GENERATING = "GENERATING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
+    __tablename__ = "interviews"
+    __table_args__ = (
+        CheckConstraint("version >= 1", name="ck_interviews_version"),
+    )
 
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[InterviewState] = mapped_column(
+        SqlEnum(
+            InterviewState,
+            name="ck_interviews_state_values",
+            native_enum=False,
+            create_constraint=True,
+            validate_strings=True,
+        ),
+        default=InterviewState.CREATED,
+        nullable=False,
+    )
+    config_json: Mapped[str] = mapped_column(Text, nullable=False)
+    plan_json: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
 
-def utc_now_iso() -> str:
-    """返回带 UTC 时区信息的 ISO 8601 时间字符串。"""
-
-    return datetime.now(timezone.utc).isoformat()
-
-
-def generate_id(prefix: str) -> str:
-    """生成带业务前缀的随机标识。
-    prefix: 标识类型的英文前缀，只允许字母、数字和下划线。
-    返回格式为 `<prefix>_<32位十六进制UUID>` 的字符串。
-    """
-
-    cleaned_prefix = prefix.strip()
-    if not cleaned_prefix:
-        raise ValueError("标识前缀不能为空")
-    if not cleaned_prefix.replace("_", "").isalnum():
-        raise ValueError("标识前缀只能包含字母、数字和下划线")
-    if not cleaned_prefix.isascii():
-        raise ValueError("标识前缀必须使用 ASCII 字符")
-    return f"{cleaned_prefix}_{uuid4().hex}"
-
-
-@dataclass(frozen=True, slots=True)
-class InterviewRecord:
-    """一场业务面试的顶层记录。
-
-    该记录保存用户创建的面试配置和冻结后的计划。一次 Interview 可以因
-    掉线而产生多个 Session attempt，但始终只有一个顶层 InterviewRecord。
-    """
-
-    id: str
-    title: str  #面试标题
-    state: InterviewState   #当前阶段
-    config_json: str    #`InterviewConfig` 序列化后的 JSON
-    plan_json: str | None   #`InterviewPlan` 序列化后的 JSON；计划生成前为 None
-    version: int    #乐观锁版本，每次修改记录就递增
-    created_at: str
-    updated_at: str
+    sessions: Mapped[list[InterviewSessionModel]] = relationship(
+        back_populates="interview",
+        passive_deletes=True,
+    )
 
 
-@dataclass(frozen=True, slots=True)
-class InterviewSessionRecord:
-    """保存实时面试状态机的权威快照：真正开始语音面试的执行进度
+class InterviewSessionModel(Base):
+    """实时面试状态机的权威快照。"""
 
-    Session 与 LiveKit room 分离：用户断线后可以创建新的 attempt 和 room，
-    但继续使用同一个 session、当前题目位置和状态版本。
-    """
+    #对应的数据库表名
+    __tablename__ = "interview_sessions"
+    #描述整张表规则
+    __table_args__ = (
+        CheckConstraint(
+            "resume_state IS NULL OR resume_state IN ("
+            "'INTRODUCTION', 'ASKING', 'LISTENING', 'EVALUATING', "
+            "'FOLLOW_UP', 'NEXT_QUESTION', 'COMPLETING'"
+            ")",
+            name="ck_interview_sessions_resume_state",
+        ),
+        CheckConstraint(
+            "current_question_index >= 0",
+            name="ck_interview_sessions_question_index",
+        ),
+        CheckConstraint(
+            "follow_up_count >= 0",
+            name="ck_interview_sessions_follow_up_count",
+        ),
+        CheckConstraint("version >= 1", name="ck_interview_sessions_version"),
+        Index(
+            "idx_interview_sessions_interview_id",
+            "interview_id",
+            "created_at",
+        ),
+    )
 
-    id: str     #实时面试会话标识
-    interview_id: str   #顶层业务面试标识
-    state: InterviewState   #当前状态机状态
-    resume_state: InterviewState | None   #暂停前的状态，未暂停时为 None
-    current_question_index: int     #当前题目在计划中的索引
-    current_question_id: str | None    #当前题目标识，尚未开始或已经结束时可为 None
-    follow_up_count: int    #已经追问的次数
-    version: int    #乐观锁版本，用于拒绝并发的过期更新
-    started_at: str | None
-    ended_at: str | None
-    created_at: str
-    updated_at: str
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    interview_id: Mapped[str] = mapped_column(
+        ForeignKey("interviews.id", ondelete="RESTRICT"), nullable=False
+    )
+    state: Mapped[InterviewState] = mapped_column(
+        SqlEnum(
+            InterviewState,
+            name="ck_interview_sessions_state_values",
+            native_enum=False,
+            create_constraint=True,
+            validate_strings=True,
+        ),
+        default=InterviewState.CREATED,
+        nullable=False,
+    )
+    resume_state: Mapped[InterviewState | None] = mapped_column(
+        SqlEnum(
+            InterviewState,
+            name="ck_interview_sessions_resume_state_values",
+            native_enum=False,
+            create_constraint=True,
+            validate_strings=True,
+        )
+    )
+    current_question_index: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    current_question_id: Mapped[str | None] = mapped_column(String(255))
+    follow_up_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+    interview: Mapped[InterviewModel] = relationship(back_populates="sessions")
+    attempts: Mapped[list[InterviewAttemptModel]] = relationship(
+        back_populates="session",   #声明关系另外一端的属性名：这个表
+        cascade="all, delete-orphan",   #声明级联删除和孤儿删除：删除 session 时删除所有 attempt
+        passive_deletes=True,   #声明被动删除：删除 session 时不加载 attempt，而是直接在数据库中删除
+    )
+    events: Mapped[list[InterviewEventModel]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    answers: Mapped[list[InterviewAnswerModel]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    report: Mapped[InterviewReportModel | None] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )
 
 
-@dataclass(frozen=True, slots=True)
-class InterviewAttemptRecord:
-    """记录一次 LiveKit 房间连接尝试：描述当前网络链接如何
+class InterviewAttemptModel(Base):
+    """一次 LiveKit 房间连接尝试。"""
 
-    一个业务 Session 可以对应多个 Attempt。例如用户网络中断后，旧 attempt
-    标记为 DISCONNECTED，恢复操作会创建新 room 和新 attempt。
-    """
+    __tablename__ = "interview_attempts"
+    __table_args__ = (
+        Index("idx_interview_attempts_session_id", "session_id", "created_at"),
+    )
 
-    id: str
-    session_id: str #所属实时面试会话标识
-    room_name: str #本次连接使用的 LiveKit room name
-    state: AttemptState #当前连接状态
-    connected_at: str | None  #成功连接房间的时间
-    disconnected_at: str | None #结束连接的时间
-    error_message: str | None  #连接失败时保存的可诊断错误
-    created_at: str
-    updated_at: str
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("interview_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    room_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    state: Mapped[AttemptState] = mapped_column(
+        SqlEnum(
+            AttemptState,
+            name="ck_interview_attempts_state_values",
+            native_enum=False,
+            create_constraint=True,
+            validate_strings=True,
+        ),
+        default=AttemptState.CREATED,
+        nullable=False,
+    )
+    connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
 
-
-@dataclass(frozen=True, slots=True)
-class InterviewAnswerRecord:
-    """保存候选人对一道题的一次最终回答。
-
-    Interim transcript 只用于前端实时展示，不写入这张权威记录。只有 STT
-    确认的 final transcript 才会创建 Answer，以避免半句话被重复评价。
-    """
-
-    id: str
-    session_id: str
-    question_id: str
-    attempt_id: str #收到回答时使用的 LiveKit attempt 标识
-    answer_number: int  #同一道题的回答序号，首次回答为 1，clarify后可递增
-    transcript: str #STT 确认的最终回答文本
-    state: AnswerState  #回答的评价处理状态
-    source_event_id: str #创建该回答的事件标识，用于幂等性重复事件消重
-    started_at: str
-    ended_at: str
-    created_at: str
-    updated_at: str
-
-
-@dataclass(frozen=True, slots=True)
-class InterviewEventRecord:
-    """保存驱动状态机的一条不可变业务事件。
-
-    状态机事件采用追加写而不是覆盖写。`id` 是全局幂等键，同一事件即使
-    被 LiveKit 或客户端重复投递，也只能成功写入一次。
-    """
-
-    id: str
-    session_id: str
-    event_type: str #稳定的英文事件名称，例如 `answer_received`
-    payload_json: str   #事件附带数据的 JSON 字符串
-    state_before: InterviewState    #处理事件前的状态
-    state_after: InterviewState     #处理成功后的状态；未改变状态时与 state_before 相同
-    version_before: int     #处理事件前的 session 乐观锁版本
-    version_after: int      #处理事件后的 session 乐观锁版本
-    created_at: str
+    session: Mapped[InterviewSessionModel] = relationship(back_populates="attempts")
+    answers: Mapped[list[InterviewAnswerModel]] = relationship(
+        back_populates="attempt",
+        passive_deletes=True,
+    )
 
 
-@dataclass(frozen=True, slots=True)
-class InterviewReportRecord:
-    """保存一场面试报告的生成状态和最终内容。"""
+class InterviewEventModel(Base):
+    """驱动状态机且只追加写入的业务事件。"""
 
-    id: str
-    session_id: str
-    state: ReportState  #报告生成状态
-    content_json: str | None    #最终结构化报告的 JSON
-    error_message: str | None   #报告生成失败时的错误信息
-    created_at: str
-    updated_at: str
-    completed_at: str | None
+    __tablename__ = "interview_events"
+    __table_args__ = (
+        CheckConstraint("version_before >= 1", name="ck_interview_events_version_before"),
+        CheckConstraint(
+            "version_after >= version_before",
+            name="ck_interview_events_version_order",
+        ),
+        Index(
+            "idx_interview_events_session_id",
+            "session_id",
+            "version_after",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("interview_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    state_before: Mapped[InterviewState] = mapped_column(
+        SqlEnum(
+            InterviewState,
+            name="ck_interview_events_state_before_values",
+            native_enum=False,
+            create_constraint=True,
+            validate_strings=True,
+        ),
+        nullable=False,
+    )
+    state_after: Mapped[InterviewState] = mapped_column(
+        SqlEnum(
+            InterviewState,
+            name="ck_interview_events_state_after_values",
+            native_enum=False,
+            create_constraint=True,
+            validate_strings=True,
+        ),
+        nullable=False,
+    )
+    version_before: Mapped[int] = mapped_column(Integer, nullable=False)
+    version_after: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+
+    session: Mapped[InterviewSessionModel] = relationship(back_populates="events")
+    answer: Mapped[InterviewAnswerModel | None] = relationship(
+        back_populates="source_event",
+        passive_deletes=True,
+        uselist=False,
+    )
+
+
+class InterviewAnswerModel(Base):
+    """候选人对一道题的一次最终回答。"""
+
+    __tablename__ = "interview_answers"
+    __table_args__ = (
+        CheckConstraint("answer_number >= 1", name="ck_interview_answers_number"),
+        CheckConstraint(
+            "length(trim(transcript)) > 0",
+            name="ck_interview_answers_transcript",
+        ),
+        UniqueConstraint(
+            "session_id",
+            "question_id",
+            "answer_number",
+            name="uq_interview_answers_session_question_number",
+        ),
+        Index(
+            "idx_interview_answers_session_question",
+            "session_id",
+            "question_id",
+            "answer_number",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("interview_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    question_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("interview_attempts.id", ondelete="RESTRICT"), nullable=False
+    )
+    answer_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    transcript: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[AnswerState] = mapped_column(
+        SqlEnum(
+            AnswerState,
+            name="ck_interview_answers_state_values",
+            native_enum=False,
+            create_constraint=True,
+            validate_strings=True,
+        ),
+        default=AnswerState.RECEIVED,
+        nullable=False,
+    )
+    source_event_id: Mapped[str] = mapped_column(
+        ForeignKey("interview_events.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+    session: Mapped[InterviewSessionModel] = relationship(back_populates="answers")
+    attempt: Mapped[InterviewAttemptModel] = relationship(back_populates="answers")
+    source_event: Mapped[InterviewEventModel] = relationship(back_populates="answer")
+    evaluation: Mapped[AnswerEvaluationModel | None] = relationship(
+        back_populates="answer",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )
+
+
+class AnswerEvaluationModel(Base):
+    """回答的结构化评价快照。"""
+
+    __tablename__ = "answer_evaluations"
+    __table_args__ = (
+        CheckConstraint("rubric_version >= 1", name="ck_answer_evaluations_rubric_version"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    answer_id: Mapped[str] = mapped_column(
+        ForeignKey("interview_answers.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    rubric_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    evaluation_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+    answer: Mapped[InterviewAnswerModel] = relationship(back_populates="evaluation")
+
+
+class InterviewReportModel(Base):
+    """一场面试最终报告的生成状态和内容。"""
+
+    __tablename__ = "interview_reports"
+    __table_args__ = (
+        Index("idx_interview_reports_state", "state", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("interview_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    state: Mapped[ReportState] = mapped_column(
+        SqlEnum(
+            ReportState,
+            name="ck_interview_reports_state_values",
+            native_enum=False,
+            create_constraint=True,
+            validate_strings=True,
+        ),
+        default=ReportState.PENDING,
+        nullable=False,
+    )
+    content_json: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    session: Mapped[InterviewSessionModel] = relationship(back_populates="report")
 
 
 __all__ = [
-    "AttemptState",
-    "AnswerState",
-    "ReportState",
-    "InterviewRecord",
-    "InterviewSessionRecord",
-    "InterviewAttemptRecord",
-    "InterviewAnswerRecord",
-    "InterviewEventRecord",
-    "InterviewReportRecord",
-    "utc_now_iso",
-    "generate_id",
+    "AnswerEvaluationModel",
+    "Base",
+    "InterviewAnswerModel",
+    "InterviewAttemptModel",
+    "InterviewEventModel",
+    "InterviewModel",
+    "InterviewReportModel",
+    "InterviewSessionModel",
 ]

@@ -44,3 +44,6 @@ log/
 rag_storage/
 uploads/
 .LiveRAG/
+
+# Local/generated interview question-bank datasets
+liverag/interview/question_bank/data/

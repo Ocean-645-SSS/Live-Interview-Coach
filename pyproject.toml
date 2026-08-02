@@ -22,6 +22,7 @@ dependencies = [
     "uvicorn[standard]>=0.30.0",
     "websockets>=15.0.0",
     "pydantic-settings>=2.14.2",
+    "sqlalchemy>=2.0,<3.0",
     "docling>=2.113.0",
     "torch",
 ]
@@ -30,6 +31,7 @@ dependencies = [
 liverag-agent = "liverag.main:main"
 liverag-api = "liverag.api.main:main"
 liverag-rag-service = "liverag.rag.cli:main"
+liverag-build-question-bank = "liverag.interview.question_bank.cli:main"
 
 [dependency-groups]
 dev = [

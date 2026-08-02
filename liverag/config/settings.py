@@ -849,6 +849,8 @@ def load_context_model_settings(user_data_dir: Path | None = None) -> ContextMod
 
     base = _env_context_model_settings()
     config = read_runtime_context_model_config(user_data_dir)
+    raw_temperature = config.get("temperature")
+    temperature = base.temperature if raw_temperature is None else float(raw_temperature)
     return ContextModelSettings(
         model=str(config.get("model") or base.model).strip(),
         base_url=str(config.get("base_url") or base.base_url).strip().rstrip("/"),
@@ -859,9 +861,7 @@ def load_context_model_settings(user_data_dir: Path | None = None) -> ContextMod
             config.get("history_reference_limit") or base.history_reference_limit
         ),
         timeout_ms=int(config.get("timeout_ms") or base.timeout_ms),
-        temperature=float(
-            config.get("temperature") if config.get("temperature") is not None else base.temperature
-        ),
+        temperature=temperature,
     )
 
 

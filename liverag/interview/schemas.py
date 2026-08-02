@@ -1,4 +1,4 @@
-"""Live Interview Coach V1 的领域数据契约。
+"""Live Interview Coach V1 的业务数据契约。
 
 本文件只负责定义跨模块传递的数据结构和基础校验规则，不负责数据库读写、
 状态迁移、模型调用或 HTTP 接口。状态机、题库、面试计划、评价服务和报告
@@ -11,7 +11,6 @@ from enum import Enum
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
 
 NonEmptyText = Annotated[str, Field(min_length=1)] #非空文本
 NonNegativeInt = Annotated[int, Field(ge=0)]  #非负整数
@@ -168,17 +167,28 @@ class InterviewConfig(StrictModel):
 
 
 class InterviewQuestion(StrictModel):
-    """面试计划中一条可执行的问题定义。"""
+    """面试计划中一条可执行的问题定义。
+
+    固定题库题可以保存原始分类、参考答案和文档位置；运行时动态生成的问题
+    允许这些来源字段为空。实时 Agent 只向候选人播报 `question_text`，不会
+    直接泄露 `reference_answer` 或评分规则。
+    """
 
     id: NonEmptyText
     order: PositiveInt  #问题在计划中的顺序，从 1 开始连续编号
     type: QuestionType  #问题类型
     source: QuestionSource  #问题来源
     difficulty: InterviewDifficulty #问题难度
-    topics: list[NonEmptyText] = Field(min_length=1)   #涉及的技术主题
+    category: NonEmptyText  #一级技术分类，例如 RAG、Agent、MySQL
+    subcategory: str | None = None  #二级技术分类，例如文档切块、Memory、事务
+    topics: list[NonEmptyText] = Field(min_length=1)   #细节化技术主题
     question_text: NonEmptyText    #面试问题
     objective: NonEmptyText   #考察目标
     rubric: QuestionRubric  #结构化评分依据
+    reference_answer: str | None = None  #原始资料中的完整参考答案，不直接展示给候选人
+    source_reference: str | None = None  #原始文档和标题路径，便于回查题目来源
+    parent_question_id: str | None = None  #追问题对应的主问题 ID；主问题为 None
+    is_high_frequency: bool = False  #原始资料是否明确标记为高频
     estimated_seconds: int = Field(default=180, ge=30, le=1800) #预计回答时长
     allow_follow_up: bool = True  #是否允许追问
     follow_up_hints: list[NonEmptyText] = Field(default_factory=list)  #追问方向，供实时 Agent 生成追问时参考
@@ -194,10 +204,12 @@ class InterviewQuestion(StrictModel):
 
     @model_validator(mode="after")
     def validate_follow_up_settings(self) -> InterviewQuestion:
-        """禁止在关闭追问时继续携带不可执行的追问提示。"""
+        """检查追问配置和父题引用是否存在自相矛盾。"""
 
         if not self.allow_follow_up and self.follow_up_hints:
             raise ValueError("不允许追问的问题不能配置追问提示")
+        if self.parent_question_id == self.id:
+            raise ValueError("追问题的 parent_question_id 不能指向题目自身")
         return self
 
 
@@ -279,18 +291,18 @@ class AnswerEvaluation(StrictModel):
 
 
 __all__ = [
-    "StrictModel",
-    "InterviewState",
-    "InterviewDifficulty",
-    "QuestionType",
-    "QuestionSource",
-    "FollowUpAction",
-    "TimeoutAction",
-    "RubricPoint",
-    "QuestionRubric",
-    "InterviewConfig",
-    "InterviewQuestion",
-    "InterviewPlan",
-    "DimensionScores",
     "AnswerEvaluation",
+    "DimensionScores",
+    "FollowUpAction",
+    "InterviewConfig",
+    "InterviewDifficulty",
+    "InterviewPlan",
+    "InterviewQuestion",
+    "InterviewState",
+    "QuestionRubric",
+    "QuestionSource",
+    "QuestionType",
+    "RubricPoint",
+    "StrictModel",
+    "TimeoutAction",
 ]
