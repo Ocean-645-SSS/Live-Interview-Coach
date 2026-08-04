@@ -21,8 +21,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel,Field
 
 from liverag.api.rag_gateway import RagGateway,GatewayResponse,envelope
+from liverag.api.interview_routes import (
+    configure_interview_service,
+    router as interview_router,
+)
 from liverag.config.settings import (
-    RagClientSettings,
     RagToolMode,
     is_masked_secret,
     load_app_settings,
@@ -43,6 +46,15 @@ from liverag.config.settings import (
     merge_runtime_rag_config,
 )
 from liverag.context.store import ContextStore
+from liverag.interview.db import create_session_factory, create_sqlite_engine
+from liverag.interview.evaluator import (
+    AnswerEvaluator,
+    OpenAIAnswerEvaluationProvider,
+    OpenAIAnswerEvaluationSettings,
+)
+from liverag.interview.models import Base as InterviewBase
+from liverag.interview.service import InterviewService
+from liverag.interview.sqlalchemy_repository import SQLAlchemyInterviewRepository
 from liverag.context.overview import KnowledgeOverviewGenerator
 from liverag.runtime.paths import build_runtime_paths
 from liverag.rag.metadata_store import MetadataStore
@@ -98,7 +110,32 @@ async def lifespan(
         }
     yield
 
+#创建整个FastAPI应用
 app=FastAPI(title="LiveRAG Agent API",version="0.1.0",lifespan=lifespan)
+
+#创建Interview板块使用的 SQLAlchemy Engine
+interview_engine = create_sqlite_engine(paths.db_file)
+#根据models.py中定义的ORM Model创建还不存在的数据库表
+InterviewBase.metadata.create_all(interview_engine)
+#创建SQLAlchemy Session工厂 -> SQLAlchemy Repository -> Interview Service层
+interview_repository = SQLAlchemyInterviewRepository(
+    create_session_factory(interview_engine)
+)
+voice_settings = load_voice_settings()
+interview_evaluator = None
+if voice_settings.llm_api_key.strip():
+    evaluation_provider = OpenAIAnswerEvaluationProvider(
+        OpenAIAnswerEvaluationSettings.from_voice_settings(voice_settings)
+    )
+    interview_evaluator = AnswerEvaluator(interview_repository, evaluation_provider)
+interview_service = InterviewService(
+    interview_repository,
+    evaluator=interview_evaluator,
+)
+#把InterviewService注册给Interview API路由
+configure_interview_service(interview_service)
+#把Interview Router安装进FastAPI app
+app.include_router(interview_router)
 
 UPLOAD_FILES = File(...)
 

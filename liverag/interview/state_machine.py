@@ -1,4 +1,4 @@
-"""Live Interview Coach V1 的持久化面试状态机：
+"""Live Interview Coach V1 的持久化面试状态机，处于领域规划层：
 解决当前面试处于什么阶段，收到某个业务事件后，是否允许进入下一阶段。
 
 调用方只能提交业务事件，不能直接指定目标状态。状态机根据当前 Session、
@@ -10,14 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
 
-from liverag.interview.records import (
-    InterviewEventRecord,
-    InterviewSessionRecord,
-    utc_now_iso,
-)
-from liverag.interview.repository import DuplicateEventError, InterviewRepository
+from liverag.interview.records import InterviewSessionRecord, utc_now_iso
 from liverag.interview.schemas import InterviewPlan, InterviewState
 
 
@@ -45,16 +39,8 @@ class InterviewEventType(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class InterviewTransitionResult:
-    """返回已经持久化的事件和事件执行后的最新 Session。"""
-
-    event: InterviewEventRecord
-    session: InterviewSessionRecord
-
-
-@dataclass(frozen=True, slots=True)
-class _SessionSnapshot:
-    """状态机内部计算的新 Session 字段，不直接执行数据库写入。"""
+class SessionTransition:
+    """状态机计算出的新 Session 快照，不执行数据库写入。"""
 
     state: InterviewState
     resume_state: InterviewState | None    #暂停前的状态，PAUSED 时保存，恢复后清空
@@ -137,74 +123,22 @@ _TERMINAL_STATES = frozenset(
 
 
 class InterviewStateMachine:
-    """校验面试事件、计算状态变化并通过 Repository 原子持久化。"""
+    """校验面试事件并纯计算状态变化，不操作数据库。"""
 
-    def __init__(self, repository: InterviewRepository):
-        """注入持久化接口，状态机不依赖具体数据库实现。"""
-
-        self._repository = repository
-
-    def transition(
+    def calculate_transition(
         self,
         *,
-        session_id: str,
-        event_id: str,
+        session: InterviewSessionRecord,
+        plan: InterviewPlan,
         event_type: InterviewEventType,
-        payload: dict[str, Any] | None = None,
-    ) -> InterviewTransitionResult:
-        """处理一个事件，并返回持久化事件及更新后的 Session。
+    ) -> SessionTransition:
+        """根据权威 Session、冻结计划和业务事件计算下一份快照:
+        判断状态转换是否合法，计算更新后的session字段"""
 
-        `event_id` 由事件生产方生成，是重复投递的幂等键。若相同事件已经
-        成功处理，Repository 会抛出 `DuplicateEventError`，不会再次改变状态。
-        """
-
-        #防止重复处理同一event，幂等键由调用方生成
-        if self._repository.event_exists(event_id):
-            raise DuplicateEventError(f"事件已经处理：{event_id}")
-
-        session = self._repository.get_session(session_id)
-        #目前会话状态已经是aborted/failed/completed最终状态，不能再处理任何事件
         if session.state in _TERMINAL_STATES:
             raise InterviewTransitionError(
                 f"终态 {session.state.value} 不能继续处理事件 {event_type.value}"
             )
-
-        #读取并冻结计划
-        plan = self._repository.get_interview_plan(session.interview_id)
-        if plan is None:
-            raise InterviewTransitionError("Session 对应的面试计划不存在")
-
-        event_payload = dict(payload or {})
-        #计算新快照
-        snapshot = self._calculate_snapshot(session, plan, event_type)
-        #持久化事件和新快照：安全写入数据库
-        event = self._repository.record_transition(
-            event_id=event_id,
-            session_id=session.id,
-            event_type=event_type.value,
-            payload=event_payload,
-            expected_version=session.version,
-            state_before=session.state,
-            state_after=snapshot.state,
-            resume_state=snapshot.resume_state,
-            current_question_index=snapshot.current_question_index,
-            current_question_id=snapshot.current_question_id,
-            follow_up_count=snapshot.follow_up_count,
-            started_at=snapshot.started_at,
-            ended_at=snapshot.ended_at,
-        )
-        return InterviewTransitionResult(
-            event=event,
-            session=self._repository.get_session(session.id),
-        )
-
-    def _calculate_snapshot(
-        self,
-        session: InterviewSessionRecord,
-        plan: InterviewPlan,
-        event_type: InterviewEventType,
-    ) -> _SessionSnapshot:
-        """根据当前面试状态和刚发生的事件，计算session更新后的样子，不产生数据库副作用。"""
 
         #处理特殊事件
         #暂停
@@ -271,7 +205,7 @@ class InterviewStateMachine:
             ended_at = now
 
         #返回最新快照
-        return _SessionSnapshot(
+        return SessionTransition(
             state=target_state,
             resume_state=None,
             current_question_index=question_index,
@@ -282,12 +216,12 @@ class InterviewStateMachine:
         )
 
     @staticmethod
-    def _pause(session: InterviewSessionRecord) -> _SessionSnapshot:
+    def _pause(session: InterviewSessionRecord) -> SessionTransition:
         """把可暂停状态保存为 resume_state，并进入 PAUSED。"""
 
         if session.state not in _PAUSABLE_STATES:
             raise InterviewTransitionError(f"状态 {session.state.value} 不能暂停")
-        return _SessionSnapshot(
+        return SessionTransition(
             state=InterviewState.PAUSED,
             resume_state=session.state,
             current_question_index=session.current_question_index,
@@ -298,12 +232,12 @@ class InterviewStateMachine:
         )
 
     @staticmethod
-    def _resume(session: InterviewSessionRecord) -> _SessionSnapshot:
+    def _resume(session: InterviewSessionRecord) -> SessionTransition:
         """从 PAUSED 返回暂停前的状态，并清除 resume_state。"""
 
         if session.state is not InterviewState.PAUSED or session.resume_state is None:
             raise InterviewTransitionError("只有保存了恢复状态的 PAUSED Session 才能恢复")
-        return _SessionSnapshot(
+        return SessionTransition(
             state=session.resume_state,
             resume_state=None,
             current_question_index=session.current_question_index,
@@ -317,10 +251,10 @@ class InterviewStateMachine:
     def _finish_with_state(
         session: InterviewSessionRecord,
         state: InterviewState,
-    ) -> _SessionSnapshot:
+    ) -> SessionTransition:
         """终止或失败时保留题目位置，记录结束时间并清除恢复状态。"""
 
-        return _SessionSnapshot(
+        return SessionTransition(
             state=state,
             resume_state=None,
             current_question_index=session.current_question_index,
@@ -335,5 +269,5 @@ __all__ = [
     "InterviewEventType",
     "InterviewStateMachine",
     "InterviewTransitionError",
-    "InterviewTransitionResult",
+    "SessionTransition",
 ]

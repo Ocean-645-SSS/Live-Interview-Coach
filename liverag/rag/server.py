@@ -8,9 +8,20 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
@@ -21,9 +32,9 @@ from liverag.rag.doc_parser import parse_file_content
 from liverag.rag.engine import RagEngineError, RagQueryTimeoutError
 from liverag.rag.engine_manager import RagEngineManager
 from liverag.rag.filenames import decode_transport_filename
+from liverag.rag.metadata_store import DEFAULT_KB_ID
 from liverag.rag.rag_settings import RAGSettings
 from liverag.rag.schemas import Envelope, QueryRequest, TextDocumentRequest
-from liverag.rag.metadata_store import DEFAULT_KB_ID,DEFAULT_KB_NAME
 
 settings=RAGSettings()
 manager=RagEngineManager(settings)
@@ -62,7 +73,7 @@ def envelope(
     data:dict[str, Any] | list[Any] | BaseModel | None = None,
     metrics:dict[str, Any] | None = None,
     error:dict[str, Any] | None = None,
-    status:str="ok"
+    status: Literal["ok", "error"] = "ok",
 )->dict[str,Any]:
     """统一响应"""
 
@@ -115,6 +126,9 @@ app=FastAPI(
     description="A lightweight multi-knowledge-base service around lightrag-hku core APIs.",
     lifespan=lifespan
 )
+
+# 健康检查保持公开，其余 V1 接口统一执行 API Key 鉴权。
+protected_router = APIRouter(dependencies=[Depends(require_api_key)])
 
 
 @app.exception_handler(HTTPException)
@@ -202,7 +216,7 @@ async def healthz()->dict[str,Any]:
     return envelope(request_id=str(uuid.uuid4()),data={"service":"ok"})
 
 
-@app.get("/v1/readyz",dependencies=[Depends(require_api_key)])
+@protected_router.get("/v1/readyz")
 async def readyz()->dict[str,Any]:
     """检查RAG Core Service是否准备就绪"""
 
@@ -212,7 +226,7 @@ async def readyz()->dict[str,Any]:
 
 
 #===========================知识库接口==================================
-@app.get("/v1/knowledge-bases",dependencies=[Depends(require_api_key)])
+@protected_router.get("/v1/knowledge-bases")
 async def knowledge_bases()->dict[str,Any]:
     """列出所有知识库"""
 
@@ -220,7 +234,7 @@ async def knowledge_bases()->dict[str,Any]:
     return envelope(request_id=str(uuid.uuid4()),data={"knowledge_bases":items,"total":len(items)})
 
 
-@app.post("/v1/knowledge-bases", dependencies=[Depends(require_api_key)])
+@protected_router.post("/v1/knowledge-bases")
 async def create_knowledge_base(request:KnowledgeBaseCreateRequest)->dict[str,Any]:
     """创建知识库"""
 
@@ -241,7 +255,7 @@ async def create_knowledge_base(request:KnowledgeBaseCreateRequest)->dict[str,An
     )
 
 
-@app.delete("/v1/knowledge-bases/{kb_id}",dependencies=[Depends(require_api_key)])
+@protected_router.delete("/v1/knowledge-bases/{kb_id}")
 async def delete_knowledge_base(kb_id:str)->dict[str,Any]:
     """删除知识库"""
 
@@ -257,7 +271,7 @@ async def delete_knowledge_base(kb_id:str)->dict[str,Any]:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@app.get("/v1/knowledge-bases/{kb_id}/ready", dependencies=[Depends(require_api_key)])
+@protected_router.get("/v1/knowledge-bases/{kb_id}/ready")
 async def knowledge_base_ready(kb_id:str)->dict[str,Any]:
     """预热知识库，并返回知识库ready状态"""
 
@@ -269,7 +283,7 @@ async def knowledge_base_ready(kb_id:str)->dict[str,Any]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.get("/v1/knowledge-bases/{kb_id}",dependencies=[Depends(require_api_key)])
+@protected_router.get("/v1/knowledge-bases/{kb_id}")
 async def knowledge_base_detail(kb_id:str)->dict[str,Any]:
     """获取知识库详情"""
 
@@ -281,8 +295,8 @@ async def knowledge_base_detail(kb_id:str)->dict[str,Any]:
         raise HTTPException(status_code=404, detail=message) from exc
 
     return envelope(request_id=request_id,data=detail)
- 
-@app.patch("/v1/knowledge-bases/{kb_id}",dependencies=[Depends(require_api_key)])
+
+@protected_router.patch("/v1/knowledge-bases/{kb_id}")
 async def patch_knowledge_base(kb_id:str,request:KnowledgeBasePatchRequest) -> dict[str,Any]:
     """更新某个知识库元数据"""
 
@@ -303,7 +317,7 @@ async def patch_knowledge_base(kb_id:str,request:KnowledgeBasePatchRequest) -> d
 
     return envelope(request_id=request_id,data=manager.kb_store.public_detail(kb_id))
 
-@app.post("/v1/knowledge-bases/{kb_id}/query/context",dependencies=[Depends(require_api_key)])
+@protected_router.post("/v1/knowledge-bases/{kb_id}/query/context")
 async def query_context(kb_id:str,request:QueryRequest):
     """只查询指定知识库的上下文"""
 
@@ -334,7 +348,7 @@ async def query_context(kb_id:str,request:QueryRequest):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@app.post("/v1/knowledge-bases/{kb_id}/query/answer",dependencies=[Depends(require_api_key)])
+@protected_router.post("/v1/knowledge-bases/{kb_id}/query/answer")
 async def query_answer(kb_id:str,request:QueryRequest):
     """只查询指定知识库并生成答案"""
 
@@ -366,7 +380,7 @@ async def query_answer(kb_id:str,request:QueryRequest):
             detail=str(exc),
         ) from exc
 
-@app.post("/v1/knowledge-bases/{kb_id}/query/data", dependencies=[Depends(require_api_key)])
+@protected_router.post("/v1/knowledge-bases/{kb_id}/query/data")
 async def query_data(kb_id: str, request: QueryRequest) -> dict[str, Any]:
     """查询指定知识库的结构化数据"""
 
@@ -380,7 +394,7 @@ async def query_data(kb_id: str, request: QueryRequest) -> dict[str, Any]:
             request.merged_conversation(),
         )
         return envelope(request_id=request_id, data=data, metrics=metrics)
-    
+
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -390,7 +404,7 @@ async def query_data(kb_id: str, request: QueryRequest) -> dict[str, Any]:
             error={"type": type(exc).__name__, "message": str(exc)},
         )
 
-@app.get("/v1/knowledge-bases/{kb_id}/overview",dependencies=[Depends(require_api_key)])
+@protected_router.get("/v1/knowledge-bases/{kb_id}/overview")
 async def knowledge_overview(
     kb_id:str,
     entity_limit:int=Query(default=20, ge=0, le=100),
@@ -421,7 +435,7 @@ async def knowledge_overview(
             error={"type": type(exc).__name__, "message": str(exc)},
         )
 #=============================documents 接口============================
-@app.post("/v1/knowledge-bases/{kb_id}/documents/files",dependencies=[Depends(require_api_key)])
+@protected_router.post("/v1/knowledge-bases/{kb_id}/documents/files")
 async def documents_files(
     kb_id:str,
     files:Annotated[
@@ -615,7 +629,7 @@ async def documents_files(
         )
 
 
-@app.get("/v1/knowledge-bases/{kb_id}/documents", dependencies=[Depends(require_api_key)])
+@protected_router.get("/v1/knowledge-bases/{kb_id}/documents")
 async def documents(
     kb_id:str,
     page: int = Query(default=1, ge=1),
@@ -640,7 +654,7 @@ async def documents(
         )
 
 
-@app.get("/v1/knowledge-bases/{kb_id}/documents/{document_id}", dependencies=[Depends(require_api_key)])
+@protected_router.get("/v1/knowledge-bases/{kb_id}/documents/{document_id}")
 async def document_detail(kb_id:str,document_id:str)->dict[str,Any]:
     """获取某个文件的细节"""
 
@@ -676,9 +690,8 @@ async def document_detail(kb_id:str,document_id:str)->dict[str,Any]:
             error={"type": type(exc).__name__, "message": str(exc)},
         )
 
-@app.post(
+@protected_router.post(
     "/v1/knowledge-bases/{kb_id}/documents/text",
-    dependencies=[Depends(require_api_key)],
     response_model=None,
 )
 async def document_text(
@@ -860,7 +873,7 @@ async def document_text(
         )
 
 
-@app.get("/v1/knowledge-bases/{kb_id}/documents/{document_id}/source", dependencies=[Depends(require_api_key)])
+@protected_router.get("/v1/knowledge-bases/{kb_id}/documents/{document_id}/source")
 async def document_source(
     kb_id:str,
     document_id:str,
@@ -902,7 +915,7 @@ async def document_source(
             filename=str(document.get("original_filename") or source_path.name),
             content_disposition_type=disposition    #预览/下载
         )
-    
+
     except KeyError as exc:
         raise HTTPException(
             status_code=404,
@@ -910,14 +923,14 @@ async def document_source(
         ) from exc
     except HTTPException:
         raise
-        
 
-@app.delete("/v1/knowledge-bases/{kb_id}/documents/{document_id}",dependencies=[Depends(require_api_key)])
+
+@protected_router.delete("/v1/knowledge-bases/{kb_id}/documents/{document_id}")
 async def delete_document(
     kb_id:str,
     document_id:str,
     delete_llm_cache: bool = Query(default=False)   #是否删除LLM缓存
-)->dict[str,Any]:
+) -> JSONResponse:
     """删除指定知识库内文档元数据、原文件目录和LightRAG派生索引
     删索引->删元数据+原文件->删目录"""
 
@@ -971,7 +984,7 @@ async def delete_document(
                 },
             )
         )
-    
+
     except KeyError as exc:
         raise HTTPException(
             status_code=404,
@@ -1015,7 +1028,6 @@ def _sync_document_from_lightrag(kb_id:str,document_id:str,status_payload:dict[s
         error_msg=_first_error(status_payload)
     )
 
-    
 def _sync_job_from_lightrag(kb_id:str,job_id:str,light_job:dict[str,Any]):
     """用 LightRAG 最新任务状态同步 SQLite 元数据。
     负责：
@@ -1204,7 +1216,7 @@ def _write_source_file(kb_id:str,document_id:str,filename:str,raw:bytes)->Path:
 
 
 #===========================ingest_job 接口====================================
-@app.get("/v1/knowledge-bases/{kb_id}/jobs/{job_id}",dependencies=[Depends(require_api_key)])
+@protected_router.get("/v1/knowledge-bases/{kb_id}/jobs/{job_id}")
 async def job(kb_id:str, job_id:str):
     """查询指定知识库的入库任务"""
 
@@ -1245,3 +1257,6 @@ def _sha256(raw: bytes) -> str:
     内容去重"""
 
     return hashlib.sha256(raw).hexdigest()
+
+
+app.include_router(protected_router)

@@ -7,11 +7,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from liverag.interview.db import create_session_factory, create_sqlite_engine
 from liverag.interview.models import Base
-from liverag.interview.records import AnswerState, AttemptState, ReportState
+from liverag.interview.records import (
+    AnswerState,
+    AttemptState,
+    InterviewAttemptRecord,
+    InterviewSessionRecord,
+    ReportState,
+)
 from liverag.interview.repository import (
+    AnswerTransitionResult,
     ConcurrentUpdateError,
     DuplicateEventError,
     InterviewRepository,
@@ -60,6 +68,78 @@ def _plan(config: InterviewConfig) -> InterviewPlan:
         config=config,
         questions=[question],
         closing_message="面试结束。",
+    )
+
+
+def _listening_session_with_attempt(
+    repository: InterviewRepository,
+) -> tuple[InterviewSessionRecord, InterviewAttemptRecord]:
+    config = InterviewConfig(question_count=1)
+    interview = repository.create_interview(
+        interview_id="interview-atomic",
+        title="原子回答事务测试",
+        config=config,
+    )
+    repository.save_interview_plan(
+        interview_id=interview.id,
+        plan=_plan(config),
+        expected_version=interview.version,
+    )
+    created_session = repository.create_session(
+        interview_id=interview.id,
+        session_id="session-atomic",
+    )
+    listening_session = repository.update_session_snapshot(
+        session_id=created_session.id,
+        expected_version=created_session.version,
+        state=InterviewState.LISTENING,
+        resume_state=None,
+        current_question_index=0,
+        current_question_id="question-1",
+        follow_up_count=0,
+        started_at=datetime.now(timezone.utc).isoformat(),
+        ended_at=None,
+    )
+    attempt = repository.create_attempt(
+        session_id=listening_session.id,
+        room_name="room-atomic",
+        attempt_id="attempt-atomic",
+    )
+    return listening_session, attempt
+
+
+def _record_final_answer(
+    repository: InterviewRepository,
+    *,
+    event_id: str,
+    session: InterviewSessionRecord,
+    attempt: InterviewAttemptRecord,
+    expected_version: int,
+    answer_id: str,
+    answer_number: int = 1,
+) -> AnswerTransitionResult:
+    now = datetime.now(timezone.utc).isoformat()
+    return repository.record_answer_transition(
+        event_id=event_id,
+        session_id=session.id,
+        event_type="answer_received",
+        payload={"question_id": "question-1"},
+        expected_version=expected_version,
+        state_before=InterviewState.LISTENING,
+        state_after=InterviewState.EVALUATING,
+        resume_state=None,
+        current_question_index=0,
+        current_question_id="question-1",
+        follow_up_count=0,
+        session_started_at=session.started_at,
+        session_ended_at=None,
+        question_id="question-1",
+        attempt_id=attempt.id,
+        answer_number=answer_number,
+        transcript=" 先召回候选内容，再执行排序。 ",
+        answer_started_at=now,
+        answer_ended_at=now,
+        answer_id=answer_id,
     )
 
 
@@ -295,3 +375,110 @@ def test_repository_persists_attempt_event_answer_evaluation_and_report(
     )
     assert completed.state is ReportState.COMPLETED
     assert repository.get_report_by_session(interview_session.id) == completed
+
+
+def test_answer_transition_atomically_persists_three_records(
+    repository: InterviewRepository,
+) -> None:
+    session, attempt = _listening_session_with_attempt(repository)
+
+    with pytest.raises(ConcurrentUpdateError, match="已发生变化"):
+        _record_final_answer(
+            repository,
+            event_id="event-stale",
+            session=session,
+            attempt=attempt,
+            expected_version=session.version - 1,
+            answer_id="answer-stale",
+        )
+
+    assert repository.get_session(session.id) == session
+    assert not repository.event_exists("event-stale")
+    assert repository.list_answers(session_id=session.id) == []
+
+    result = _record_final_answer(
+        repository,
+        event_id="event-answer",
+        session=session,
+        attempt=attempt,
+        expected_version=session.version,
+        answer_id="answer-atomic",
+    )
+
+    assert result.session.state is InterviewState.EVALUATING
+    assert result.session.version == session.version + 1
+    assert result.event.id == "event-answer"
+    assert result.event.version_after == result.session.version
+    assert result.answer.id == "answer-atomic"
+    assert result.answer.source_event_id == result.event.id
+    assert result.answer.transcript == "先召回候选内容，再执行排序。"
+    assert repository.get_session(session.id) == result.session
+    assert repository.list_events(session_id=session.id) == [result.event]
+    assert repository.list_answers(session_id=session.id) == [result.answer]
+
+    with pytest.raises(DuplicateEventError, match="已经处理"):
+        _record_final_answer(
+            repository,
+            event_id="event-answer",
+            session=session,
+            attempt=attempt,
+            expected_version=session.version,
+            answer_id="answer-duplicate",
+        )
+
+    assert len(repository.list_events(session_id=session.id)) == 1
+    assert len(repository.list_answers(session_id=session.id)) == 1
+
+
+def test_answer_constraint_failure_rolls_back_session_event_and_answer(
+    repository: InterviewRepository,
+) -> None:
+    session, attempt = _listening_session_with_attempt(repository)
+    now = datetime.now(timezone.utc).isoformat()
+    existing_event = repository.record_transition(
+        event_id="event-existing",
+        session_id=session.id,
+        event_type="answer_seeded",
+        payload={},
+        expected_version=session.version,
+        state_before=InterviewState.LISTENING,
+        state_after=InterviewState.LISTENING,
+        resume_state=None,
+        current_question_index=0,
+        current_question_id="question-1",
+        follow_up_count=0,
+        started_at=session.started_at,
+        ended_at=None,
+    )
+    repository.create_answer(
+        answer_id="answer-existing",
+        session_id=session.id,
+        question_id="question-1",
+        attempt_id=attempt.id,
+        answer_number=1,
+        transcript="已有回答",
+        source_event_id=existing_event.id,
+        started_at=now,
+        ended_at=now,
+    )
+    before = repository.get_session(session.id)
+
+    with pytest.raises(IntegrityError):
+        _record_final_answer(
+            repository,
+            event_id="event-rollback",
+            session=before,
+            attempt=attempt,
+            expected_version=before.version,
+            answer_id="answer-rollback",
+            answer_number=1,
+        )
+
+    assert repository.get_session(session.id) == before
+    assert not repository.event_exists("event-rollback")
+    assert [event.id for event in repository.list_events(session_id=session.id)] == [
+        "event-existing"
+    ]
+    assert [answer.id for answer in repository.list_answers(session_id=session.id)] == [
+        "answer-existing"
+    ]

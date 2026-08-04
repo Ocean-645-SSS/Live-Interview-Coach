@@ -269,13 +269,13 @@ class AnswerEvaluation(StrictModel):
     question_id: NonEmptyText
     scores: DimensionScores
     weighted_score: float = Field(ge=0, le=100)
-    covered_points: list[NonEmptyText] = Field(default_factory=list)    #达到的点
-    missing_points: list[NonEmptyText] = Field(default_factory=list)    #缺失的点
+    covered_points: list[NonEmptyText] = Field(default_factory=list)    #达到的知识点
+    missing_points: list[NonEmptyText] = Field(default_factory=list)    #缺失的知识点
     errors: list[NonEmptyText] = Field(default_factory=list)    #错误的点
-    summary: NonEmptyText
-    next_action: FollowUpAction
-    follow_up_target: str | None = None
-    follow_up_question: str | None = None
+    summary: NonEmptyText   #总结
+    next_action: FollowUpAction  #下一步：追问/下一个问题/理解用户/结束
+    follow_up_target: str | None = None    #追问目的
+    follow_up_question: str | None = None   #追问问题
 
     @model_validator(mode="after")
     def validate_follow_up_decision(self) -> AnswerEvaluation:

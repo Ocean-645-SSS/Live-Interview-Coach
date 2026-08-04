@@ -1,12 +1,11 @@
 """Live Interview Coach V1 的持久化记录模型，和数据库表中参数一一对应
 
-本文件中的 dataclass 与数据库表一一对应，用来承接 SQLite 查询结果。
-它们只描述“数据库中保存了什么”，不执行 SQL，也不决定面试状态如何迁移。
+用来承接 SQLite 查询结果，它们只描述“数据库中保存了什么”，不执行 SQL，也不决定面试状态如何迁移。
 
-`schemas.py` 与本文件的区别：
-
+`schemas.py/model.py 与本文件的区别：
 - `schemas.py` 定义业务输入、输出和校验规则；
 - `records.py` 定义从数据库读取后在 Python 中使用的不可变记录。
+- `models.py` 定义数据库表和关系
 """
 
 from __future__ import annotations

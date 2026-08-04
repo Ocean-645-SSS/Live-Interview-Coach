@@ -1,12 +1,14 @@
 """测试持久化面试状态机的主流程、暂停恢复和事件保护。"""
 
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from liverag.interview.db import create_session_factory, create_sqlite_engine
 from liverag.interview.models import Base
+from liverag.interview.records import InterviewEventRecord, InterviewSessionRecord
 from liverag.interview.repository import DuplicateEventError, InterviewRepository
 from liverag.interview.schemas import (
     InterviewConfig,
@@ -25,6 +27,20 @@ from liverag.interview.state_machine import (
     InterviewStateMachine,
     InterviewTransitionError,
 )
+
+
+class _StateMachineTestDriver:
+    """仅为规则测试提供持久化后的连续 Session 输入。"""
+
+    def __init__(self, repository: InterviewRepository):
+        self.machine = InterviewStateMachine()
+        self.repository = repository
+
+
+@dataclass(frozen=True, slots=True)
+class _TransitionResult:
+    event: InterviewEventRecord
+    session: InterviewSessionRecord
 
 
 def _question(question_id: str, order: int) -> InterviewQuestion:
@@ -54,7 +70,7 @@ def _question(question_id: str, order: int) -> InterviewQuestion:
 @pytest.fixture
 def state_machine(
     tmp_path: Path,
-) -> Iterator[tuple[InterviewStateMachine, InterviewRepository, str]]:
+) -> Iterator[tuple[_StateMachineTestDriver, InterviewRepository, str]]:
     """创建注入 SQLAlchemy Repository 的真实 SQLite 状态机。"""
 
     engine = create_sqlite_engine(tmp_path / "interview.db")
@@ -84,23 +100,49 @@ def state_machine(
         session_id="session-test",
     )
     try:
-        yield InterviewStateMachine(repository), repository, session.id
+        yield _StateMachineTestDriver(repository), repository, session.id
     finally:
         engine.dispose()
 
 
 def _apply(
-    machine: InterviewStateMachine,
+    driver: _StateMachineTestDriver,
     session_id: str,
     event_number: int,
     event_type: InterviewEventType,
 ):
     """使用稳定且唯一的测试事件 ID 执行一次迁移。"""
 
-    return machine.transition(
-        session_id=session_id,
-        event_id=f"event-{event_number}",
+    repository = driver.repository
+    event_id = f"event-{event_number}"
+    if repository.event_exists(event_id):
+        raise DuplicateEventError(f"事件已经处理：{event_id}")
+    session = repository.get_session(session_id)
+    plan = repository.get_interview_plan(session.interview_id)
+    assert plan is not None
+    snapshot = driver.machine.calculate_transition(
+        session=session,
+        plan=plan,
         event_type=event_type,
+    )
+    event = repository.record_transition(
+        event_id=event_id,
+        session_id=session.id,
+        event_type=event_type.value,
+        payload={},
+        expected_version=session.version,
+        state_before=session.state,
+        state_after=snapshot.state,
+        resume_state=snapshot.resume_state,
+        current_question_index=snapshot.current_question_index,
+        current_question_id=snapshot.current_question_id,
+        follow_up_count=snapshot.follow_up_count,
+        started_at=snapshot.started_at,
+        ended_at=snapshot.ended_at,
+    )
+    return _TransitionResult(
+        event=event,
+        session=repository.get_session(session.id),
     )
 
 
@@ -192,3 +234,22 @@ def test_follow_up_limit_is_enforced(state_machine):
 
     with pytest.raises(InterviewTransitionError, match="追问次数已达到上限"):
         _apply(machine, session_id, 8, InterviewEventType.FOLLOW_UP_REQUIRED)
+
+
+def test_calculate_transition_is_pure_and_does_not_write_repository(state_machine):
+    """纯状态机只返回新快照，不改变数据库中的 Session 或 Event。"""
+
+    _, repository, session_id = state_machine
+    session = repository.get_session(session_id)
+    plan = repository.get_interview_plan(session.interview_id)
+    assert plan is not None
+
+    snapshot = InterviewStateMachine().calculate_transition(
+        session=session,
+        plan=plan,
+        event_type=InterviewEventType.START,
+    )
+
+    assert snapshot.state is InterviewState.INTRODUCTION
+    assert repository.get_session(session_id) == session
+    assert repository.list_events(session_id=session_id) == []

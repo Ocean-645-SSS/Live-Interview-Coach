@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from liverag.interview.records import (
@@ -34,6 +35,15 @@ class ConcurrentUpdateError(RuntimeError):
 
 class DuplicateEventError(RuntimeError):
     """相同事件标识已经处理，不能再次产生业务效果。"""
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerTransitionResult:
+    """一次回答事件原子落库后产生的三份权威记录。"""
+
+    session: InterviewSessionRecord
+    event: InterviewEventRecord
+    answer: InterviewAnswerRecord
 
 
 @runtime_checkable
@@ -152,6 +162,31 @@ class InterviewRepository(Protocol):
         ended_at: str | None,
     ) -> InterviewEventRecord: ...
 
+    def record_answer_transition(
+        self,
+        *,
+        event_id: str,
+        session_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        expected_version: int,
+        state_before: InterviewState,
+        state_after: InterviewState,
+        resume_state: InterviewState | None,
+        current_question_index: int,
+        current_question_id: str | None,
+        follow_up_count: int,
+        session_started_at: str | None,
+        session_ended_at: str | None,
+        question_id: str,
+        attempt_id: str,
+        answer_number: int,
+        transcript: str,
+        answer_started_at: str,
+        answer_ended_at: str,
+        answer_id: str | None = None,
+    ) -> AnswerTransitionResult: ...
+
     def list_events(
         self,
         *,
@@ -236,6 +271,7 @@ class InterviewRepository(Protocol):
 
 
 __all__ = [
+    "AnswerTransitionResult",
     "ConcurrentUpdateError",
     "DuplicateEventError",
     "InterviewRepository",
