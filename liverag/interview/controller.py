@@ -1,4 +1,4 @@
-"""把 LiveKit 的语音事件接到 InterviewService。
+"""把实时语音层的面试事件接到 InterviewService，面试流程的控制层
 
 负责：
 1. 告诉 Service，开场白或题目已经播放完毕；
@@ -12,6 +12,7 @@ start():开场白 -> introduction_spoken()：获取第一道题 -> prompt_spoken
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -26,10 +27,10 @@ from liverag.interview.state_machine import InterviewEventType
 class InterviewSpeechKind(str, Enum):
     """告诉语音层当前要播放哪一种内容。"""
 
-    INTRODUCTION = "INTRODUCTION"   #开场白
-    QUESTION = "QUESTION"   #问题
-    FOLLOW_UP = "FOLLOW_UP"  #追问
-    CLOSING = "CLOSING"  #结束语
+    INTRODUCTION = "INTRODUCTION"  # 开场白
+    QUESTION = "QUESTION"  # 问题
+    FOLLOW_UP = "FOLLOW_UP"  # 追问
+    CLOSING = "CLOSING"  # 结束语
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,48 +68,80 @@ class InterviewAgentController:
         self._attempt_id = attempt_id
 
     def start(self) -> InterviewSpeech:
-        """开始面试并返回开场白，LiveKit 随后负责把它播放出来。"""
+        """根据数据库状态返回连接后应该播放的第一段话。"""
 
         session = self._service.repository.get_session(self._session_id)
 
-        #session准备就绪
+        # 新会话准备就绪
         if session.state is InterviewState.READY:
-            #更新状态：开始
+            # 更新状态：START
             self._transition(InterviewEventType.START)
-        #session未就绪
-        elif session.state is not InterviewState.INTRODUCTION:
-            raise ValueError(f"当前状态不能开始播放开场白：{session.state.value}")
+            return InterviewSpeech(
+                # 播放开场白
+                InterviewSpeechKind.INTRODUCTION,
+                self._get_plan().introduction,
+            )
+        # 状态更新为INTRODUCTION，但因断线等原因还未播放开场白
+        if session.state is InterviewState.INTRODUCTION:
+            return InterviewSpeech(
+                InterviewSpeechKind.INTRODUCTION,
+                self._get_plan().introduction,
+            )
+        # 状态是ASKING/LISTENING
+        if session.state in {InterviewState.ASKING, InterviewState.LISTENING}:
+            return InterviewSpeech(
+                # 播放下一个问题
+                InterviewSpeechKind.QUESTION,
+                self._question_text(session),
+            )
+        # 状态是FOLLOW_UP
+        if session.state is InterviewState.FOLLOW_UP:
+            # 播放追问
+            return InterviewSpeech(
+                InterviewSpeechKind.FOLLOW_UP,
+                self._latest_follow_up_question(),
+            )
+        # 状态是COMPLETING
+        if session.state is InterviewState.COMPLETING:
+            # 播放结束语
+            return InterviewSpeech(
+                InterviewSpeechKind.CLOSING,
+                self._get_plan().closing_message,
+            )
+        raise ValueError(f"当前状态不能进入实时面试：{session.state.value}")
 
-        plan = self._get_plan()
-        return InterviewSpeech(InterviewSpeechKind.INTRODUCTION, plan.introduction)
+    def get_session(self) -> InterviewSessionRecord:
+        """返回当前 Session，供 Worker 判断这是首次进入还是断线恢复。"""
+
+        return self._service.repository.get_session(self._session_id)
 
     def introduction_spoken(self) -> InterviewSpeech:
         """开场白播放完毕后更新状态，并返回第一道题。"""
 
-        #更新状态：开场白结束
+        # 更新状态：开场白结束
         result = self._transition(InterviewEventType.INTRODUCTION_FINISHED)
 
         return InterviewSpeech(
             InterviewSpeechKind.QUESTION,
-            self._question_text(result.session),    #第一个问题
+            self._question_text(result.session),  # 第一个问题
         )
 
     def prompt_spoken(self, kind: InterviewSpeechKind) -> InterviewSessionRecord:
         """题目或追问播放完毕后，把 Session 切换到等待回答状态。"""
 
-        #当前语音层要播放问题
+        # 当前语音层要播放问题
         if kind is InterviewSpeechKind.QUESTION:
-            #事件类型：问好了问题
+            # 事件类型：问好了问题
             event_type = InterviewEventType.QUESTION_ASKED
-        #当前语音层要追问
+        # 当前语音层要追问
         elif kind is InterviewSpeechKind.FOLLOW_UP:
-            #事件类型：追问问题
+            # 事件类型：追问问题
             event_type = InterviewEventType.FOLLOW_UP_ASKED
-        #其他情况
+        # 其他情况
         else:
             raise ValueError("只有题目或追问播放完毕后，才需要等待用户回答")
 
-        #更新状态
+        # 更新状态
         return self._transition(event_type).session
 
     async def receive_final_answer(
@@ -120,7 +153,7 @@ class InterviewAgentController:
     ) -> AnswerTurnResult:
         """异步保存一段完整回答、调用评价，并返回下一句需要播放的话。"""
 
-        #整理用户说出的最终答案格式
+        # 整理用户说出的最终答案格式
         clean_transcript = transcript.strip()
         if not clean_transcript:
             raise ValueError("最终回答不能为空")
@@ -130,12 +163,12 @@ class InterviewAgentController:
             raise ValueError("当前 Session 没有正在回答的题目")
 
         now = datetime.now(timezone.utc).isoformat()
-        #列出当前问题所有答案
+        # 列出当前问题所有答案
         previous_answers = self._service.repository.list_answers(
             session_id=self._session_id,
             question_id=session.current_question_id,
         )
-        #原子更新：session+event+answer
+        # 原子更新：session+event+answer
         received = self._service.receive_answer(
             AnswerReceivedCommand(
                 session_id=self._session_id,
@@ -147,7 +180,7 @@ class InterviewAgentController:
                 ended_at=ended_at or now,
             )
         )
-        #生成回答评价
+        # 生成回答评价
         evaluation_result = await self._service.evaluate_answer(received.answer.id)
 
         return AnswerTurnResult(
@@ -156,44 +189,44 @@ class InterviewAgentController:
         )
 
     def _next_speech(self, result: EvaluationDecisionResult) -> InterviewSpeech:
-            """把评价后的 Session 状态转换成 LiveKit 下一句要说的话。"""
+        """把评价后的 Session 状态转换成 LiveKit 下一句要说的话。"""
 
-            #需要追问
-            if result.session.state is InterviewState.FOLLOW_UP:
-                #追问的问题
-                question = result.decision.question_text
-                if not question:
-                    raise ValueError("追问决策缺少要播放的追问内容")
-                return InterviewSpeech(InterviewSpeechKind.FOLLOW_UP, question)
+        # 需要追问
+        if result.session.state is InterviewState.FOLLOW_UP:
+            # 追问的问题
+            question = result.decision.question_text
+            if not question:
+                raise ValueError("追问决策缺少要播放的追问内容")
+            return InterviewSpeech(InterviewSpeechKind.FOLLOW_UP, question)
 
-            #需要问下一个问题
-            if result.session.state is InterviewState.ASKING:
-                #返回下一个问题
-                return InterviewSpeech(
-                    InterviewSpeechKind.QUESTION,
-                    self._question_text(result.session),
-                )
-            #问题问完了，需要结束
-            if result.session.state is InterviewState.COMPLETING:
-                return InterviewSpeech(
-                    InterviewSpeechKind.CLOSING,
-                    self._get_plan().closing_message,   #结束语
-                )
+        # 需要问下一个问题
+        if result.session.state is InterviewState.ASKING:
+            # 返回下一个问题
+            return InterviewSpeech(
+                InterviewSpeechKind.QUESTION,
+                self._question_text(result.session),
+            )
+        # 问题问完了，需要结束
+        if result.session.state is InterviewState.COMPLETING:
+            return InterviewSpeech(
+                InterviewSpeechKind.CLOSING,
+                self._get_plan().closing_message,  # 结束语
+            )
 
-            raise ValueError(f"评价后出现了无法播放下一句话的状态：{result.session.state.value}")
+        raise ValueError(f"评价后出现了无法播放下一句话的状态：{result.session.state.value}")
 
     def complete(self) -> InterviewSessionRecord:
         """生成最终报告，并把 Session 标记成已完成。"""
 
         session = self._service.repository.get_session(self._session_id)
-        #当前状态还未结束
+        # 当前状态还未结束
         if session.state is not InterviewState.COMPLETING:
             raise ValueError(f"当前状态不能结束面试：{session.state.value}")
 
-        #生成最终面试报告
+        # 生成最终面试报告
         self._service.generate_report(self._session_id)
 
-        #更新状态：面试报告生成完毕
+        # 更新状态：面试报告生成完毕
         return self._transition(InterviewEventType.REPORT_COMPLETED).session
 
     def _get_plan(self):
@@ -209,16 +242,25 @@ class InterviewAgentController:
         """根据 Session 当前的题目 ID，从计划中找到要播放的题目文字。"""
 
         question = next(
-            (
-                item
-                for item in self._get_plan().questions
-                if item.id == session.current_question_id
-            ),
+            (item for item in self._get_plan().questions if item.id == session.current_question_id),
             None,
         )
         if question is None:
             raise ValueError(f"面试计划中找不到当前题目：{session.current_question_id}")
         return question.question_text
+
+    def _latest_follow_up_question(self) -> str:
+        """从最近一次追问事件中取回断线前已经生成的追问文字。"""
+
+        events = self._service.repository.list_events(session_id=self._session_id)
+        for event in reversed(events):
+            if event.event_type != InterviewEventType.FOLLOW_UP_REQUIRED.value:
+                continue
+            payload = json.loads(event.payload_json)
+            question = str(payload.get("follow_up_question") or "").strip()
+            if question:
+                return question
+        raise ValueError("当前 Session 处于追问状态，但找不到追问文字")
 
     def _transition(self, event_type: InterviewEventType):
         """生成一个新的事件 ID，并让 Service 执行一次状态更新。"""

@@ -618,3 +618,31 @@ multipart 字段：
 ### POST /rag/session-query/data
 
 按当前 active session 锁定知识库查询结构化数据。不接收 `kb_id`。
+# Interview Coach V1 API
+
+Interview API 使用 `/api/interviews` 前缀。第一步仍然使用 SQLite，不需要 PostgreSQL、Redis 或用户身份。
+
+## 创建可直接开始的面试
+
+`POST /api/interviews/prepared`
+
+请求体包含 `title` 和 `InterviewConfig`。服务会从 `question_bank.v1.json` 确定性选题，同时创建 Interview、冻结的 Plan 和 Session。
+
+## 实时连接
+
+- `GET /api/interviews/sessions/{session_id}`：读取当前状态和题目位置。
+- `POST /api/interviews/sessions/{session_id}/attempts`：创建唯一 LiveKit room 和 Attempt。
+- `GET /api/interviews/attempts/{attempt_id}`：读取连接状态。
+- `GET /api/interviews/sessions/{session_id}/events`：读取状态事件。
+- `GET /api/interviews/sessions/{session_id}/answers`：读取最终回答。
+
+Next.js 的 `/api/connection-details` 接收 `sessionId`，调用 Attempt API 后签发仅能加入该 room 的 token，并固定调度 `interview-agent`。Worker metadata 格式为：
+
+```json
+{"session_id":"session_xxx","attempt_id":"attempt_xxx"}
+```
+
+## 报告
+
+- `POST /api/interviews/sessions/{session_id}/report`：主动生成报告。
+- `GET /api/interviews/sessions/{session_id}/report`：读取报告；尚未生成时返回 `null`。

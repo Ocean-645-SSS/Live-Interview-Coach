@@ -52,51 +52,40 @@ class SessionTransition:
 
 
 """状态机定义：
-READY
-  └─ START → INTRODUCTION
-       └─ INTRODUCTION_FINISHED → ASKING
-            └─ QUESTION_ASKED → LISTENING
-                 └─ ANSWER_RECEIVED → EVALUATING
-                      ├─ FOLLOW_UP_REQUIRED → FOLLOW_UP
-                      ├─ NEXT_QUESTION → NEXT_QUESTION
-                      └─ FINISH → COMPLETING
-                           └─ REPORT_COMPLETED → COMPLETED"""
-
+现有状态+业务驱动状态 -> 新状态"""
 _NORMAL_TRANSITIONS: dict[
     tuple[InterviewState, InterviewEventType],
     InterviewState,
 ] = {
-    (InterviewState.READY, InterviewEventType.START): InterviewState.INTRODUCTION,
-    (
-        InterviewState.INTRODUCTION,
-        InterviewEventType.INTRODUCTION_FINISHED,
-    ): InterviewState.ASKING,
-    (InterviewState.ASKING, InterviewEventType.QUESTION_ASKED): InterviewState.LISTENING,
-    (
-        InterviewState.LISTENING,
-        InterviewEventType.ANSWER_RECEIVED,
-    ): InterviewState.EVALUATING,
-    (
-        InterviewState.EVALUATING,
-        InterviewEventType.FOLLOW_UP_REQUIRED,
-    ): InterviewState.FOLLOW_UP,
-    (
-        InterviewState.FOLLOW_UP,
-        InterviewEventType.FOLLOW_UP_ASKED,
-    ): InterviewState.LISTENING,
-    (
-        InterviewState.EVALUATING,
-        InterviewEventType.NEXT_QUESTION,
-    ): InterviewState.NEXT_QUESTION,
-    (
-        InterviewState.NEXT_QUESTION,
-        InterviewEventType.QUESTION_ADVANCED,
-    ): InterviewState.ASKING,
-    (InterviewState.EVALUATING, InterviewEventType.FINISH): InterviewState.COMPLETING,
-    (
-        InterviewState.COMPLETING,
-        InterviewEventType.REPORT_COMPLETED,
-    ): InterviewState.COMPLETED,
+    (InterviewState.READY, InterviewEventType.START):
+    InterviewState.INTRODUCTION,
+
+    (InterviewState.INTRODUCTION,InterviewEventType.INTRODUCTION_FINISHED,):
+    InterviewState.ASKING,  #开场白结束 -> 第一个问题
+
+    (InterviewState.ASKING, InterviewEventType.QUESTION_ASKED):
+    InterviewState.LISTENING,   #问完了问题 -> 聆听用户回答
+
+    (InterviewState.LISTENING,InterviewEventType.ANSWER_RECEIVED,):
+    InterviewState.EVALUATING,  #接收用户回答 -> 开始评估
+
+    (InterviewState.EVALUATING,InterviewEventType.FOLLOW_UP_REQUIRED,):
+    InterviewState.FOLLOW_UP,   #评估完，需要追问 -> 追问
+
+    (InterviewState.FOLLOW_UP,InterviewEventType.FOLLOW_UP_ASKED,):
+    InterviewState.LISTENING,   #追问问题问好了 -> 聆听用户回答
+
+    (InterviewState.EVALUATING,InterviewEventType.NEXT_QUESTION,):
+    InterviewState.NEXT_QUESTION,   #评估完，准备换题 -> 问下一个新的问题
+
+    (InterviewState.NEXT_QUESTION,InterviewEventType.QUESTION_ADVANCED,):
+    InterviewState.ASKING,  #决定换题，正执行换题 -> 新题等待播放
+
+    (InterviewState.EVALUATING, InterviewEventType.FINISH):
+    InterviewState.COMPLETING,  #评价完了，面试可以结束 -> 进入结束状态，生成报告
+
+    (InterviewState.COMPLETING,InterviewEventType.REPORT_COMPLETED,):
+    InterviewState.COMPLETED,   #面试准备结束，且报告生成好了 -> 正式结束面试
 }
 
 # 可暂停状态机定义：

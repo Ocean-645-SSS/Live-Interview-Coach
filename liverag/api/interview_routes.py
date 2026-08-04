@@ -28,6 +28,13 @@ class CreateInterviewRequest(BaseModel):
     config: InterviewConfig
 
 
+class CreatePreparedInterviewRequest(BaseModel):
+    """创建一场从题库自动选题、可以立即开始的面试。"""
+
+    title: str = Field(min_length=1)
+    config: InterviewConfig
+
+
 class SavePlanRequest(BaseModel):
     """冻结面试计划请求"""
     plan: InterviewPlan
@@ -133,6 +140,21 @@ def create_interview(request: CreateInterviewRequest, service: ServiceDependency
     )
 
 
+@router.post("/prepared")
+def create_prepared_interview(
+    request: CreatePreparedInterviewRequest,
+    service: ServiceDependency,
+):
+    """从版本化题库选题，同时创建 Interview、Plan 和 Session。"""
+
+    return _execute(
+        lambda: service.create_prepared_interview(
+            title=request.title,
+            config=request.config,
+        )
+    )
+
+
 @router.get("/{interview_id}")
 def get_interview(interview_id: str, service: ServiceDependency):
     return _execute(lambda: service.get_interview(interview_id))
@@ -156,6 +178,41 @@ def save_plan(
 @router.post("/{interview_id}/sessions")
 def create_session(interview_id: str, service: ServiceDependency):
     return _execute(lambda: service.create_session(interview_id))
+
+
+@router.get("/sessions/{session_id}")
+def get_session(session_id: str, service: ServiceDependency):
+    """返回实时面试当前状态，供 Live 页面轮询。"""
+
+    return _execute(lambda: service.get_session(session_id))
+
+
+@router.post("/sessions/{session_id}/attempts")
+def create_attempt(session_id: str, service: ServiceDependency):
+    """为前端进入 LiveKit 创建一次新的连接记录。"""
+
+    return _execute(lambda: service.create_attempt(session_id))
+
+
+@router.get("/attempts/{attempt_id}")
+def get_attempt(attempt_id: str, service: ServiceDependency):
+    """返回一次 LiveKit 连接是否已连接、断开或失败。"""
+
+    return _execute(lambda: service.get_attempt(attempt_id))
+
+
+@router.get("/sessions/{session_id}/events")
+def list_events(session_id: str, service: ServiceDependency):
+    """返回面试状态变化记录。"""
+
+    return _execute(lambda: service.list_events(session_id))
+
+
+@router.get("/sessions/{session_id}/answers")
+def list_answers(session_id: str, service: ServiceDependency):
+    """返回已经提交的最终回答。"""
+
+    return _execute(lambda: service.list_answers(session_id))
 
 
 @router.post("/sessions/{session_id}/events")
@@ -212,8 +269,16 @@ def generate_report(session_id: str, service: ServiceDependency):
     return _execute(lambda: service.generate_report(session_id))
 
 
+@router.get("/sessions/{session_id}/report")
+def get_report(session_id: str, service: ServiceDependency):
+    """返回已经生成的报告；尚未生成时返回 null。"""
+
+    return _execute(lambda: service.get_report(session_id))
+
+
 __all__ = [
     "CreateInterviewRequest",
+    "CreatePreparedInterviewRequest",
     "ReceiveAnswerRequest",
     "SavePlanRequest",
     "TransitionRequest",

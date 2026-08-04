@@ -125,7 +125,7 @@ async def test_provider_returns_validated_evaluation():
     assert completions.calls[0]["response_format"] == {"type": "json_object"}
 
 
-async def test_provider_retries_invalid_weighted_score_with_feedback():
+async def test_provider_recalculates_weighted_score_without_retry():
     provider, completions = _provider(
         [
             _evaluation_json(weighted_score=99.0),
@@ -136,8 +136,7 @@ async def test_provider_retries_invalid_weighted_score_with_feedback():
     result = await provider.evaluate(answer=_answer(), question=_question())
 
     assert result.weighted_score == 75.0
-    assert len(completions.calls) == 2
-    assert "weighted_score" in completions.calls[1]["messages"][-1]["content"]
+    assert len(completions.calls) == 1
 
 
 async def test_provider_rejects_identity_drift_after_retry():

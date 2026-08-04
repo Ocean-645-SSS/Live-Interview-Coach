@@ -30,20 +30,21 @@ auto 模式保留知识库 Function Tool，由模型自主调用；never 模式�
 LLM 输出仍按 Chunk 实时交给 TTS，同时在本地累积完整文本，生成结束后写入 Session 存档。
 """
 
+import logging
 import time
-from asyncio.log import logger
 from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from typing import Any
 
-from livekit.agents import Agent, ToolError, llm
+from livekit.agents import Agent, FlushSentinel, ModelSettings, ToolError, llm
 
 from liverag.config.settings import RagToolMode
 from liverag.context.manager import ContextManager
 from liverag.logging.events import EventLogger
 
+logger = logging.getLogger("liverag.agent.assistant")
 
-# TODO
+
 @dataclass
 class _TurnLatencyTrace:
     """保存单轮对话里模型与工具链路的关键时间点。"""
@@ -70,7 +71,9 @@ class VoiceAssistant(Agent):
         rag_tool_mode: RagToolMode,
         event_logger: EventLogger | None = None,
     ) -> None:
-        super().__init__(instructions=session_system_prompt)    #固定好的本轮session的session_system_prompt
+        super().__init__(
+            instructions=session_system_prompt
+        )  # 固定好的本轮session的session_system_prompt
         self.context_manager = context_manager
         self.rag_tool_mode = rag_tool_mode
         self.event_logger = event_logger
@@ -190,7 +193,7 @@ class VoiceAssistant(Agent):
             extra={"liverag_rag_prefetch": True, "turn_index": turn_index},
         )
 
-    @llm.function_tool( #装饰器作用：把该函数方法描述成 LLM 可调用的 Function Tool
+    @llm.function_tool(  # 装饰器作用：把该函数方法描述成 LLM 可调用的 Function Tool
         name="search_knowledge_base",
         description=(
             "查询当前通话锁定的个人知识库。"
@@ -241,8 +244,11 @@ class VoiceAssistant(Agent):
         return result.context
 
     def llm_node(
-        self, chat_context: llm.ChatContext, tools: list[llm.Tool], model_settings: Any
-    ) -> AsyncIterable[llm.ChatChunk | str]:  # 返回异步流
+        self,
+        chat_ctx: llm.ChatContext,
+        tools: list[llm.Tool],
+        model_settings: ModelSettings,
+    ) -> AsyncIterable[llm.ChatChunk | str | FlushSentinel]:  # 返回异步流
         """VoiceAssistant对LiveKit默认LLM调用流程的包装，加入user消息去重保存、RAG工具控制和assistant回答保存
 
         从ChatContext提取用户消息
@@ -255,7 +261,7 @@ class VoiceAssistant(Agent):
         → 助手回答落盘"""
 
         # 找出用户消息
-        user_message = self._user_texts(chat_context)
+        user_message = self._user_texts(chat_ctx)
         # 保存新增用户消息，并且确定当前轮次
         turn_index = self._ensure_user_turns_recorded(user_message)
 
@@ -266,14 +272,14 @@ class VoiceAssistant(Agent):
 
         # 真正执行异步LLM流程：
         # VoiceAssistant.llm_node()→ Agent.default.llm_node()→ AgentSession里的openai.LLM→ 配置的LLM Provider→ 流式返回ChatChunk
-        async def _stream() -> AsyncIterable[llm.ChatChunk | str]:
+        async def _stream() -> AsyncIterable[llm.ChatChunk | str | FlushSentinel]:
             # 收集回答片段
             assistant_parts: list[str] = []
 
             # 调用LiveKit默认LLM流程
             async for chunk in Agent.default.llm_node(
                 self,
-                chat_ctx=chat_context,  # 上下文
+                chat_ctx=chat_ctx,  # 上下文
                 tools=active_tools,  # 可用工具
                 model_settings=model_settings,  # 模型设置
             ):
@@ -300,7 +306,7 @@ class VoiceAssistant(Agent):
     def _user_texts(chat_ctx: llm.ChatContext) -> list[str]:
         """从 ChatContext 里提取所有用户文本。"""
 
-        msgs = getattr(chat_ctx, "messages", [])  # 获取messages
+        msgs: Any = getattr(chat_ctx, "messages", [])  # 获取messages
         if callable(msgs):  # 兼容接口
             msgs = msgs()
 
@@ -319,7 +325,7 @@ class VoiceAssistant(Agent):
     def _ensure_user_turns_recorded(self, user_texts: list[str]) -> int:
         """找出尚未保存的最新用户消息，分配turn_index，
         确保 ChatContext 中新增的用户输入都被记录，交给messages.jsonl
-        
+
         VoiceAssistant
         → ContextManager.record_user_message()
         → ContextStore.append_message()
@@ -398,7 +404,7 @@ class VoiceAssistant(Agent):
         return target_name in {tool_id, tool_name, function_name}
 
     @staticmethod
-    def _chunk_text(chunk: llm.ChatChunk | str) -> str:
+    def _chunk_text(chunk: llm.ChatChunk | str | FlushSentinel) -> str:
         """从 LiveKit ChatChunk 中提取增量文本。"""
 
         if isinstance(chunk, str):

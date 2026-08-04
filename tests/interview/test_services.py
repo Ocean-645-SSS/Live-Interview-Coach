@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from liverag.agent.interview_agent import (
+from liverag.interview.controller import (
     InterviewAgentController,
     InterviewSpeechKind,
 )
@@ -44,9 +44,7 @@ def _question() -> InterviewQuestion:
         topics=["检索"],
         question_text="RAG 的流程是什么？",
         objective="检查对 RAG 的理解",
-        rubric=QuestionRubric(
-            expected_points=[RubricPoint(id="flow", content="说明检索与生成")]
-        ),
+        rubric=QuestionRubric(expected_points=[RubricPoint(id="flow", content="说明检索与生成")]),
     )
 
 
@@ -228,3 +226,51 @@ async def test_interview_agent_controller_rejects_empty_answer(interview_service
 
     with pytest.raises(ValueError, match="最终回答不能为空"):
         await controller.receive_final_answer("   ")
+
+
+async def test_interview_agent_controller_restores_question_after_disconnect(
+    interview_service,
+):
+    service, session_id, attempt_id = interview_service
+    controller = InterviewAgentController(
+        service=service,
+        session_id=session_id,
+        attempt_id=attempt_id,
+    )
+    controller.start()
+    question = controller.introduction_spoken()
+    controller.prompt_spoken(question.kind)
+
+    restored = InterviewAgentController(
+        service=service,
+        session_id=session_id,
+        attempt_id=attempt_id,
+    ).start()
+
+    assert restored.kind is InterviewSpeechKind.QUESTION
+    assert restored.text == question.text
+    assert service.get_session(session_id).state is InterviewState.LISTENING
+
+
+async def test_interview_agent_controller_restores_follow_up_after_disconnect(
+    interview_service,
+):
+    service, session_id, attempt_id = interview_service
+    controller = InterviewAgentController(
+        service=service,
+        session_id=session_id,
+        attempt_id=attempt_id,
+    )
+    controller.start()
+    question = controller.introduction_spoken()
+    controller.prompt_spoken(question.kind)
+    result = await controller.receive_final_answer("先检索，再生成。")
+
+    restored = InterviewAgentController(
+        service=service,
+        session_id=session_id,
+        attempt_id=attempt_id,
+    ).start()
+
+    assert restored.kind is InterviewSpeechKind.FOLLOW_UP
+    assert restored.text == result.next_speech.text

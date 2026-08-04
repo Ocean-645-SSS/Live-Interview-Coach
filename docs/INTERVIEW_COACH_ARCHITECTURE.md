@@ -213,3 +213,23 @@ FastAPI 创建 Job 并入队
 - Kubernetes、跨区域容灾和自动伸缩平台。
 - LangGraph、AutoGen、CrewAI、CAMEL 等通用 Agent 编排框架。
 - 为追求形式上的“微服务”拆分可在单个 FastAPI/Worker 进程中清晰维护的业务模块。
+# V1 当前落地状态（2026-08-04）
+
+第一步单机闭环已经落地：FastAPI、SQLAlchemy/SQLite、版本化题库、状态机、逐题评价、追问、报告、独立 LiveKit Interview Worker 和三个 Next.js 页面已经接通。
+
+实时调用链如下：
+
+```text
+Next.js 创建页
+  -> POST /api/interviews/prepared
+  -> Interview + Plan + Session
+  -> POST /sessions/{session_id}/attempts
+  -> Next.js 签发限定 room 的 LiveKit token
+  -> interview-agent（metadata: session_id + attempt_id）
+  -> InterviewAgentController
+  -> InterviewService / Orchestrator
+  -> SQLAlchemy Repository / SQLite
+  -> AnswerEvaluation / Follow-up / Report
+```
+
+断线只结束 Attempt，不删除或重建 Session。重新连接时 Worker 根据 Session 状态恢复当前题目或最近一次追问。实时 final transcript 不进入后台队列；Redis 和 Background Worker 仍严格留到第三步。

@@ -121,13 +121,16 @@ InterviewBase.metadata.create_all(interview_engine)
 interview_repository = SQLAlchemyInterviewRepository(
     create_session_factory(interview_engine)
 )
+#加载语音配置
 voice_settings = load_voice_settings()
 interview_evaluator = None
+#配置评价LLM
 if voice_settings.llm_api_key.strip():
     evaluation_provider = OpenAIAnswerEvaluationProvider(
         OpenAIAnswerEvaluationSettings.from_voice_settings(voice_settings)
     )
     interview_evaluator = AnswerEvaluator(interview_repository, evaluation_provider)
+#注册interview的service层
 interview_service = InterviewService(
     interview_repository,
     evaluator=interview_evaluator,

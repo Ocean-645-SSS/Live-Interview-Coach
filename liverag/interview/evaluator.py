@@ -124,6 +124,16 @@ class OpenAIAnswerEvaluationProvider:
                         self._clean_json_response(content)
                     )
 
+                    # 总分能由四个维度和 rubric 精确算出，统一由服务端计算，
+                    # 避免模型算术误差让一份其他字段都合格的评价整体失败。
+                    evaluation = evaluation.model_copy(
+                        update={
+                            "weighted_score": evaluation.scores.calculate_weighted_score(
+                                question.rubric
+                            )
+                        }
+                    )
+
                     #校验evaluation是否合格
                     self._validate_evaluation(evaluation, answer, question)
 
@@ -237,7 +247,7 @@ class AnswerEvaluator:
         if question is None:
             raise ValueError(f"面试计划中不存在题目：{answer.question_id}")
 
-        #做出评价
+        #调用LLM做出评价
         evaluation = await self._provider.evaluate(answer=answer, question=question)
         if evaluation.answer_id != answer.id or evaluation.question_id != question.id:
             raise ValueError("评价结果的回答或题目标识与请求不一致")

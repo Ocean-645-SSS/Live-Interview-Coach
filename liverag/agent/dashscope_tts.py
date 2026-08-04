@@ -84,6 +84,7 @@ class DashScopeRealtimeTTS(tts.TTS):
         self._session = http_session
         self._owns_session = http_session is None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
+        self._session_configured = False
         self._ws_lock = asyncio.Lock()
         self._streams: set[DashScopeRealtimeSynthesizeStream] = set()
 
@@ -131,12 +132,18 @@ class DashScopeRealtimeTTS(tts.TTS):
             ),
             timeout=timeout,
         )
+        # DashScope 会先创建服务端会话，再允许客户端发送 session.update。
+        # 等到 session.created 可以避免刚完成 WebSocket 握手就写数据造成的竞态，
+        # 同时也能把鉴权、区域或模型错误转换成可读的 Provider 错误。
+        await _wait_for_server_event(self._ws, "session.created", timeout)
+        self._session_configured = False
         return self._ws
 
     async def _close_ws(self) -> None:
         if self._ws is not None and not self._ws.closed:
             await self._ws.close()
         self._ws = None
+        self._session_configured = False
 
     async def aclose(self) -> None:
         for stream in list(self._streams):
@@ -170,7 +177,16 @@ class DashScopeRealtimeSynthesizeStream(tts.SynthesizeStream):
         async with self._tts._ws_lock:
             try:
                 ws = await self._tts._connect_ws(self._conn_options.timeout)
-                await self._send_session_update(ws)
+                # 同一条 DashScope WebSocket 只允许在首次合成前配置一次。
+                # 后续开场白、题目和追问会复用连接，不能重复 session.update。
+                if not self._tts._session_configured:
+                    await self._send_session_update(ws)
+                    await _wait_for_server_event(
+                        ws,
+                        "session.updated",
+                        self._conn_options.timeout,
+                    )
+                    self._tts._session_configured = True
                 await self._run_response(ws, output_emitter, request_id)
             except TimeoutError as exc:
                 await self._tts._close_ws()
@@ -300,6 +316,34 @@ class DashScopeRealtimeSynthesizeStream(tts.SynthesizeStream):
 
 async def _send_json(ws: aiohttp.ClientWebSocketResponse, payload: dict[str, Any]) -> None:
     await ws.send_str(json.dumps(payload, ensure_ascii=False))
+
+
+async def _wait_for_server_event(
+    ws: aiohttp.ClientWebSocketResponse,
+    expected_type: str,
+    timeout: float,
+) -> dict[str, Any]:
+    """等待 DashScope 完成当前握手步骤，失败时保留服务端错误信息。"""
+
+    while True:
+        message = await asyncio.wait_for(ws.receive(), timeout=timeout)
+        if message.type is aiohttp.WSMsgType.TEXT:
+            payload = json.loads(str(message.data))
+            message_type = str(payload.get("type") or "")
+            if message_type == expected_type:
+                return payload
+            if message_type in {"error", "response.error"}:
+                raise APIError(f"DashScope realtime TTS error: {payload}")
+            continue
+        if message.type in {
+            aiohttp.WSMsgType.CLOSED,
+            aiohttp.WSMsgType.CLOSE,
+            aiohttp.WSMsgType.CLOSING,
+            aiohttp.WSMsgType.ERROR,
+        }:
+            raise APIConnectionError(
+                "DashScope realtime TTS websocket closed before " + expected_type
+            )
 
 
 def _event_id() -> str:

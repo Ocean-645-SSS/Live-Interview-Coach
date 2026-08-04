@@ -1,20 +1,19 @@
 """HTTP Gateway：管理 API 访问内部 RAG Core Service 的统一网关。"""
 
 import asyncio
-from dataclasses import dataclass
 import json
 import logging
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-import uuid
 
 import aiohttp
 from fastapi import UploadFile
 
-from liverag.config.settings import AppSettings,load_rag_client_settings
+from liverag.config.settings import AppSettings, load_rag_client_settings
 from liverag.rag.filenames import decode_transport_filename
 from liverag.rag.service import wait_for_rag_ready
-
 
 logger = logging.getLogger("liverag.api.rag_gateway")
 
@@ -73,7 +72,7 @@ class RagGateway:
         """转发 JSON PATCH 请求：局部修改一个已经存在的资源"""
 
         return await self._request("PATCH", path, json_body=payload)
-    
+
     async def delete(self, path: str, *, params: dict[str, Any] | None = None) -> GatewayResponse:
         """转发 DELETE 请求。"""
 
@@ -140,32 +139,37 @@ class RagGateway:
 
         try:
             #发起文件请求
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(
+            async with (
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.get(
                     target_url,
                     headers=headers,
-                    params=self._query_params(params=params)
-                )as response:
-                    content_type = response.headers.get("content-type", "")
-                    #响应是错误
-                    if response.status >= 400:
-                        payload = await self._read_payload(response)
-                        normalized = self._normalize_payload(
-                            payload,
-                            status_code=response.status,
-                            fallback_request_id=fallback_request_id,
-                        )
-                        return GatewayFileResponse(
-                            status_code=normalized.status_code,
-                            body=b"",
-                            headers={},
-                            error_body=normalized.body,
-                        )
+                    params=self._query_params(params=params),
+                ) as response,
+            ):
+                #响应是错误
+                if response.status >= 400:
+                    payload = await self._read_payload(response)
+                    normalized = self._normalize_payload(
+                        payload,
+                        status_code=response.status,
+                        fallback_request_id=fallback_request_id,
+                    )
+                    return GatewayFileResponse(
+                        status_code=normalized.status_code,
+                        body=b"",
+                        headers={},
+                        error_body=normalized.body,
+                    )
 
-                    #成功，读取文件
-                    body = await response.read()
-                    headers = self._file_headers(response)
-                    return GatewayFileResponse(status_code=response.status, body=body, headers=headers)
+                #成功，读取文件
+                body = await response.read()
+                headers = self._file_headers(response)
+                return GatewayFileResponse(
+                    status_code=response.status,
+                    body=body,
+                    headers=headers,
+                )
         except Exception as exc:
             return GatewayFileResponse(
                 status_code=502,
@@ -176,7 +180,7 @@ class RagGateway:
                     status="error",
                     error={"type": type(exc).__name__, "message": str(exc)},
                 ),
-            ) 
+            )
 
 
     async def post_files(
@@ -304,12 +308,17 @@ class RagGateway:
             )
 
     @staticmethod
-    def _headers(api_key:str,*,has_json=bool,has_form:bool)->dict[str,str]:
+    def _headers(
+        api_key: str,
+        *,
+        has_json: bool = False,
+        has_form: bool = False,
+    ) -> dict[str, str]:
         """构造转发请求头。"""
 
         if has_json and has_form:
             raise ValueError("JSON body and multipart form cannot be sent together")
-        
+
         headers:dict[str,str]={}
 
         if has_json:
@@ -333,7 +342,7 @@ class RagGateway:
         #保证base_url末尾没有/   path开头有至少一个/    最终中间正好一个/
         normalized = path if path.startswith("/") else f"/{path}"
         return f"{base_url.rstrip('/')}{normalized}"
-    
+
     @staticmethod
     def _query_params(params:dict[str,Any]|None)->dict[str,str|int|float]|None:
         """把查询参数params清洗成aiohttp能安全接受的格式"""
@@ -381,7 +390,7 @@ class RagGateway:
             for key, value in response.headers.items()
             if key.lower() in allowed
         }
-    
+
     @staticmethod
     def _normalize_payload(
         payload:dict,
@@ -550,7 +559,10 @@ class RagGateway:
         if not isinstance(data, dict):
             return {"document_id": "", "status": "unknown", "content": "", "chunks": [], "raw": data}
 
-        status_payload = data.get("status") if isinstance(data.get("status"), dict) else {}
+        status_value = data.get("status")
+        status_payload: dict[str, Any] = (
+            status_value if isinstance(status_value, dict) else {}
+        )
         summary_source = {**status_payload, **data}
         summary = cls._normalize_document_summary(summary_source)
         chunks = data.get("chunks")
@@ -568,10 +580,10 @@ class RagGateway:
     @classmethod
     def _normalize_job_payload(cls, data: Any) -> dict[str,Any]:
         """归一化任务查询响应。"""
-        
+
         if not isinstance(data, dict):
             return {"job_id": "", "documents": [], "total": 0, "raw": data}
-        
+
         payload = dict(data)
 
         #归一化文档格式

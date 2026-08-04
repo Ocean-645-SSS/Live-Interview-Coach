@@ -99,9 +99,28 @@ services:
     volumes:
       - liverag-data:/data
 
+  liverag-interview-agent:
+    image: liverag-backend:local
+    container_name: liverag-interview-agent
+    restart: unless-stopped
+    depends_on:
+      livekit:
+        condition: service_started
+      liverag-rag:
+        condition: service_healthy
+    env_file:
+      - .env.local
+    environment:
+      <<: *liverag-env
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-liverag-local}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-liverag-local-development-secret-0001}
+    command: ["python", "-m", "liverag.interview_main", "dev"]
+    volumes:
+      - liverag-data:/data
+
   liverag-frontend:
     build:
-      context: ../../LiveRAG-Fronted/agent-starter-react
+      context: ./LiveRAG-Fronted/agent-starter-react
       dockerfile: Dockerfile
     image: liverag-frontend:local
     container_name: liverag-frontend
@@ -118,6 +137,7 @@ services:
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-liverag-local}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-liverag-local-development-secret-0001}
       AGENT_NAME: ${AGENT_NAME:-my-agent}
+      INTERVIEW_AGENT_NAME: ${INTERVIEW_AGENT_NAME:-interview-agent}
       LIVERAG_API_BASE: http://liverag-api:9821
       ALLOW_INSECURE_TOKEN_API: ${ALLOW_INSECURE_TOKEN_API:-true}
 

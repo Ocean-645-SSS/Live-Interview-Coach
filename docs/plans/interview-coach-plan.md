@@ -2,26 +2,34 @@
 
 > **For agentic workers:** Implement this plan phase by phase, preserving the existing LiveRAG voice, RAG, session, context, history, and deployment paths.
 
-**Goal:** 在现有 LiveRAG 上增加“个性化准备—受控实时面试—结构化评价—训练反馈”闭环，而不是另建一套语音聊天系统。
+**Goal:** 面向个人求职训练的单用户实时语音模拟面试与长期训练系统。
 
-**Architecture:** 目标是可部署到公网的多用户 Interview Coach，而不是完整多租户 SaaS。技术演进必须严格分四步：先用 FastAPI + SQLAlchemy + SQLite 接通 LiveKit 与 LightRAG；再引入 Alembic + PostgreSQL；随后增加 Redis + Background Worker；最后实现用户隔离、配额、并发治理和公网部署。后一步不得反向成为前一步的前置依赖。
+**Architecture:** Interview Coach 是当前 LiveRAG 上的单用户业务扩展，面向本地或受控个人使用。技术演进严格按照“核心模拟面试闭环—Alembic + PostgreSQL—Redis + Background Worker + MCP—长期能力画像”推进；每一步复用现有 LiveRAG 底座，后一步不得反向成为前一步的前置依赖。
 
-**Tech Stack:** Python、FastAPI、Pydantic、SQLAlchemy、SQLite、LiveKit Agents、LightRAG；第二步增加 Alembic/PostgreSQL，第三步增加 Redis/Background Worker，第四步增加身份隔离、配额、并发治理和公网部署；前端继续使用 Next.js、TypeScript。
+**Tech Stack:** Python、FastAPI、Pydantic、SQLAlchemy、SQLite、LiveKit Agents、LightRAG；第二步增加 Alembic/PostgreSQL，第三步增加 Redis/Background Worker/MCP；前端继续使用 Next.js、TypeScript。
 
-目标组件边界、同步/异步划分和最终部署形态参考 [Interview Coach 目标架构](../INTERVIEW_COACH_ARCHITECTURE.md)；实际实施先后顺序以本文第 13 节的四步路线为唯一依据。
+目标组件边界和同步/异步划分可参考 [Interview Coach 目标架构](../INTERVIEW_COACH_ARCHITECTURE.md)；项目定位、全局约束和实际实施先后顺序以本文为唯一依据。
 
 ## Global Constraints
 
 - 本文是架构与实施规划，不要求当前阶段修改产品代码。
-- 不重写 RAG、文档解析、实时语音、Session、History、Context 或 Docker 基础设施。
+- V0 LiveRAG 保持原样。
+- 不为 Interview Coach 给原知识库表增加归属字段。
+- 不为原 Session、History、Context 增加身份关联字段。
+- 不修改现有知识库物理 workspace 设计。
+- 不修改现有 LiveRAG 的多知识库逻辑。
+- 不修改原普通 RAG 语音模式。
+- Interview Coach 只通过现有 `kb_id`、`session_id`、`RagGateway` 和 `ContextStore` 复用底座。
+- Interview 业务新增字段和表只存在于 Interview 业务域。
+- 不因为 Interview Coach 重构整个 LiveRAG 存储层。
 - MVP 使用一个 Interview Agent 加多个业务 Service，不引入 AutoGen、CrewAI、CAMEL 等多 Agent 框架。
-- 实施顺序固定为：① FastAPI + SQLAlchemy + SQLite + LiveKit + LightRAG；② Alembic + PostgreSQL；③ Redis + Background Worker；④ 用户隔离、配额、并发和公网部署。
-- 第一步不得引入 Alembic、PostgreSQL、Redis、Background Worker 或用户体系；先完成单机业务闭环。
-- 第二步只完成数据库迁移体系和 PostgreSQL 等价运行，不提前引入 Redis 或用户隔离。
-- 第三步只把耗时任务迁移到一套 Background Worker，并用 Redis 承担队列、短期锁和临时协调；Redis 不保存权威业务状态。
-- 第四步才增加身份认证、`user_id` 数据隔离、配额、并发控制和公网部署；不实现组织租户、复杂 RBAC、支付或套餐。
+- 实施顺序固定为：V0 冻结当前 LiveRAG；① 核心模拟面试闭环；② Alembic + PostgreSQL；③ Redis + Background Worker + MCP；④ 长期能力画像；可选增强为 PI Agent / GitHub 项目分析。
+- 第一步不得引入 Alembic、PostgreSQL、Redis、Background Worker 或 MCP；先完成单机业务闭环。
+- 第二步只完成数据库迁移体系和 PostgreSQL 等价运行，不提前引入 Redis、Background Worker 或 MCP。
+- 第三步把耗时任务迁移到一套 Background Worker，用 Redis 承担队列、短期锁和临时协调，并在准备任务中接入 MCP；Redis 不保存权威业务状态。
+- 项目允许他人在本地或受控演示环境中操作，但系统不保证不同操作者之间的数据隔离。
 - 不引入 Kafka、Kubernetes 或微服务化基础设施。
-- MCP 不进入实时语音问答主链路；MCP 失败不得阻止基础模拟面试，根据用户上传的简历、面试知识库来回答。
+- MCP 不进入实时语音问答主链路；MCP 失败不得阻止基础模拟面试，根据操作者上传的简历、面试知识库来回答。
 - 所有 LLM 结构化输出必须经过 Pydantic 校验，原始外部文本视为不可信数据。
 
 ---
@@ -37,7 +45,7 @@
 | `liverag/rag/` | RagGateway、RAG Core client、引擎管理、解析和 evidence | 复用候选人材料检索；不存题库和评分规则 |
 | `liverag/context/` | 会话 prompt、消息和 RAG context 持久化 | 语音转录可复用；面试权威状态另存结构化数据库 |
 | `liverag/runtime/` | worker/runtime 状态和联动 | 增加 interview worker 的独立运行入口与健康状态 |
-| `liverag/config/` | 环境变量与 settings | 增加 feature flag、MCP、超时及配额配置 |
+| `liverag/config/` | 环境变量与 settings | 增加 feature flag、MCP、超时及任务配置 |
 | `liverag/storage/` | SQLite、JSONL/文件型数据访问 | 第一步收敛为 SQLAlchemy repository + SQLite；第二步再由 Alembic 管理 schema 并接入 PostgreSQL |
 | `tests/` | 以单元、fake、FastAPI TestClient 为主 | 增加状态机、并发幂等、MCP mock、评价一致性和 E2E |
 
@@ -107,7 +115,7 @@ Interview 数据已切换为 SQLAlchemy Repository，并在第一步继续只连
 
 - 部分核心文件职责过大，API、生命周期和业务编排边界不够清晰。
 - 文档与代码存在漂移，例如 session 路径、清理语义和运行方式描述不完全一致。
-- 缺少用户认证、租户边界和资源归属；知识库选择偏全局化。
+- 知识库选择偏全局化；Interview 业务必须显式传递并校验 `kb_id`，避免不同知识库的检索上下文混用。
 - room 与 session 强耦合，缺少面向业务会话的暂停、恢复和重复事件处理。
 - JSONL 与 SQLite 跨存储没有事务；结束事件存在竞态风险。
 - 部分 settings 与实际调用路径未完全统一。
@@ -146,7 +154,7 @@ flowchart LR
 
 核心边界：FastAPI 负责管理与准备；Interview Agent 负责低延迟实时交互；Orchestrator 是状态机的唯一写入口；Service 负责可测试的业务决策；数据库保存权威状态；RAG 和 MCP 都是输入来源，不拥有面试流程。
 
-上图展示最终组件关系，不表示所有组件同时实施。第一步只启用 API、SQLAlchemy/SQLite、LiveKit/Agent 和 LightRAG；第二步替换数据库迁移与部署后端；第三步才启用 Redis/Background Worker；第四步才开放多用户公网访问。
+上图展示最终组件关系，不表示所有组件同时实施。第一步只启用 API、SQLAlchemy/SQLite、LiveKit/Agent 和 LightRAG；第二步替换数据库迁移与部署后端；第三步才启用 Redis、Background Worker 与 MCP；第四步实现长期能力画像。
 
 ---
 
@@ -186,7 +194,7 @@ liverag/
       normalizer.py
       aggregator.py
       service.py
-  agent/interview_agent.py
+  interview/controller.py
   api/interview_routes.py
   interview_main.py
 tests/interview/
@@ -200,12 +208,12 @@ tests/interview/
 
 ### 4.1 面试前准备
 
-1. 用户选择已有知识库或上传简历、项目、README、技术总结。
-2. 用户提交 JD、公司、岗位、地区、面试轮次和时长。
+1. 操作者选择已有知识库或上传简历、项目、README、技术总结。
+2. 操作者提交 JD、公司、岗位、地区、面试轮次和时长。
 3. Profile Service 从 RAG 检索候选人证据，生成 CandidateProfile；JD Analyzer 生成 JobProfile。
 4. Intelligence Service 在 feature flag 开启时调用 provider，标准化并聚合 CompanyInterviewProfile；失败则记录降级原因。
 5. Planner 将 CandidateProfile、JobProfile、CompanyInterviewProfile、SkillProgress 和结构化 Question Bank 合并为 InterviewPlan。
-6. 用户预览/确认计划，状态由 `PREPARING` 进入 `READY`。
+6. 操作者预览/确认计划，状态由 `PREPARING` 进入 `READY`。
 
 ### 4.2 实时面试
 
@@ -312,20 +320,23 @@ class InterviewIntelligenceProvider(Protocol):
 
 | 实体 | 核心字段 |
 |---|---|
-| CandidateProfile | id、knowledge_base_id、name、seniority、skills、projects、experience_evidence、strengths、risks、version |
+| CandidateProfile | id、kb_id、name、seniority、skills、projects、experience_evidence、strengths、risks、version |
 | JobProfile | id、company、role、region、level、required_skills、preferred_skills、responsibilities、evaluation_focus、source_text_hash |
 | InterviewConfig | id、duration、round、language、difficulty、topic_weights、question_limit、follow_up_limit、timeout_policy |
 | InterviewPlan | id、candidate_profile_id、job_profile_id、company_profile_id、config_id、status、sections、rationale、prompt_version |
 | InterviewQuestion | id、plan_id、order_no、type、difficulty、prompt、rubric、expected_points、candidate_evidence_refs、source_refs、follow_up_policy |
 | InterviewSession | id、plan_id、state、resume_state、question_cursor、version、started_at、ended_at |
+| InterviewAttempt | id、session_id、room_name、status、started_at、ended_at、disconnect_reason |
 | InterviewAnswer | id、session_id、question_id、attempt_no、transcript、started_at、ended_at、event_id |
 | AnswerEvaluation | id、answer_id、rubric_version、scores、covered_points、missing_points、errors、evidence_refs、follow_up_decision |
 | InterviewReport | id、session_id、summary、skill_scores、strengths、weaknesses、recommendations、evidence_refs、generated_at |
-| SkillProgress | id、subject_id、skill、score、confidence、evidence_count、trend、last_evaluated_at |
+| SkillProgress | id、candidate_profile_id、skill、attempts、average_score、latest_score、weak_points、confidence、source_evaluation_ids、updated_at |
 | CompanyInterviewProfile | id、company、role、region、round、frequent_topics、common_questions、style、source_ids、updated_at、confidence |
 | InterviewExperienceSource | id、company、role、interview_round、source、published_time、topics、questions、summary、confidence |
+| BackgroundJob | id、job_type、business_resource_id、status、idempotency_key、attempts、error、created_at、updated_at |
+| InterviewEvent | id、event_id、session_id、event_type、payload、sequence_no、created_at |
 
-`InterviewExperienceSource.source` 应包含 provider、原始 source id/URL（允许保存时）、抓取时间和内容哈希。另需内部表：`interview_events`、`interview_attempts`、`preparation_jobs`、`intelligence_snapshots`、`schema_migrations`。
+`InterviewExperienceSource.source` 应包含 provider、原始 source id/URL（允许保存时）、抓取时间和内容哈希。`SkillProgress` 直接关联 `CandidateProfile`：同一候选人画像跨面试聚合，不同 `candidate_profile_id` 的记录不得混合。另可保留 `intelligence_snapshots` 等 Interview 业务内部表；迁移版本由 Alembic 管理。
 
 ### 7.2 数据库取舍
 
@@ -337,19 +348,21 @@ class InterviewIntelligenceProvider(Protocol):
 
 ### 7.3 RAG 边界
 
-适合进入 RAG：简历、项目文档、README、技术总结、经授权的长篇项目材料，以及需要证据定位的非结构化内容。
+适合进入 RAG：简历、项目文档、README、技术总结、经许可使用的长篇项目材料，以及需要证据定位的非结构化内容。
 
 不进入 RAG：固定题库、rubric、expected points、状态机规则、配置、评分权重、结构化 SkillProgress、规范化公司画像。
 
 原因：题库和评分规则需要稳定版本、精确过滤、唯一标识、可审计更新和确定性读取；向量召回不能保证完整或唯一。RAG 的价值是从长文本中检索候选人事实和上下文，而不是充当业务数据库。
 
-题库以版本化 JSON 起步，字段至少包含 `id/category/skills/level/type/prompt/rubric/expected_points/follow_up_templates/tags/version`；规模和多人编辑需求增长后再迁移 SQLite 表。
+题库以版本化 JSON 起步，字段至少包含 `id/category/skills/level/type/prompt/rubric/expected_points/follow_up_templates/tags/version`；规模或维护复杂度增长后再迁移 SQLite 表。
 
 ---
 
 ## 8. API 设计
 
 统一前缀建议为 `/api/interviews`，写接口支持 `Idempotency-Key`，错误返回稳定 code 与当前状态版本。
+
+API 只按 `interview_id`、`session_id`、`plan_id`、`candidate_profile_id` 和 `kb_id` 等业务资源 ID 操作。Repository 与 Service 必须校验业务一致性：Interview 是否存在、Session 是否属于指定 Interview、Plan 是否已冻结、`kb_id` 是否存在、状态转换是否合法、`version` 是否冲突、`event_id` 是否重复。上述检查用于维护业务边界和数据一致性。
 
 | 方法与路径 | 用途 |
 |---|---|
@@ -364,14 +377,14 @@ class InterviewIntelligenceProvider(Protocol):
 | `POST /interview-sessions/{id}/attempts` | 创建 LiveKit room attempt |
 | `POST /interview-sessions/{id}/pause` | 暂停 |
 | `POST /interview-sessions/{id}/resume` | 恢复并返回连接准备信息 |
-| `POST /interview-sessions/{id}/complete` | 用户主动结束并进入报告阶段 |
+| `POST /interview-sessions/{id}/complete` | 主动结束并进入报告阶段 |
 | `GET /interview-sessions/{id}/answers` | 回答与评价列表 |
 | `GET /interview-sessions/{id}/events` | 调试/恢复所需事件游标 |
 | `GET /interview-sessions/{id}/report` | 获取最终报告 |
 | `POST /interview-intelligence/profiles` | 显式预取公司岗位画像 |
 | `GET /interview-intelligence/profiles/{id}` | 获取画像、来源和可信度 |
 
-Next.js 增加 `/api/interview/connection-details` server route：校验 session/attempt 后创建限定 room 的 token，并 dispatch 到 interview worker。浏览器不能自行选择任意 agent name 或伪造 session ownership。
+Next.js 增加 `/api/interview/connection-details` server route：确认 session/attempt 存在且关联关系正确后，创建限定到该 room 的 token，并 dispatch 到 interview worker。浏览器不能自行选择任意 agent name、room 或把 attempt 关联到其他 Session。
 
 ---
 
@@ -451,7 +464,7 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 | `/interview/[id]/plan` | 准备进度、画像摘要、情报来源、计划预览与确认 |
 | `/interview/[id]/live` | LiveKit 音频、当前阶段、题号/时间、字幕、暂停和退出 |
 | `/interview/[id]/report` | 分数、rubric 证据、薄弱点、训练建议 |
-| `/interview/progress` | 技能趋势与历史证据（第四步完成后的增强能力） |
+| `/interview/progress` | 当前 CandidateProfile 的技能趋势与历史证据（第四步） |
 
 沿用现有连接组件和 local hooks，新增 `types/interview.ts`、API client 与 `useInterviewSession`；复杂状态由服务端状态机驱动，前端 reducer 只投影服务端状态。Live 页视觉上应突出“问题轨道、剩余时间、连接/评价状态”，而不是通用聊天气泡列表。
 
@@ -464,6 +477,7 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 - profile/JD schema 校验、题库过滤、计划时长和难度约束。
 - rubric 加权、缺失/错误点归一化、报告聚合。
 - store transaction、migration 升级、唯一约束和乐观锁。
+- SkillProgress 的 attempts、平均分、最新分、薄弱点、置信度和评价来源聚合规则。
 
 ### 12.2 MCP mock 测试
 
@@ -475,7 +489,8 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 
 - 状态/事件转移表全覆盖。
 - 重复 final transcript、重复结束事件、乱序事件、并发 resume、过期 version。
-- 掉线恢复、超时、用户退出、评价失败、终态不可逆。
+- 重复 `event_id` 必须幂等，乐观锁冲突必须返回稳定错误并允许调用方重读。
+- 掉线恢复、超时、主动退出、评价失败、终态不可逆。
 - 可用 property-based 测试验证任意事件序列不破坏不变量。
 
 ### 12.4 集成测试
@@ -483,11 +498,16 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 - 第一步使用 FastAPI + SQLAlchemy + 临时 SQLite + fake RAG/provider/LLM；第二步增加 Alembic + PostgreSQL 集成测试。
 - prepare 到 plan、session 到 report 的完整服务调用。
 - worker 通过 fake STT/TTS/LiveKit event 验证 orchestration，不调用真实云服务。
+- 验证不同 Interview 的计划、事件和报告不串；不同 Session 的回答与状态不串。
+- 验证不同 `CandidateProfile` 的材料与 SkillProgress 不串；同一 CandidateProfile 下不同面试的能力聚合规则正确。
+- 验证不同 `kb_id` 继续映射到各自现有 LightRAG workspace，不混用检索上下文。
+- 验证 Session 与 Interview、Plan 冻结状态、`kb_id` 存在性等业务关联约束。
 
 ### 12.5 E2E 测试
 
 - Playwright 覆盖创建、准备、进入 Live 页、注入测试 transcript、掉线恢复、完成和报告。
-- 第一步验证 API、RAG Core、通用 LiveKit worker 和 interview worker；第三步增加 Background Worker/Redis smoke；第四步增加带身份、配额和并发限制的公网部署 smoke。
+- 第一步验证 API、RAG Core、通用 LiveKit worker 和 interview worker；第三步增加 Background Worker/Redis/MCP 降级 smoke；第四步验证历史能力影响下一次面试的题目权重、难度和复测策略。
+- 覆盖 Redis/Worker 重启、PostgreSQL 事务与迁移、LiveKit 掉线恢复，确保恢复后仍绑定原 Interview、Session、CandidateProfile 与 `kb_id` 业务边界。
 
 ### 12.6 评价一致性测试
 
@@ -519,15 +539,15 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 
 **Git commit 建议：** `docs: freeze current LiveRAG runtime contracts`；`test: add LiveRAG extension regression baseline`。
 
-### 第一步：FastAPI + SQLAlchemy + SQLite + LiveKit + LightRAG
+### 第一步：核心模拟面试闭环
 
-**目标：** 不引入 PostgreSQL、Redis、Background Worker 或用户体系，先完成单机 Interview Coach 闭环，并把 Interview 数据访问统一到 SQLAlchemy + SQLite。
+**目标：** 使用 FastAPI + SQLAlchemy + SQLite + LiveKit + LightRAG 完成单机 Interview Coach 闭环，并把 Interview 数据访问统一到 SQLAlchemy + SQLite。
 
 **本阶段内部顺序：** 先建立 SQLAlchemy engine/session、ORM models 和 SQLite repository，再把状态机迁移到 Repository Protocol，最后实施 Orchestrator、评价、追问、报告和 LiveKit 接线。数据库基础与状态机接线已经完成，后续代码不得重新引入原生 `sqlite3` Store。
 
 **修改文件：** `pyproject.toml`、`liverag/api/server.py`、Interview settings、现有 API/LiveKit/LightRAG Compose 服务，以及前端导航和 API proxy 配置。
 
-**新增文件：** `liverag/interview/{db,models,repository,sqlalchemy_repository,orchestrator,evaluator,follow_up,report,service,prompts}.py`、`liverag/agent/interview_agent.py`、`liverag/api/interview_routes.py`、`liverag/interview_main.py`、对应 `tests/interview/`；前端 interview pages/types/hooks/client。
+**新增文件：** `liverag/interview/{controller,db,models,repository,sqlalchemy_repository,orchestrator,evaluator,follow_up,report,service,prompts}.py`、`liverag/agent/interview_assistant.py`、`liverag/api/interview_routes.py`、`liverag/interview_main.py`、对应 `tests/interview/`；前端 interview pages/types/hooks/client。
 
 - [√] 建立 Interview SQLite 领域原型、版本化题库、状态机、事件幂等、version 乐观锁和暂停恢复。
 - [√] 引入 SQLAlchemy engine/session 和 Interview ORM models，只连接 SQLite。
@@ -535,14 +555,14 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 - [√] 将旧 `InterviewStore` 行为迁移为 Repository 契约测试。
 - [√] 让状态机依赖 Repository Protocol，并注入 SQLAlchemy Repository。
 - [√] 移除原生 `sqlite3` Store 和自定义 migration runner，使 ORM metadata 成为唯一 schema 来源。
-- [ ] 完成 Orchestrator、逐题评价、规则化追问和最终报告。
-- [ ] 通过 FastAPI 暴露创建计划、Session、Answer、Event 和 Report 接口。
-- [ ] 实现独立 LiveKit Interview Agent worker，并复用 RagGateway/LightRAG 查询候选人资料。
-- [ ] 完成创建、Live、报告三个最小前端页面，但不增加登录和多用户逻辑。
+- [√] 完成 Orchestrator、逐题评价、规则化追问和最终报告。
+- [√] 通过 FastAPI 暴露创建计划、Session、Attempt、Answer、Event 和 Report 接口。
+- [√] 实现独立 LiveKit Interview Agent worker，并继续复用现有 RagGateway/LightRAG 候选人资料基础设施；实时逐轮链路不新增阻塞式 RAG 查询。
+- [√] 完成创建、Live、报告三个最小前端页面。
 
 **测试：** SQLAlchemy + 临时 SQLite、状态机、API TestClient、fake voice worker、LightRAG fake、Playwright happy path 与掉线恢复；完整 LiveRAG 回归。
 
-**验收标准：** 单机环境可完成 10–20 分钟面试；FastAPI、SQLAlchemy/SQLite、LiveKit 和 LightRAG 全链路跑通；没有 PostgreSQL、Alembic、Redis、Background Worker 或用户系统依赖。
+**验收标准：** 单机环境可完成 10–20 分钟面试；FastAPI、SQLAlchemy/SQLite、LiveKit 和 LightRAG 全链路跑通；没有 PostgreSQL、Alembic、Redis、Background Worker 或 MCP 依赖。
 
 **阶段门槛：** 本阶段完成前不得开始 Alembic/PostgreSQL 接入。
 
@@ -560,11 +580,11 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 
 **验收标准：** 同一业务测试契约在 SQLite 和 PostgreSQL 通过；部署配置使用 PostgreSQL，本地仍可使用 SQLite。
 
-**阶段门槛：** 本阶段不引入 Redis、Background Worker、用户隔离、配额或公网开放；完成后才能进入第三步。
+**阶段门槛：** 本阶段不引入 Redis、Background Worker 或 MCP；完成后才能进入第三步。
 
-### 第三步：Redis + Background Worker
+### 第三步：Redis + Background Worker + MCP
 
-**目标：** 在 PostgreSQL 成为可靠业务数据库后，引入 Redis 和一套 Background Worker，把耗时准备与报告任务移出 FastAPI 请求和实时 LiveKit 主链路。
+**目标：** 在 PostgreSQL 成为可靠业务数据库后，引入 Redis 和一套 Background Worker，把耗时准备与报告任务移出 FastAPI 请求和实时 LiveKit 主链路，并在后台准备任务中接入可降级的牛客 MCP 面经增强。
 
 **修改文件：** `pyproject.toml`、settings、Compose、FastAPI lifespan、Interview Application Service、任务状态 API 和计划/报告前端轮询。
 
@@ -583,69 +603,80 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 
 **验收标准：** FastAPI 重启后 Job 状态仍在 PostgreSQL；Redis 重启不会丢失已完成业务结果；MCP 不出现在实时调用日志；Worker 故障不破坏基础实时面试。
 
-**阶段门槛：** 本阶段仍不实现用户隔离、配额或公网开放；完成后才能进入第四步。
+**阶段门槛：** Redis/Worker 重启、MCP 降级和 PostgreSQL 持久化任务状态全部通过后，才能进入第四步。
 
-### 第四步：用户隔离、配额、并发和公网部署
-
-**目标：** 在数据库、任务和实时链路稳定后，把单用户系统升级为可部署到公网、支持多个独立账号的产品 MVP。
-
-**修改文件：** 认证 settings/middleware、全部 Interview/RAG API 查询、SQLAlchemy models 和 Alembic migrations、LiveKit token route、Redis coordination、Compose/反向代理和前端登录态。
-
-**新增文件：** 用户/身份关联模型、resource ownership service、usage ledger、quota service、rate limiter、并发面试控制、越权测试和公网部署文档。
-
-- [ ] 接入简单账号身份，核心资源通过 `user_id` 归属；不引入 Organization、Team 或通用 Tenant 层。
-- [ ] 所有按 ID 读取/修改的 Interview、Session、Attempt、Answer、Report、Job、知识库和文档同时校验资源所有权。
-- [ ] 记录 LLM 输入/输出 Token、Embedding 调用、STT/TTS 音频秒数、面试时长、任务次数和失败重试。
-- [ ] PostgreSQL 保存永久用量，Redis 保存短周期计数；实现用户/IP 限流、并发面试上限和异步任务配额。
-- [ ] LiveKit token 只能绑定当前用户有权访问的 Session/Attempt/room，浏览器不能指定任意 Agent 或 room。
-- [ ] 增加并发 resume、重复 final transcript、过期 version、重复 Job 和资源耗尽测试。
-- [ ] 完成 HTTPS、密钥管理、持久化卷、健康检查、日志脱敏、备份恢复和 Docker Compose 公网部署验收。
-
-**测试：** 越权访问矩阵、用户数据隔离、限流/配额、并发状态迁移、Token/音频用量、LiveKit token ownership、Redis 故障降级和公网 E2E。
-
-**验收标准：** 两个账号的数据和实时房间互不可见；并发事件不会覆盖状态；超额请求得到明确错误；公网环境可完成准备、面试和报告闭环。
-
-**非目标：** 支付、套餐、复杂 RBAC、组织租户、Kafka、Kubernetes 和微服务拆分。
-
-### 后续增强 A：长期能力画像与评估系统
-
-**前置条件：** 严格在第四步完成后开始。
+### 第四步：长期能力画像
 
 **目标：** 跨面试积累可解释 SkillProgress，建立评价校准、趋势分析和训练闭环。
 
 - [ ] 定义技能 taxonomy、证据衰减和置信度更新规则。
-- [ ] SkillProgress 只由已持久化评价更新，并可回溯来源。
+- [ ] `SkillProgress` 以 `candidate_profile_id` 关联当前候选人画像，至少保存 `skill`、`attempts`、`average_score`、`latest_score`、`weak_points`、`confidence`、`source_evaluation_ids` 和 `updated_at`。
+- [ ] SkillProgress 只由已持久化 AnswerEvaluation 更新，并能通过 `source_evaluation_ids` 回溯来源。
+- [ ] Planner 读取历史 SkillProgress，为下一次面试调整题目权重、难度、薄弱点复测和已掌握知识点抽查。
 - [ ] 建立专家标注样本和 prompt/model 回归门槛。
 - [ ] 展示趋势、置信度和推荐训练题。
 - [ ] 增加成本、延迟、评价失败和分布漂移监控。
 
-**测试与验收：** 覆盖历史聚合、报告幂等、时间衰减、评价一致性、版本对比和进度页 E2E；分数变化必须有证据和版本解释。
+**测试：** 覆盖多场 Interview 聚合、不同 CandidateProfile 边界、报告幂等、时间衰减、评价一致性、版本对比，以及 Planner 调整策略与进度页 E2E。
 
-### 后续增强 B：PI Agent / GitHub 项目分析（可选，非 MVP）
+**验收标准：** 同一 CandidateProfile 的历史评价可形成可追溯能力趋势，并能实际影响下一次计划；不同 CandidateProfile 的材料和能力记录不混合；分数变化有评价来源和版本解释。
+
+### 可选增强：PI Agent / GitHub 项目分析
 
 **前置条件：** 严格在第四步完成后开始。
 
-**目标：** 在用户明确授权后分析 GitHub 仓库，生成代码级、可引用的问题。
+**目标：** 在操作者明确许可后分析 GitHub 仓库，生成代码级、可引用的问题。
 
-**修改文件：** planner 的可选输入接口、授权设置、计划/报告 UI 和安全策略。
+**修改文件：** planner 的可选输入接口、仓库访问许可设置、计划/报告 UI 和安全策略。
 
-**新增文件：** `liverag/interview/code_intelligence/` 下的 provider、repository sandbox、structure analyzer、commit analyzer、question synthesizer，以及授权回调/API、测试 fixtures。
+**新增文件：** `liverag/interview/code_intelligence/` 下的 provider、repository sandbox、structure analyzer、commit analyzer、question synthesizer，以及仓库访问回调/API、测试 fixtures。
 
-- [ ] 使用只读、最小 scope GitHub 授权，支持撤销和数据删除。
+- [ ] 使用只读、最小 scope GitHub 访问凭据，支持撤销和数据删除。
 - [ ] 对仓库大小、文件类型、二进制、submodule 和 secret 扫描设限。
 - [ ] 分析 README、目录、关键代码和 commit，不执行不可信仓库代码。
 - [ ] 生成带 file/line/commit 引用的实现决策问题。
 - [ ] 通过统一 CodeIntelligenceProvider 接入 Planner，不耦合具体 PI Agent。
 
-**测试：** 小型 fixture repos、恶意仓库、超大仓库截断、secret 遮蔽、引用准确率、授权撤销和降级。
+**测试：** 小型 fixture repos、恶意仓库、超大仓库截断、secret 遮蔽、引用准确率、访问撤销和降级。
 
-**验收标准：** 能提出类似“为什么采用 workspace 隔离而非 metadata filter”的代码级问题；每题有稳定代码引用；功能关闭或分析失败不影响四步主流程。
+**验收标准：** 能提出类似“为什么采用 workspace 隔离而非 metadata filter”的代码级问题；每题有稳定代码引用；功能关闭或分析失败不影响主实施路线。
 
 **Git commit 建议：** `feat(code-intelligence): add sandboxed repository analysis provider`；`feat(interview): generate code-grounded project questions`。
 
 ---
 
-## 14. 最终检查
+## 14. 项目完成定义
+
+当前项目在满足以下全部条件时完成：
+
+1. LiveRAG V0 保持稳定。
+2. 支持上传简历、项目资料和 JD。
+3. 支持生成 CandidateProfile 和 InterviewPlan。
+4. 支持实时语音模拟面试。
+5. 支持状态机控制。
+6. 支持结构化题库。
+7. 支持 Rubric / expected_points 评价。
+8. 支持动态追问。
+9. 支持面试报告。
+10. 支持 Alembic + PostgreSQL。
+11. 支持 Redis + Background Worker。
+12. 支持牛客 MCP 面经增强。
+13. 支持长期能力画像。
+14. 支持完整测试和本地/受控环境演示。
+
+当前验收不包含身份主体注册与登录、不同操作者的数据权限边界、面向多个租用主体的架构、基于角色的访问控制、按主体的用量上限与收费、面向陌生访问者的互联网入口、运营级并发承载、第三方登录协议、支付或套餐。项目允许他人在本地或受控演示环境中操作，但系统不保证不同操作者之间的数据隔离。
+
+### 最终描述
+
+面向 AI、LLM、RAG 和 Agent 开发者的单用户实时语音模拟面试与长期训练系统。系统基于简历、项目资料、JD、结构化题库和外部面经生成个性化面试计划，通过状态机控制实时语音面试流程，并基于 Rubric 和 expected_points 生成可追溯评价、报告和长期能力画像。
+
+### Future Work
+
+未来若需要面向陌生用户公网开放，可再增加认证、资源归属、限流和隐私保护。该方向不进入当前实施路线或验收标准。
+
+---
+
+## 15. 设计校验
 
 ### 1. 为什么不是简单语音 ChatGPT？
 

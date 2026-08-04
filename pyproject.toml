@@ -32,6 +32,7 @@ liverag-agent = "liverag.main:main"
 liverag-api = "liverag.api.main:main"
 liverag-rag-service = "liverag.rag.cli:main"
 liverag-build-question-bank = "liverag.interview.question_bank.cli:main"
+liverag-interview-agent = "liverag.interview_main:main"
 
 [dependency-groups]
 dev = [

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from liverag.interview.evaluator import AnswerEvaluator
@@ -31,11 +32,16 @@ from liverag.interview.orchestrator import (
     InterviewOrchestrator,
     InterviewTransitionResult,
 )
+from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.records import (
+    InterviewAnswerRecord,
+    InterviewAttemptRecord,
+    InterviewEventRecord,
     InterviewRecord,
     InterviewReportRecord,
     InterviewSessionRecord,
     ReportState,
+    generate_id,
 )
 from liverag.interview.report import InterviewReportBuilder
 from liverag.interview.repository import InterviewRepository, RecordNotFoundError
@@ -53,6 +59,15 @@ class EvaluationDecisionResult:
     transitions: tuple[InterviewTransitionResult, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedInterviewResult:
+    """创建页面一次提交后得到的 Interview、计划和 Session。"""
+
+    interview: InterviewRecord
+    plan: InterviewPlan
+    session: InterviewSessionRecord
+
+
 class InterviewService:
     """提供面试管理、实时状态编排、评价决策和报告生成用例。"""
 
@@ -60,15 +75,51 @@ class InterviewService:
         self,
         repository: InterviewRepository,
         evaluator: AnswerEvaluator | None = None,
+        question_bank: QuestionBank | None = None,
     ):
         self.repository = repository
         self.evaluator = evaluator
         self.orchestrator = InterviewOrchestrator(repository)
         self.follow_up_policy = FollowUpPolicy()
         self.report_builder = InterviewReportBuilder(repository)
+        self.question_bank = question_bank
 
     def create_interview(self, *, title: str, config: InterviewConfig) -> InterviewRecord:
         return self.repository.create_interview(title=title, config=config)
+
+    def create_prepared_interview(
+        self,
+        *,
+        title: str,
+        config: InterviewConfig,
+    ) -> PreparedInterviewResult:
+        """从题库选题，创建已经可以直接进入 Live 页面的面试和 Session。"""
+
+        question_bank = self.question_bank or QuestionBank.from_file(
+            Path(__file__).parent / "question_bank" / "data" / "question_bank.v1.json"
+        )
+        questions = question_bank.select_questions(config)
+        plan = InterviewPlan(
+            id=generate_id("plan"),
+            title=title,
+            introduction="欢迎参加本次模拟面试。我会逐题提问，并根据你的回答进行追问。",
+            config=config,
+            questions=questions,
+            closing_message="本次模拟面试已经结束，报告正在生成。",
+            plan_version=question_bank.version,
+        )
+        created = self.create_interview(title=title, config=config)
+        interview = self.save_interview_plan(
+            interview_id=created.id,
+            plan=plan,
+            expected_version=created.version,
+        )
+        session = self.create_session(interview.id)
+        return PreparedInterviewResult(
+            interview=interview,
+            plan=plan,
+            session=session,
+        )
 
     def get_interview(self, interview_id: str) -> InterviewRecord:
         return self.repository.get_interview(interview_id)
@@ -88,6 +139,44 @@ class InterviewService:
 
     def create_session(self, interview_id: str) -> InterviewSessionRecord:
         return self.repository.create_session(interview_id=interview_id)
+
+    def get_session(self, session_id: str) -> InterviewSessionRecord:
+        """读取一场实时面试当前进行到哪里。"""
+
+        return self.repository.get_session(session_id)
+
+    def create_attempt(self, session_id: str) -> InterviewAttemptRecord:
+        """为一次进入 LiveKit 房间创建连接记录和唯一房间名。"""
+
+        self.repository.get_session(session_id)
+        attempt_id = generate_id("attempt")
+        room_name = f"interview-{session_id[-16:]}-{attempt_id[-16:]}"
+        return self.repository.create_attempt(
+            session_id=session_id,
+            room_name=room_name,
+            attempt_id=attempt_id,
+        )
+
+    def get_attempt(self, attempt_id: str) -> InterviewAttemptRecord:
+        """读取一次 LiveKit 连接的当前状态。"""
+
+        return self.repository.get_attempt(attempt_id)
+
+    def list_events(self, session_id: str) -> list[InterviewEventRecord]:
+        """按发生顺序返回 Session 的状态变化记录。"""
+
+        return self.repository.list_events(session_id=session_id)
+
+    def list_answers(self, session_id: str) -> list[InterviewAnswerRecord]:
+        """返回 Session 已经收到的所有最终回答。"""
+
+        return self.repository.list_answers(session_id=session_id)
+
+    def get_report(self, session_id: str) -> InterviewReportRecord | None:
+        """读取 Session 的报告；尚未生成报告时返回 None。"""
+
+        self.repository.get_session(session_id)
+        return self.repository.get_report_by_session(session_id)
 
     def transition(
         self,
@@ -124,10 +213,11 @@ class InterviewService:
         """生成或恢复评价，并按照决策自动推进 Session 状态。"""
 
         try:
-            #获取评价
+            #幂等设计：已有评价，直接复用评价
             evaluation = self.repository.get_evaluation(answer_id)
         except RecordNotFoundError:
             #评价还未生成
+            #没配置AnswerEvaluator
             if self.evaluator is None:
                 raise RuntimeError("InterviewService 尚未配置 AnswerEvaluator") from None
             #生成评价
@@ -247,4 +337,4 @@ class InterviewService:
             raise
 
 
-__all__ = ["EvaluationDecisionResult", "InterviewService"]
+__all__ = ["EvaluationDecisionResult", "InterviewService", "PreparedInterviewResult"]
