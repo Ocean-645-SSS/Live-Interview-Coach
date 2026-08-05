@@ -1,5 +1,4 @@
 """Interview Coach 的 FastAPI 路由与应用服务依赖，相当于Controller层
-
 约定只能调用service"""
 
 from __future__ import annotations

@@ -166,7 +166,7 @@ class InterviewConfig(StrictModel):
     language: NonEmptyText = "zh-CN"
     question_count: int = Field(default=5, ge=1, le=30) #问题数量
     max_follow_ups_per_question: int = Field(default=2, ge=0, le=5) #最多追问次数
-    answer_timeout_seconds: int = Field(default=180, ge=15, le=900) #答案超时时间
+    answer_timeout_seconds: int = Field(default=90, ge=15, le=900) #答案超时时间
     timeout_action: TimeoutAction = TimeoutAction.PAUSE #超时动作
     candidate_kb_id: NonEmptyText = "default" #固定使用不可删除的个人简历知识库
     target_kb_id: str | None = None    #目标岗位对应的知识库

@@ -236,17 +236,24 @@ class InterviewService:
             raise ValueError("目标岗位知识库 ID 不能为空")
 
         history: list[InterviewReportHistoryItem] = []
+        #遍历所有面试
         for interview in self.repository.list_interviews(limit=200):
+            #获取面试配置
             config = self.repository.get_interview_config(interview.id)
             if config.target_kb_id != clean_kb_id:
                 continue
+
+            #遍历当前面试对应的所有session
             for session in self.repository.list_sessions(
                 interview_id=interview.id,
                 limit=100,
             ):
+                #得到当前session对应的报告
                 report = self.repository.get_report_by_session(session.id)
                 if report is None:
                     continue
+
+                #加入历史
                 history.append(
                     InterviewReportHistoryItem(
                         interview_id=interview.id,

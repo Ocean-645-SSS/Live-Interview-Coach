@@ -297,22 +297,27 @@ class QuestionBank:
         只需属于其中一个分类；如果同时指定 difficulty，则还必须匹配该难度。
         """
 
+        #处理过的一级分类
         normalized_categories = (
             {_normalize_topic(category) for category in categories}
             if categories is not None
             else None
         )
+        #处理过的二级分类
         normalized_subcategories = (
             {_normalize_topic(subcategory) for subcategory in subcategories}
             if subcategories is not None
             else None
         )
+        #处理过的主题
         normalized_topics = (
             {_normalize_topic(topic) for topic in topics}
             if topics is not None
             else None
         )
+        #难度
         difficulty_set = set(difficulties) if difficulties is not None else None
+        #问题考察类型
         question_type_set = set(question_types) if question_types is not None else None
 
         result: list[InterviewQuestion] = []
@@ -352,10 +357,10 @@ class QuestionBank:
         self,
         config: InterviewConfig,
         *,
-        relevance_text: str | None = None,
-        explicitly_requested_topics: Iterable[str] = (),
-        required_relevance_topics: Iterable[str] = (),
-        selection_seed: str | None = None,
+        relevance_text: str | None = None,  #从个人简历+岗位JD提取出的文本
+        explicitly_requested_topics: Iterable[str] = (),    #用户明确要求考察的主题
+        required_relevance_topics: Iterable[str] = (),  #必须命中的岗位主题
+        selection_seed: str | None = None,  #同一场面试可以复现，不同场面试不一定每次按照同样的顺序提问
     ) -> list[InterviewQuestion]:
         """根据面试配置确定性选择题目并重新生成连续执行顺序。
 
@@ -377,9 +382,11 @@ class QuestionBank:
             _normalize_topic(topic): weight
             for topic, weight in config.topic_weights.items()
         }
+        #用户要求的主题
         explicitly_requested_labels = {
             _normalize_topic(topic) for topic in explicitly_requested_topics
         }
+        #与岗位相关的主题
         required_relevance_labels = {
             _normalize_topic(topic) for topic in required_relevance_topics
         }
@@ -411,23 +418,31 @@ class QuestionBank:
 
             #返回排序键：匹配主题总权重越高越优先（负值表示降序），难度距离越小越优先，题目 ID 保证稳定性
             tie_breaker = question.id
+            #随机打乱id，多道题评分相同的时候，决定哪道题优先入选
             if selection_seed:
                 tie_breaker = hashlib.sha256(
                     f"{selection_seed}:{question.id}".encode("utf-8")
                 ).hexdigest()
             return (-topic_score, difficulty_distance, tie_breaker)
 
+        #对候选题正式排序
         ranked = sorted(candidates, key=selection_key)
+
+        #如果有上传的个性化文本
         if relevance_text:
+            #必须满足3个条件
             personalized = [
                 question
                 for question in ranked
+                #必须命中具体技术，而不是泛泛而谈agent
                 if _has_specific_topic_match(
                     question,
                     normalized_weights,
                     explicitly_requested_labels,
                 )
+                #至少命中岗位相关要求
                 and _matches_required_relevance(question, required_relevance_labels)
+                #题目中的特定技术名词必须在简历或 JD 中出现
                 and _specific_terms_are_supported(question, relevance_text)
             ]
             if len(personalized) < config.question_count:
@@ -439,7 +454,7 @@ class QuestionBank:
 
         # 排序问题（sort默认从小到大排序），并且截断多余问题
         selected = ranked[: config.question_count]
-        # 选中的题仍然是最相关的一组，但每场面试改变执行顺序，避免开场题固定。
+        # 题目已经选完后，改变这些题的实际提问顺序。
         if selection_seed:
             selected = sorted(
                 selected,
@@ -447,20 +462,20 @@ class QuestionBank:
                     f"order:{selection_seed}:{question.id}".encode("utf-8")
                 ).hexdigest(),
             )
+
         return [
             question.model_copy(update={"order": index})
             for index, question in enumerate(selected, start=1)
         ]
 
 
-_TECHNICAL_TERM = re.compile(r"\b[A-Z][A-Za-z0-9+#.-]{2,}\b")
-
-
 def _matches_required_relevance(
     question: InterviewQuestion,
     required_labels: set[str],
 ) -> bool:
-    """有目标岗位时，题目必须至少命中一个 JD 技能，而不只与简历沾边。"""
+    """收集题目的一级分类、二级分类和 topics，然后与 JD 要求的标签两两比较，
+    只要任意两个字符串存在包含关系，就认为题目与岗位相关；
+    如果没有 JD 标签，则直接放行。"""
 
     if not required_labels:
         return True
@@ -470,6 +485,8 @@ def _matches_required_relevance(
     }
     if question.subcategory:
         question_labels.add(_normalize_topic(question.subcategory))
+
+    #所有 JD 标签和题目标签进行两两比较，只要有一对存在包含关系，这道题就算匹配岗位
     return any(
         required in label or label in required
         for required in required_labels
@@ -478,36 +495,56 @@ def _matches_required_relevance(
 
 
 def _has_specific_topic_match(
-    question: InterviewQuestion,
-    normalized_weights: dict[str, float],
-    explicitly_requested_labels: set[str],
-) -> bool:
-    """画像至少要命中具体主题；宽泛的 Agent 等一级分类不能单独入选。"""
+    question,
+    normalized_weights,
+    explicitly_requested_labels,
+):
+    """判断这道题是否真实命中了用户画像中的具体技术，避免仅仅因为一级分类是agent就选中"""
 
-    specific_labels = {_normalize_topic(topic) for topic in question.topics}
+    # 1. 检查二级分类和具体 topics
+    specific_labels = set(question.topics)
+
     if question.subcategory:
-        specific_labels.add(_normalize_topic(question.subcategory))
-    if any(normalized_weights.get(label, 0.0) > 0 for label in specific_labels):
-        return True
-    category = _normalize_topic(question.category)
-    if category not in {"agent", "未分类"} and normalized_weights.get(category, 0.0) > 0:
-        return True
-    return (
+        specific_labels.add(question.subcategory)
+
+    for label in specific_labels:
+        if normalized_weights.get(label, 0.0) > 0:
+            return True
+
+    # 2. 检查一级分类
+    category = question.category
+
+    if category != "agent" and category != "未分类":
+        if normalized_weights.get(category, 0.0) > 0:
+            return True
+
+    # 3. Agent 等宽泛分类，只有用户明确要求时才允许通过
+    if (
         category in explicitly_requested_labels
         and normalized_weights.get(category, 0.0) > 0
-    )
+    ):
+        return True
 
+    return False
+
+
+#以大写英文字母开头，后面至少还有两个合法字符的单词
+_TECHNICAL_TERM = re.compile(r"\b[A-Z][A-Za-z0-9+#.-]{2,}\b")
 
 def _specific_terms_are_supported(
     question: InterviewQuestion,
     relevance_text: str,
 ) -> bool:
-    """题目中的特定实现名必须在简历或 JD 中出现，避免考察资料外的私有约定。"""
+    """从题目正文和考察目标里找出“看起来像具体技术名”的词，然后检查这些词是否全部出现在简历或 JD 中"""
 
+    #提取题目中的技术关键词
     specific_terms = _TECHNICAL_TERM.findall(
         f"{question.question_text}\n{question.objective}"
     )
+    #把岗位JD+个人简历转为小写
     normalized_context = relevance_text.casefold()
+
+    #检查所有技术词是否在JD+个人简历出现
     return all(term.casefold() in normalized_context for term in specific_terms)
 
 

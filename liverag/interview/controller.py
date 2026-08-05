@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 
-from liverag.interview.orchestrator import AnswerReceivedCommand
+from liverag.interview.orchestrator import AnswerReceivedCommand, AnswerReceivedResult
 from liverag.interview.records import InterviewSessionRecord, generate_id
 from liverag.interview.schemas import InterviewState
 from liverag.interview.service import EvaluationDecisionResult, InterviewService
@@ -126,7 +126,13 @@ class InterviewAgentController:
             self._question_text(result.session),  # 第一个问题
         )
 
-    def prompt_spoken(self, kind: InterviewSpeechKind) -> InterviewSessionRecord:
+    def prompt_spoken(
+        self,
+        kind: InterviewSpeechKind,
+        *,
+        answer_started_at: str | None = None,
+        answer_deadline_at: str | None = None,
+    ) -> InterviewSessionRecord:
         """题目或追问播放完毕后，把 Session 切换到等待回答状态。"""
 
         # 当前语音层要播放问题
@@ -142,7 +148,22 @@ class InterviewAgentController:
             raise ValueError("只有题目或追问播放完毕后，才需要等待用户回答")
 
         # 更新状态
-        return self._transition(event_type).session
+        return self._service.transition(
+            session_id=self._session_id,
+            event_id=generate_id("event"),
+            event_type=event_type,
+            payload={
+                "attempt_id": self._attempt_id,
+                "answer_started_at": answer_started_at,
+                "answer_deadline_at": answer_deadline_at,
+                "answer_timeout_seconds": self._get_plan().config.answer_timeout_seconds,
+            },
+        ).session
+
+    def answer_timeout_seconds(self) -> int:
+        """Return the frozen plan's effective timeout for this session."""
+
+        return self._get_plan().config.answer_timeout_seconds
 
     async def receive_final_answer(
         self,
@@ -152,29 +173,44 @@ class InterviewAgentController:
         ended_at: str | None = None,
         answer_disposition: str = "ANSWERED",
     ) -> AnswerTurnResult:
-        """保存本轮回答并评价；answer_disposition 用来区分正常作答和不知道答案。"""
+        """Compatibility wrapper: persist first, then perform evaluation."""
 
-        # 整理用户说出的最终答案格式
+        received = self.submit_answer(
+            transcript,
+            started_at=started_at,
+            ended_at=ended_at,
+            answer_disposition=answer_disposition,
+        )
+        return await self.evaluate_submitted_answer(received)
+
+    def submit_answer(
+        self,
+        transcript: str,
+        *,
+        started_at: str | None = None,
+        ended_at: str | None = None,
+        answer_disposition: str = "ANSWERED",
+        event_id: str | None = None,
+    ) -> AnswerReceivedResult:
+        """Atomically persist an answer and move LISTENING to EVALUATING."""
+
         clean_transcript = transcript.strip()
         if not clean_transcript:
             raise ValueError("最终回答不能为空")
-
         session = self._service.repository.get_session(self._session_id)
         if session.current_question_id is None:
             raise ValueError("当前 Session 没有正在回答的题目")
 
         now = datetime.now(timezone.utc).isoformat()
-        # 列出当前问题所有答案
         previous_answers = self._service.repository.list_answers(
             session_id=self._session_id,
             question_id=session.current_question_id,
         )
-        # 原子更新：session+event+answer
-        received = self._service.receive_answer(
+        return self._service.receive_answer(
             AnswerReceivedCommand(
                 session_id=self._session_id,
                 attempt_id=self._attempt_id,
-                event_id=generate_id("event"),
+                event_id=event_id or generate_id("event"),
                 transcript=clean_transcript,
                 answer_number=len(previous_answers) + 1,
                 started_at=started_at or now,
@@ -182,9 +218,14 @@ class InterviewAgentController:
                 payload={"answer_disposition": answer_disposition},
             )
         )
-        # 生成回答评价
-        evaluation_result = await self._service.evaluate_answer(received.answer.id)
 
+    async def evaluate_submitted_answer(
+        self,
+        received: AnswerReceivedResult,
+    ) -> AnswerTurnResult:
+        """Evaluate an answer that was already persisted by submit_answer."""
+
+        evaluation_result = await self._service.evaluate_answer(received.answer.id)
         return AnswerTurnResult(
             evaluation_result=evaluation_result,
             next_speech=self._next_speech(evaluation_result),
@@ -271,6 +312,7 @@ class InterviewAgentController:
             session_id=self._session_id,
             event_id=generate_id("event"),
             event_type=event_type,
+            payload={"attempt_id": self._attempt_id},
         )
 
 
