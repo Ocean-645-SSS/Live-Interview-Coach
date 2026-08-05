@@ -25,10 +25,11 @@ TTS：DashScope
 """
 
 from livekit.agents import AgentSession
-from livekit.plugins import openai, silero, volcengine
+from livekit.plugins import openai, silero
 
 from liverag.agent.dashscope_tts import DashScopeRealtimeTTS
 from liverag.agent.turn_detector import SemanticTurnDetector
+from liverag.agent.volcengine_stt import AuditedBigModelSTT
 from liverag.config.settings import AppSettings
 
 
@@ -49,7 +50,7 @@ def build_agent_session(settings: AppSettings) -> AgentSession:
 
     return AgentSession(
         # STT:用户语音转为文字
-        stt=volcengine.BigModelSTT(
+        stt=AuditedBigModelSTT(
             # STT基础配置
             app_id=voice.stt_app_id,
             access_token=voice.stt_access_token,

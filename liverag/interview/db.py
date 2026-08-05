@@ -12,6 +12,13 @@ from sqlalchemy.orm import Session, sessionmaker
 __all__ = ["create_session_factory", "create_sqlite_engine", "session_scope"]
 
 
+def create_database_engine(database_url: str, *, echo=False):
+    return create_engine(
+        database_url,
+        echo=echo,
+        future=True,
+    )
+
 def create_sqlite_engine(database_path: Path, *, echo: bool = False) -> Engine:
     """创建面向 FastAPI 使用场景的 SQLite engine：管理数据库连接"""
 

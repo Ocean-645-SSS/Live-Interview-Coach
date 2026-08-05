@@ -573,13 +573,38 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 
 **目标：** 在第一步 SQLAlchemy 模型和 repository 稳定后，建立正式迁移体系，并让同一业务代码在 PostgreSQL 上等价运行。
 
-- [ ] 以第一步 SQLAlchemy metadata 建立 Alembic baseline；不得从原生建表 SQL 维护第二套模型。
-- [ ] 配置 SQLite 开发 URL 和 PostgreSQL 集成/部署 URL，repository 不按数据库类型分叉业务逻辑。
-- [ ] 在 PostgreSQL 上运行 `alembic upgrade head`，验证空库初始化和连续升级。
+- [√] 以第一步 SQLAlchemy metadata 建立 Alembic baseline；不得从原生建表 SQL 维护第二套模型。
+- [√] 配置 SQLite 开发 URL 和 PostgreSQL 集成/部署 URL，repository 不按数据库类型分叉业务逻辑。
+- [√] 在 PostgreSQL 上运行 `alembic upgrade head`，验证空库初始化和连续升级。
 - [ ] 验证事件 + Session + Answer 原子事务、唯一幂等、外键、UTC 时间和 `version` 条件更新。
-- [ ] 为现有 SQLite 数据提供一次性导出/导入路径，或明确标记可重建的开发数据。
-- [ ] Compose 增加 PostgreSQL 健康检查和持久化卷；FastAPI/Agent 只等待 ready，不管理数据库进程。
+- [] 为现有 SQLite 数据提供一次性导出/导入路径，或明确标记可重建的开发数据。
+- [√] Compose 增加 PostgreSQL 健康检查和持久化卷；FastAPI/Agent 只等待 ready，不管理数据库进程。
 - [ ] CI 保留 SQLite 快速测试，并增加真实 PostgreSQL 的 Alembic、repository、并发更新和 API 集成测试。
+V2 已完成：
+- PostgreSQL 持久化
+- Alembic 数据库迁移
+- SQLite/PostgreSQL 可切换
+- SQLAlchemy Repository 支持生产数据库
+
+开发环境：
+- SQLite 作为默认本地数据库
+- 数据可通过 Alembic 重建
+- 不保证旧开发数据迁移
+
+生产/部署环境：
+- PostgreSQL
+- 通过 Alembic upgrade head 初始化
+
+## Database Strategy
+
+Development:
+- SQLite
+- 数据可通过 Alembic 重建
+- 不保证历史开发数据迁移
+
+Production:
+- PostgreSQL
+- 使用 Alembic upgrade head 初始化
 
 **验收标准：** 同一业务测试契约在 SQLite 和 PostgreSQL 通过；部署配置使用 PostgreSQL，本地仍可使用 SQLite。
 

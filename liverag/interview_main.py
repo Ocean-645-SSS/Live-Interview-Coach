@@ -28,18 +28,16 @@ from liverag.agent.interview_assistant import (
 from liverag.agent.providers import build_agent_session
 from liverag.config.settings import load_app_settings, load_environment
 from liverag.interview.controller import InterviewAgentController
-from liverag.interview.db import create_session_factory, create_sqlite_engine
+from liverag.interview.db import create_database_engine, create_session_factory
 from liverag.interview.evaluator import (
     AnswerEvaluator,
     OpenAIAnswerEvaluationProvider,
     OpenAIAnswerEvaluationSettings,
 )
-from liverag.interview.models import Base as InterviewBase
 from liverag.interview.records import AttemptState
 from liverag.interview.schemas import InterviewState
 from liverag.interview.service import InterviewService
 from liverag.interview.sqlalchemy_repository import SQLAlchemyInterviewRepository
-from liverag.runtime.paths import build_runtime_paths
 
 logger = logging.getLogger("liverag.interview.worker")
 server = AgentServer()  # 语音agent的任务服务器
@@ -530,12 +528,10 @@ def build_interview_service() -> InterviewService:
 
     #加载AppSettings配置
     settings = load_app_settings()
-    #派生运行路径
-    paths = build_runtime_paths(settings.user_data_dir)
     #数据库引擎
-    engine = create_sqlite_engine(paths.db_file)
-    #创建interview相关数据库表
-    InterviewBase.metadata.create_all(engine)
+    engine = create_database_engine(
+        settings.interview_database.url
+    )
 
     #SQLite Repository
     repository = SQLAlchemyInterviewRepository(create_session_factory(engine))

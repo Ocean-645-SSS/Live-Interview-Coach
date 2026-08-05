@@ -138,5 +138,28 @@ services:
       LIVERAG_API_BASE: http://liverag-api:9821
       ALLOW_INSECURE_TOKEN_API: ${ALLOW_INSECURE_TOKEN_API:-true}
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: liverag-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: interview_coach
+      POSTGRES_USER: interview_coach
+      POSTGRES_PASSWORD: interview_coach_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - liverag-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U interview_coach -d interview_coach"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   liverag-data:
+  liverag-postgres-data:

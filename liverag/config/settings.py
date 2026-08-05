@@ -1010,6 +1010,18 @@ def public_context_model_config(config: ContextModelSettings) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
+class InterviewDatabaseSettings:
+    """Interview 模块数据库配置。"""
+
+    url: str = field(
+        default_factory=lambda: _str_env(
+            "INTERVIEW_DATABASE_URL",
+            "sqlite:///~/.LiveRAG/liverag.db",
+        )
+    )
+
+
+@dataclass(frozen=True)
 class AppSettings:
     """LiveRAG Agent 统一配置"""
 
@@ -1024,6 +1036,9 @@ class AppSettings:
     rag: RagClientSettings = field(default_factory=load_rag_client_settings)
     context_model: ContextModelSettings = field(default_factory=load_context_model_settings)
     api: ApiSettings = field(default_factory=load_api_settings)
+    interview_database: InterviewDatabaseSettings = field(
+        default_factory=InterviewDatabaseSettings
+    )
 
 
 def load_app_settings() -> AppSettings:

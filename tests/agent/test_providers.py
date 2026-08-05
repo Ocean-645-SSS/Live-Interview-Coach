@@ -21,8 +21,8 @@ def test_build_agent_session_uses_semantic_turn_detection(
     monkeypatch.setattr(providers, "SemanticTurnDetector", FakeTurnDetector)
     monkeypatch.setattr(providers, "AgentSession", FakeAgentSession)
     monkeypatch.setattr(
-        providers.volcengine,
-        "BigModelSTT",
+        providers,
+        "AuditedBigModelSTT",
         lambda **kwargs: SimpleNamespace(kind="stt", options=kwargs),
     )
     monkeypatch.setattr(

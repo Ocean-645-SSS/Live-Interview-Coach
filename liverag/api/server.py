@@ -48,13 +48,12 @@ from liverag.config.settings import (
     merge_runtime_rag_config,
 )
 from liverag.context.store import ContextStore
-from liverag.interview.db import create_session_factory, create_sqlite_engine
+from liverag.interview.db import create_database_engine, create_session_factory
 from liverag.interview.evaluator import (
     AnswerEvaluator,
     OpenAIAnswerEvaluationProvider,
     OpenAIAnswerEvaluationSettings,
 )
-from liverag.interview.models import Base as InterviewBase
 from liverag.interview.profile_service import InterviewProfileService
 from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.service import InterviewService
@@ -118,9 +117,9 @@ async def lifespan(
 app=FastAPI(title="LiveRAG Agent API",version="0.1.0",lifespan=lifespan)
 
 #创建Interview板块使用的 SQLAlchemy Engine
-interview_engine = create_sqlite_engine(paths.db_file)
-#根据models.py中定义的ORM Model创建还不存在的数据库表
-InterviewBase.metadata.create_all(interview_engine)
+interview_engine = create_database_engine(
+    settings.interview_database.url
+)
 #创建SQLAlchemy Session工厂 -> SQLAlchemy Repository -> Interview Service层
 interview_repository = SQLAlchemyInterviewRepository(
     create_session_factory(interview_engine)
