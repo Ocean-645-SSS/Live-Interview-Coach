@@ -33,6 +33,9 @@ class CreatePreparedInterviewRequest(BaseModel):
 
     title: str = Field(min_length=1)
     config: InterviewConfig
+    target_kb_id: str | None = None     #目标知识库
+    target_company: str | None = None   #目标公司
+    target_role: str | None = None  #目标岗位
 
 
 class SavePlanRequest(BaseModel):
@@ -141,18 +144,34 @@ def create_interview(request: CreateInterviewRequest, service: ServiceDependency
 
 
 @router.post("/prepared")
-def create_prepared_interview(
+async def create_prepared_interview(
     request: CreatePreparedInterviewRequest,
     service: ServiceDependency,
 ):
     """从版本化题库选题，同时创建 Interview、Plan 和 Session。"""
 
-    return _execute(
+    #合并完整面试配置，同时重新校验参数：岗位名称必填
+    config = InterviewConfig.model_validate(
+        {
+            **request.config.model_dump(),
+            "target_kb_id": request.target_kb_id,
+            "target_company": request.target_company,
+            "target_role": request.target_role,
+        }
+    )
+    return await _execute_async(
         lambda: service.create_prepared_interview(
             title=request.title,
-            config=request.config,
+            config=config,
         )
     )
+
+
+@router.get("/reports")
+def list_report_history(target_kb_id: str, service: ServiceDependency):
+    """按公司岗位资料库列出历史面试报告。"""
+
+    return _execute(lambda: service.list_report_history(target_kb_id))
 
 
 @router.get("/{interview_id}")

@@ -19,6 +19,7 @@ FastAPI / LiveKit Agent
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,8 @@ from liverag.interview.orchestrator import (
     InterviewOrchestrator,
     InterviewTransitionResult,
 )
+from liverag.interview.planner import InterviewPlanner
+from liverag.interview.profile_service import InterviewProfileService
 from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.records import (
     InterviewAnswerRecord,
@@ -68,6 +71,22 @@ class PreparedInterviewResult:
     session: InterviewSessionRecord
 
 
+@dataclass(frozen=True, slots=True)
+class InterviewReportHistoryItem:
+    """目标岗位资料页展示的一次历史面试报告。"""
+
+    interview_id: str
+    interview_title: str
+    session_id: str
+    session_state: str
+    report_state: str
+    target_kb_id: str
+    target_company: str | None
+    target_role: str | None
+    completed_at: str | None
+    updated_at: str
+
+
 class InterviewService:
     """提供面试管理、实时状态编排、评价决策和报告生成用例。"""
 
@@ -76,6 +95,7 @@ class InterviewService:
         repository: InterviewRepository,
         evaluator: AnswerEvaluator | None = None,
         question_bank: QuestionBank | None = None,
+        profile_service: InterviewProfileService | None = None,
     ):
         self.repository = repository
         self.evaluator = evaluator
@@ -83,11 +103,12 @@ class InterviewService:
         self.follow_up_policy = FollowUpPolicy()
         self.report_builder = InterviewReportBuilder(repository)
         self.question_bank = question_bank
+        self.profile_service = profile_service
 
     def create_interview(self, *, title: str, config: InterviewConfig) -> InterviewRecord:
         return self.repository.create_interview(title=title, config=config)
 
-    def create_prepared_interview(
+    async def create_prepared_interview(
         self,
         *,
         title: str,
@@ -95,26 +116,55 @@ class InterviewService:
     ) -> PreparedInterviewResult:
         """从题库选题，创建已经可以直接进入 Live 页面的面试和 Session。"""
 
+        #拿到公共题库
         question_bank = self.question_bank or QuestionBank.from_file(
             Path(__file__).parent / "question_bank" / "data" / "question_bank.v1.json"
         )
-        questions = question_bank.select_questions(config)
-        plan = InterviewPlan(
-            id=generate_id("plan"),
+
+        #用户画像+岗位画像
+        candidate_profile = None
+        job_profile = None
+
+        #开始生成画像
+        if self.profile_service is not None:
+            if config.target_kb_id and config.target_role:
+                #个人简历和岗位 JD 互不依赖，同时检索可以缩短等待时间。
+                candidate_profile, job_profile = await asyncio.gather(
+                    self.profile_service.build_candidate_profile(
+                        config.candidate_kb_id
+                    ),
+                    self.profile_service.build_job_profile(
+                        kb_id=config.target_kb_id,
+                        company=config.target_company,
+                        role=config.target_role,
+                    ),
+                )
+            else:
+                candidate_profile = (
+                    await self.profile_service.build_candidate_profile(
+                        config.candidate_kb_id
+                    )
+                )
+        #生成面试顶层计划
+        plan = InterviewPlanner(question_bank).build(
             title=title,
-            introduction="欢迎参加本次模拟面试。我会逐题提问，并根据你的回答进行追问。",
             config=config,
-            questions=questions,
-            closing_message="本次模拟面试已经结束，报告正在生成。",
-            plan_version=question_bank.version,
+            candidate_profile=candidate_profile,
+            job_profile=job_profile,
         )
+
+        #创建interview
         created = self.create_interview(title=title, config=config)
+        #冻结面试计划
         interview = self.save_interview_plan(
             interview_id=created.id,
             plan=plan,
             expected_version=created.version,
         )
+        #创建当前面试session
         session = self.create_session(interview.id)
+
+        # 返回 interview、plan 和 session
         return PreparedInterviewResult(
             interview=interview,
             plan=plan,
@@ -177,6 +227,41 @@ class InterviewService:
 
         self.repository.get_session(session_id)
         return self.repository.get_report_by_session(session_id)
+
+    def list_report_history(self, target_kb_id: str) -> list[InterviewReportHistoryItem]:
+        """列出某个公司岗位资料库关联的全部面试报告。"""
+
+        clean_kb_id = target_kb_id.strip()
+        if not clean_kb_id:
+            raise ValueError("目标岗位知识库 ID 不能为空")
+
+        history: list[InterviewReportHistoryItem] = []
+        for interview in self.repository.list_interviews(limit=200):
+            config = self.repository.get_interview_config(interview.id)
+            if config.target_kb_id != clean_kb_id:
+                continue
+            for session in self.repository.list_sessions(
+                interview_id=interview.id,
+                limit=100,
+            ):
+                report = self.repository.get_report_by_session(session.id)
+                if report is None:
+                    continue
+                history.append(
+                    InterviewReportHistoryItem(
+                        interview_id=interview.id,
+                        interview_title=interview.title,
+                        session_id=session.id,
+                        session_state=session.state.value,
+                        report_state=report.state.value,
+                        target_kb_id=clean_kb_id,
+                        target_company=config.target_company,
+                        target_role=config.target_role,
+                        completed_at=report.completed_at,
+                        updated_at=report.updated_at,
+                    )
+                )
+        return sorted(history, key=lambda item: item.updated_at, reverse=True)
 
     def transition(
         self,

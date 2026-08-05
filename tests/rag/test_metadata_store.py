@@ -96,7 +96,11 @@ def test_initialize_creates_default_knowledge_base(tmp_path: Path):
             ("default",),
         ).fetchone()
 
-    assert row == ("default", "默认知识库", "")
+    assert row == (
+        "default",
+        "个人简历",
+        "固定的个人简历资料库，用于保存当前简历和通用项目材料。",
+    )
 
 
 def test_default_knowledge_base_cannot_be_deleted(tmp_path: Path):
@@ -117,8 +121,8 @@ def test_default_knowledge_base_cannot_be_deleted(tmp_path: Path):
     assert row == ("default",)
 
 
-def test_reinitialize_does_not_overwrite_default_knowledge_base(tmp_path: Path):
-    """测试重新初始化数据库不会覆盖默认知识库的名称和描述。"""
+def test_reinitialize_migrates_default_knowledge_base_to_resume(tmp_path: Path):
+    """旧数据库再次初始化时，把默认库固定迁移为个人简历。"""
     db_path = tmp_path / "liverag.db"
     store = MetadataStore(db_path, tmp_path / "knowledge_bases")
     store.initialize()
@@ -141,7 +145,7 @@ def test_reinitialize_does_not_overwrite_default_knowledge_base(tmp_path: Path):
             ("default",),
         ).fetchone()
 
-    assert row == ("我的默认知识库",)
+    assert row == ("个人简历",)
 
 
 @pytest.mark.parametrize(

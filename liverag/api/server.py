@@ -13,6 +13,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from copy import deepcopy
 import logging
+from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
 
@@ -20,11 +21,12 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, 
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel,Field
 
-from liverag.api.rag_gateway import RagGateway,GatewayResponse,envelope
+from liverag.api.interview_profile_source import RagGatewayProfileSource
 from liverag.api.interview_routes import (
     configure_interview_service,
     router as interview_router,
 )
+from liverag.api.rag_gateway import RagGateway,GatewayResponse,envelope
 from liverag.config.settings import (
     RagToolMode,
     is_masked_secret,
@@ -53,6 +55,8 @@ from liverag.interview.evaluator import (
     OpenAIAnswerEvaluationSettings,
 )
 from liverag.interview.models import Base as InterviewBase
+from liverag.interview.profile_service import InterviewProfileService
+from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.service import InterviewService
 from liverag.interview.sqlalchemy_repository import SQLAlchemyInterviewRepository
 from liverag.context.overview import KnowledgeOverviewGenerator
@@ -121,6 +125,7 @@ InterviewBase.metadata.create_all(interview_engine)
 interview_repository = SQLAlchemyInterviewRepository(
     create_session_factory(interview_engine)
 )
+
 #加载语音配置
 voice_settings = load_voice_settings()
 interview_evaluator = None
@@ -130,10 +135,28 @@ if voice_settings.llm_api_key.strip():
         OpenAIAnswerEvaluationSettings.from_voice_settings(voice_settings)
     )
     interview_evaluator = AnswerEvaluator(interview_repository, evaluation_provider)
+
+#获取固定题库
+interview_question_bank = QuestionBank.from_file(
+    Path(__file__).resolve().parents[1]
+    / "interview"
+    / "question_bank"
+    / "data"
+    / "question_bank.v1.json"
+)
+
+#配置profile service
+interview_profile_service = InterviewProfileService(
+    RagGatewayProfileSource(rag_gateway),
+    interview_question_bank,
+)
+
 #注册interview的service层
 interview_service = InterviewService(
     interview_repository,
     evaluator=interview_evaluator,
+    question_bank=interview_question_bank,
+    profile_service=interview_profile_service,
 )
 #把InterviewService注册给Interview API路由
 configure_interview_service(interview_service)
@@ -169,8 +192,11 @@ class SessionKnowledgeBasePayload(BaseModel):
 class KnowledgeBasePayload(BaseModel):
     """知识库创建/更新请求"""
 
+    kb_id: str | None = None
     name:str|None=None
     description:str|None=None
+    company: str | None = None
+    role: str | None = None
 
 class ModelSttPayload(BaseModel):
     """语音 STT 模型配置更新请求。"""
@@ -505,11 +531,19 @@ async def rag_knowledge_bases()->JSONResponse:
 
 @app.post("/rag/knowledge-bases")
 async def rag_create_knowledge_bases(payload:KnowledgeBasePayload)->JSONResponse:
-    """添加知识库"""
+    """根据公司和岗位创建面试资料库。"""
+
+    company = (payload.company or "").strip()
+    role = (payload.role or "").strip()
+    if not company or not role:
+        raise HTTPException(status_code=422, detail="创建岗位资料库必须填写公司名称和岗位名称")
 
     return _json_response(await rag_gateway.post_json(
         "/v1/knowledge-bases",
-        payload=payload.model_dump(exclude_none=True)
+        payload={
+            "name": f"{company} · {role}",
+            "description": (payload.description or "").strip(),
+        },
         )
     )
 
@@ -523,9 +557,20 @@ async def rag_knowledge_base_detail(kb_id: str)->JSONResponse:
 async def rag_patch_knowledge_base(kb_id:str,payload:KnowledgeBasePayload) ->JSONResponse:
     """修改单个知识库"""
 
+    if kb_id == "default":
+        raise HTTPException(status_code=409, detail="个人简历资料库的名称和用途不可修改")
+
+    company = (payload.company or "").strip()
+    role = (payload.role or "").strip()
+    update_payload = payload.model_dump(include={"name", "description"}, exclude_none=True)
+    if company or role:
+        if not company or not role:
+            raise HTTPException(status_code=422, detail="公司名称和岗位名称必须同时填写")
+        update_payload["name"] = f"{company} · {role}"
+
     return _json_response(await rag_gateway.patch_json(
         f"/v1/knowledge-bases/{kb_id}",
-        payload=payload.model_dump(exclude_none=True)   #排除所有None的字段
+        payload=update_payload,
     ))
 
 @app.delete("/rag/knowledge-bases/{kb_id}")

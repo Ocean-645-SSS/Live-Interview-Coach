@@ -10,7 +10,8 @@ from typing import Any
 from liverag.rag.filenames import decode_transport_filename
 
 DEFAULT_KB_ID = "default"
-DEFAULT_KB_NAME = "默认知识库"
+DEFAULT_KB_NAME = "个人简历"
+DEFAULT_KB_DESCRIPTION = "固定的个人简历资料库，用于保存当前简历和通用项目材料。"
 _KB_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$") #预编译正则
 
 
@@ -155,15 +156,25 @@ class MetadataStore:
 
 
     def ensure_default_knowledge_base(self):
-        """确保默认知识库存在"""
+        """确保不可删除的默认库存在，并固定为个人简历资料库。"""
         try:
-            return self.get_knowledge_base(DEFAULT_KB_ID)
+            current = self.get_knowledge_base(DEFAULT_KB_ID)
         except KeyError:
             return self.create_knowledge_base(
                 name=DEFAULT_KB_NAME,
-                description="",
+                description=DEFAULT_KB_DESCRIPTION,
                 kb_id=DEFAULT_KB_ID
             )
+        if (
+            current.name != DEFAULT_KB_NAME
+            or current.description != DEFAULT_KB_DESCRIPTION
+        ):
+            return self.update_knowledge_base(
+                DEFAULT_KB_ID,
+                name=DEFAULT_KB_NAME,
+                description=DEFAULT_KB_DESCRIPTION,
+            )
+        return current
 
 #=============knowledge_bases相关操作========================
     def create_knowledge_base(

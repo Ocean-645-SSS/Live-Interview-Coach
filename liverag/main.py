@@ -296,7 +296,7 @@ async def _resolve_knowledge_base(settings:Any,metadata_store:MetadataStore) -> 
         detail=await _fetch_knowledge_base(settings,kb_id)
     #如果RAG Core依旧查询失败
     if detail is None:
-        detail={"kb_id":"default","name":"默认知识库"}
+        detail={"kb_id":"default","name":"个人简历"}
     #预热知识库
     await _preheat_knowledge_base(settings,str(detail["kb_id"]))
 

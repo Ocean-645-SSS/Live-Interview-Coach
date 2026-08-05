@@ -6,7 +6,10 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import json
+import re
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -345,7 +348,15 @@ class QuestionBank:
             result.append(question)
         return result
 
-    def select_questions(self, config: InterviewConfig) -> list[InterviewQuestion]:
+    def select_questions(
+        self,
+        config: InterviewConfig,
+        *,
+        relevance_text: str | None = None,
+        explicitly_requested_topics: Iterable[str] = (),
+        required_relevance_topics: Iterable[str] = (),
+        selection_seed: str | None = None,
+    ) -> list[InterviewQuestion]:
         """根据面试配置确定性选择题目并重新生成连续执行顺序。
 
         排序优先级：匹配配置主题的总权重 > 接近目标难度 > 题目稳定 ID。
@@ -365,6 +376,12 @@ class QuestionBank:
         normalized_weights = {
             _normalize_topic(topic): weight
             for topic, weight in config.topic_weights.items()
+        }
+        explicitly_requested_labels = {
+            _normalize_topic(topic) for topic in explicitly_requested_topics
+        }
+        required_relevance_labels = {
+            _normalize_topic(topic) for topic in required_relevance_topics
         }
 
         def selection_key(question: InterviewQuestion) -> tuple[float, int, str]:
@@ -393,14 +410,105 @@ class QuestionBank:
             )
 
             #返回排序键：匹配主题总权重越高越优先（负值表示降序），难度距离越小越优先，题目 ID 保证稳定性
-            return (-topic_score, difficulty_distance, question.id)
+            tie_breaker = question.id
+            if selection_seed:
+                tie_breaker = hashlib.sha256(
+                    f"{selection_seed}:{question.id}".encode("utf-8")
+                ).hexdigest()
+            return (-topic_score, difficulty_distance, tie_breaker)
 
-        #排序问题（sort默认从小到大排序），并且截断多余问题
-        selected = sorted(candidates, key=selection_key)[: config.question_count]
+        ranked = sorted(candidates, key=selection_key)
+        if relevance_text:
+            personalized = [
+                question
+                for question in ranked
+                if _has_specific_topic_match(
+                    question,
+                    normalized_weights,
+                    explicitly_requested_labels,
+                )
+                and _matches_required_relevance(question, required_relevance_labels)
+                and _specific_terms_are_supported(question, relevance_text)
+            ]
+            if len(personalized) < config.question_count:
+                raise QuestionBankError(
+                    "题库中与个人简历和目标岗位直接相关的题目不足："
+                    f"需要 {config.question_count} 道，只找到 {len(personalized)} 道"
+                )
+            ranked = personalized
+
+        # 排序问题（sort默认从小到大排序），并且截断多余问题
+        selected = ranked[: config.question_count]
+        # 选中的题仍然是最相关的一组，但每场面试改变执行顺序，避免开场题固定。
+        if selection_seed:
+            selected = sorted(
+                selected,
+                key=lambda question: hashlib.sha256(
+                    f"order:{selection_seed}:{question.id}".encode("utf-8")
+                ).hexdigest(),
+            )
         return [
             question.model_copy(update={"order": index})
             for index, question in enumerate(selected, start=1)
         ]
+
+
+_TECHNICAL_TERM = re.compile(r"\b[A-Z][A-Za-z0-9+#.-]{2,}\b")
+
+
+def _matches_required_relevance(
+    question: InterviewQuestion,
+    required_labels: set[str],
+) -> bool:
+    """有目标岗位时，题目必须至少命中一个 JD 技能，而不只与简历沾边。"""
+
+    if not required_labels:
+        return True
+    question_labels = {
+        _normalize_topic(question.category),
+        *(_normalize_topic(topic) for topic in question.topics),
+    }
+    if question.subcategory:
+        question_labels.add(_normalize_topic(question.subcategory))
+    return any(
+        required in label or label in required
+        for required in required_labels
+        for label in question_labels
+    )
+
+
+def _has_specific_topic_match(
+    question: InterviewQuestion,
+    normalized_weights: dict[str, float],
+    explicitly_requested_labels: set[str],
+) -> bool:
+    """画像至少要命中具体主题；宽泛的 Agent 等一级分类不能单独入选。"""
+
+    specific_labels = {_normalize_topic(topic) for topic in question.topics}
+    if question.subcategory:
+        specific_labels.add(_normalize_topic(question.subcategory))
+    if any(normalized_weights.get(label, 0.0) > 0 for label in specific_labels):
+        return True
+    category = _normalize_topic(question.category)
+    if category not in {"agent", "未分类"} and normalized_weights.get(category, 0.0) > 0:
+        return True
+    return (
+        category in explicitly_requested_labels
+        and normalized_weights.get(category, 0.0) > 0
+    )
+
+
+def _specific_terms_are_supported(
+    question: InterviewQuestion,
+    relevance_text: str,
+) -> bool:
+    """题目中的特定实现名必须在简历或 JD 中出现，避免考察资料外的私有约定。"""
+
+    specific_terms = _TECHNICAL_TERM.findall(
+        f"{question.question_text}\n{question.objective}"
+    )
+    normalized_context = relevance_text.casefold()
+    return all(term.casefold() in normalized_context for term in specific_terms)
 
 
 __all__ = [

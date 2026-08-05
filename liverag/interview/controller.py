@@ -150,8 +150,9 @@ class InterviewAgentController:
         *,
         started_at: str | None = None,
         ended_at: str | None = None,
+        answer_disposition: str = "ANSWERED",
     ) -> AnswerTurnResult:
-        """异步保存一段完整回答、调用评价，并返回下一句需要播放的话。"""
+        """保存本轮回答并评价；answer_disposition 用来区分正常作答和不知道答案。"""
 
         # 整理用户说出的最终答案格式
         clean_transcript = transcript.strip()
@@ -178,6 +179,7 @@ class InterviewAgentController:
                 answer_number=len(previous_answers) + 1,
                 started_at=started_at or now,
                 ended_at=ended_at or now,
+                payload={"answer_disposition": answer_disposition},
             )
         )
         # 生成回答评价

@@ -66,23 +66,48 @@ class LiveKitInterviewAgent(Agent):
         if not transcript:
             return
 
-        # 加锁
+        await self._process_answer(transcript)
+
+    async def commit_current_answer(self) -> str:
+        """用户点击“回答完毕”后，立即把当前麦克风缓冲区提交给 STT。"""
+
+        transcript = await self.session.commit_user_turn(
+            transcript_timeout=5.0,
+            stt_flush_duration=0.5,
+        )
+        clean_transcript = transcript.strip()
+        if not clean_transcript:
+            raise ValueError("没有识别到语音，请确认浏览器选择了正确的麦克风后重试")
+        return clean_transcript
+
+    async def submit_unknown_answer(self) -> None:
+        """用户点击“不知道答案”后，清空语音缓冲并按一次明确的跳过回答处理。"""
+
+        self.session.clear_user_turn()
+        await self._process_answer(
+            "我不知道这道题的答案。",
+            answer_disposition="UNKNOWN",
+        )
+
+    async def _process_answer(
+        self,
+        transcript: str,
+        *,
+        answer_disposition: str = "ANSWERED",
+    ) -> None:
+        """串行完成保存、评价、播放下一句话和更新 Session 状态。"""
+
         async with self._turn_lock:
-            # 保存answer，调用评价模型，根据评价结果决定下一步
-            result = await self._controller.receive_final_answer(transcript)
-            # 下一句话
+            result = await self._controller.receive_final_answer(
+                transcript,
+                answer_disposition=answer_disposition,
+            )
             speech = result.next_speech
-            # 播放下一句话
             await self._play(speech)
 
-            # 如果下一句话是结束语
             if speech.kind is InterviewSpeechKind.CLOSING:
-                # 生成最终报告，结束面试
                 self._controller.complete()
-            # 还没有结束
             else:
-                # QUESTION->QUESTION_ASKED,ASKING->LISTENING
-                # FOLLOW_UP->FOLLOW_IP_ASKED,FOLLOW_UP->LISTENING
                 self._controller.prompt_spoken(speech.kind)
 
     async def llm_node(

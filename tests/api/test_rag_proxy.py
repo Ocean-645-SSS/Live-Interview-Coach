@@ -70,6 +70,71 @@ def test_knowledge_base_proxy_preserves_success_envelope(
     assert response.json() == payload
 
 
+def test_create_job_knowledge_base_builds_name_from_company_and_role(
+    api_client: TestClient,
+    api_server: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_post_json(
+        path: str,
+        *,
+        payload: dict[str, Any],
+    ) -> GatewayResponse:
+        captured["path"] = path
+        captured["payload"] = payload
+        return GatewayResponse(
+            status_code=200,
+            body=_envelope(
+                status="ok",
+                data={"kb_id": "kb_job", "name": payload["name"]},
+            ),
+        )
+
+    monkeypatch.setattr(api_server.rag_gateway, "post_json", fake_post_json)
+
+    response = api_client.post(
+        "/rag/knowledge-bases",
+        json={
+            "company": "字节跳动",
+            "role": "后端开发工程师",
+            "description": "商业化技术",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "path": "/v1/knowledge-bases",
+        "payload": {
+            "name": "字节跳动 · 后端开发工程师",
+            "description": "商业化技术",
+        },
+    }
+
+
+def test_create_job_knowledge_base_requires_company_and_role(
+    api_client: TestClient,
+) -> None:
+    response = api_client.post(
+        "/rag/knowledge-bases",
+        json={"company": "字节跳动"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "创建岗位资料库必须填写公司名称和岗位名称"
+
+
+def test_default_resume_metadata_cannot_be_edited(api_client: TestClient) -> None:
+    response = api_client.patch(
+        "/rag/knowledge-bases/default",
+        json={"name": "其他名称"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "个人简历资料库的名称和用途不可修改"
+
+
 def test_query_context_forwards_path_and_payload(
     api_client: TestClient,
     api_server: ModuleType,

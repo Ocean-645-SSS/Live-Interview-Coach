@@ -20,20 +20,17 @@ services:
       - "7882:7882/udp"
     environment:
       LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-liverag-local}: ${LIVEKIT_API_SECRET:-liverag-local-development-secret-0001}"
-      NODE_IP: "${LIVEKIT_NODE_IP:-127.0.0.1}"
       LIVEKIT_CONFIG: |
         port: 7880
         bind_addresses:
           - 0.0.0.0
         logging:
-          level: info
+          level: debug
         rtc:
           tcp_port: 7881
           udp_port: 7882
           use_external_ip: false
-    # Use LIVEKIT_CONFIG and LIVEKIT_KEYS above. `--dev` replaces the configured
-    # credentials with LiveKit's built-in devkey/secret pair and makes the
-    # Agent/Frontend credentials fail with HTTP 401.
+          node_ip: 192.168.3.121
     command: []
 
   liverag-rag:

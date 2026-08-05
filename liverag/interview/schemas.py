@@ -93,6 +93,27 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class CandidateProfile(StrictModel):
+    """从个人资料库中提取、用于本次选题的候选人快照。"""
+
+    kb_id: NonEmptyText = "default"   #固定的个人简历知识库 ID
+    summary: str = ""   #个人简介
+    skills: list[NonEmptyText] = Field(default_factory=list)    #个人技能
+    projects: list[NonEmptyText] = Field(default_factory=list)  #项目经历
+    evidence_refs: list[NonEmptyText] = Field(default_factory=list)  #画像信息对应的原始资料列表
+
+
+class JobProfile(StrictModel):
+    """从用户选中的公司岗位资料库中提取的岗位快照。"""
+
+    kb_id: NonEmptyText
+    company: str | None = None  #公司
+    role: NonEmptyText  #岗位
+    summary: str = ""   #JD
+    required_skills: list[NonEmptyText] = Field(default_factory=list)   #需要的技能
+    evidence_refs: list[NonEmptyText] = Field(default_factory=list)  #参考资料
+
+
 class RubricPoint(StrictModel):
     """一道题中可独立核对的评分要点。"""
 
@@ -147,6 +168,10 @@ class InterviewConfig(StrictModel):
     max_follow_ups_per_question: int = Field(default=2, ge=0, le=5) #最多追问次数
     answer_timeout_seconds: int = Field(default=180, ge=15, le=900) #答案超时时间
     timeout_action: TimeoutAction = TimeoutAction.PAUSE #超时动作
+    candidate_kb_id: NonEmptyText = "default" #固定使用不可删除的个人简历知识库
+    target_kb_id: str | None = None    #目标岗位对应的知识库
+    target_company: str | None = None   #目标公司
+    target_role: str | None = None  #目标岗位
     topic_weights: dict[str, float] = Field(
         default_factory=dict,
         description="主题名称到相对权重的映射；V1 用于从结构化题库选题",
@@ -164,6 +189,14 @@ class InterviewConfig(StrictModel):
         if value and sum(value.values()) <= 0:
             raise ValueError("至少一个主题的权重必须大于零")
         return value
+
+    @model_validator(mode="after")
+    def validate_target_job(self) -> InterviewConfig:
+        """选择目标岗位库时必须同时说明岗位名称。"""
+
+        if self.target_kb_id and not self.target_role:
+            raise ValueError("选择目标岗位库后必须填写目标岗位名称")
+        return self
 
 
 class InterviewQuestion(StrictModel):
@@ -223,6 +256,8 @@ class InterviewPlan(StrictModel):
     questions: list[InterviewQuestion] = Field(min_length=1)    #问题列表
     closing_message: NonEmptyText   #面试结束语
     plan_version: PositiveInt = 1
+    candidate_profile: CandidateProfile | None = None   #用户画像
+    job_profile: JobProfile | None = None   #岗位画像
 
     @model_validator(mode="after")
     def validate_plan_consistency(self) -> InterviewPlan:
@@ -292,6 +327,7 @@ class AnswerEvaluation(StrictModel):
 
 __all__ = [
     "AnswerEvaluation",
+    "CandidateProfile",
     "DimensionScores",
     "FollowUpAction",
     "InterviewConfig",
@@ -299,6 +335,7 @@ __all__ = [
     "InterviewPlan",
     "InterviewQuestion",
     "InterviewState",
+    "JobProfile",
     "QuestionRubric",
     "QuestionSource",
     "QuestionType",

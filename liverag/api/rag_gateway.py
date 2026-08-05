@@ -63,10 +63,21 @@ class RagGateway:
 
         return await self._request("GET",path,params=params)
 
-    async def post_json(self, path: str, *, payload: dict[str, Any]) -> GatewayResponse:
+    async def post_json(
+        self,
+        path: str,
+        *,
+        payload: dict[str, Any],
+        timeout_ms: int | None = None,
+    ) -> GatewayResponse:
         """转发 JSON POST 请求。"""
 
-        return await self._request("POST", path, json_body=payload)
+        return await self._request(
+            "POST",
+            path,
+            json_body=payload,
+            request_timeout_ms=timeout_ms,
+        )
 
     async def patch_json(self, path: str, *, payload: dict[str, Any]) -> GatewayResponse:
         """转发 JSON PATCH 请求：局部修改一个已经存在的资源"""
@@ -226,7 +237,8 @@ class RagGateway:
         params:dict[str, Any] | None = None,    #URL 查询参数
         json_body:dict[str,Any] | None=None,    #JSON 请求体
         form_data:aiohttp.FormData | None = None,   #文件上传用的multipart表单
-        upload:bool=False     #是否为上传请求，用于选择更长的timeout
+        upload:bool=False,     #是否为上传请求，用于选择更长的timeout
+        request_timeout_ms: int | None = None,
     )->GatewayResponse:
         """执行一次统一内部 RAG 请求"""
 
@@ -253,11 +265,14 @@ class RagGateway:
         #读取RAG 最新配置
         rag_settings=load_rag_client_settings(self.settings.user_data_dir)
         #根据请求类型设置timeout：有上传文件就久一点
-        timeout_ms = (
-                        max(self.settings.api.rag_gateway_upload_timeout_ms,30_000,)
-                        if upload
-                        else max(self.settings.api.rag_gateway_timeout_ms,100,)
-                    )
+        timeout_ms = request_timeout_ms
+        if timeout_ms is None:
+            timeout_ms = (
+                max(self.settings.api.rag_gateway_upload_timeout_ms, 30_000)
+                if upload
+                else max(self.settings.api.rag_gateway_timeout_ms, 100)
+            )
+        timeout_ms = max(timeout_ms, 100)
         timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000.0)
 
         #配置请求头和目标URL
@@ -288,6 +303,27 @@ class RagGateway:
                     status_code=response.status,
                     fallback_request_id=fallback_request_id,
                 )
+        except TimeoutError:
+             logger.warning(
+                "RAG Gateway 请求超时",
+                extra={
+                    "request_id": fallback_request_id,
+                    "method": method,
+                    "path": path,
+                    "timeout_ms": timeout_ms,
+                },
+             )
+             return GatewayResponse(
+                status_code=504,
+                body=envelope(
+                    request_id=fallback_request_id,
+                    status="error",
+                    error={
+                        "type": "RagGatewayTimeout",
+                        "message": f"RAG 查询超过 {timeout_ms / 1000:g} 秒",
+                    },
+                ),
+             )
         except Exception as exc:
              logger.exception(
                 "RAG Gateway 请求失败",

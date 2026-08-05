@@ -157,7 +157,7 @@ class RagClient:
         *,
         user_data_dir: Path | None = None,
         kb_id: str = "default",
-        kb_name: str = "默认知识库",
+        kb_name: str = "个人简历",
     ):
         self.settings = settings
         self.store = store

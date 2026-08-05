@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +18,8 @@ from liverag.interview.state_machine import (
     InterviewTransitionError,
     SessionTransition,
 )
+
+logger = logging.getLogger("liverag.interview.state_machine")
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,25 +83,45 @@ class InterviewOrchestrator:
             event_type=event_type,
         )
         #记录事件
-        event = self._repository.record_transition(
-            event_id=event_id,
-            session_id=session.id,
-            event_type=event_type.value,
-            payload=dict(payload or {}),
-            expected_version=session.version,
-            state_before=session.state,
-            state_after=snapshot.state,
-            resume_state=snapshot.resume_state,
-            current_question_index=snapshot.current_question_index,
-            current_question_id=snapshot.current_question_id,
-            follow_up_count=snapshot.follow_up_count,
-            started_at=snapshot.started_at,
-            ended_at=snapshot.ended_at,
-        )
-        return InterviewTransitionResult(
+        transition_payload = dict(payload or {})
+        try:
+            event = self._repository.record_transition(
+                event_id=event_id,
+                session_id=session.id,
+                event_type=event_type.value,
+                payload=transition_payload,
+                expected_version=session.version,
+                state_before=session.state,
+                state_after=snapshot.state,
+                resume_state=snapshot.resume_state,
+                current_question_index=snapshot.current_question_index,
+                current_question_id=snapshot.current_question_id,
+                follow_up_count=snapshot.follow_up_count,
+                started_at=snapshot.started_at,
+                ended_at=snapshot.ended_at,
+            )
+        except Exception:
+            logger.exception(
+                "interview.state_transition.persistence_failed",
+                extra=self._transition_log_context(
+                    session=session,
+                    event_type=event_type,
+                    to_state=snapshot.state,
+                    attempt_id=str(transition_payload.get("attempt_id") or ""),
+                ),
+            )
+            raise
+        result = InterviewTransitionResult(
             event=event,
             session=self._repository.get_session(session.id),
         )
+        self._log_transition(
+            before=session,
+            result=result,
+            event_type=event_type,
+            attempt_id=str(transition_payload.get("attempt_id") or ""),
+        )
+        return result
 
     def receive_answer(self, command: AnswerReceivedCommand) -> AnswerReceivedResult:
         """原子更新 Session，并同时创建 Event 与最终 Answer。"""
@@ -111,35 +134,94 @@ class InterviewOrchestrator:
         if session.current_question_id is None:
             raise InterviewTransitionError("LISTENING Session 缺少当前题目标识")
 
-        result = self._repository.record_answer_transition(
-            event_id=command.event_id,
-            session_id=session.id,
-            event_type=InterviewEventType.ANSWER_RECEIVED.value,
-            payload=dict(command.payload or {}),
-            expected_version=session.version,
-            state_before=session.state,
-            state_after=snapshot.state,
-            resume_state=snapshot.resume_state,
-            current_question_index=snapshot.current_question_index,
-            current_question_id=snapshot.current_question_id,
-            follow_up_count=snapshot.follow_up_count,
-            session_started_at=snapshot.started_at,
-            session_ended_at=snapshot.ended_at,
-            question_id=session.current_question_id,
+        try:
+            result = self._repository.record_answer_transition(
+                event_id=command.event_id,
+                session_id=session.id,
+                event_type=InterviewEventType.ANSWER_RECEIVED.value,
+                payload=dict(command.payload or {}),
+                expected_version=session.version,
+                state_before=session.state,
+                state_after=snapshot.state,
+                resume_state=snapshot.resume_state,
+                current_question_index=snapshot.current_question_index,
+                current_question_id=snapshot.current_question_id,
+                follow_up_count=snapshot.follow_up_count,
+                session_started_at=snapshot.started_at,
+                session_ended_at=snapshot.ended_at,
+                question_id=session.current_question_id,
+                attempt_id=command.attempt_id,
+                answer_number=command.answer_number,
+                transcript=command.transcript,
+                answer_started_at=command.started_at,
+                answer_ended_at=command.ended_at,
+                answer_id=command.answer_id,
+            )
+        except Exception:
+            logger.exception(
+                "interview.state_transition.persistence_failed",
+                extra=self._transition_log_context(
+                    session=session,
+                    event_type=InterviewEventType.ANSWER_RECEIVED,
+                    to_state=snapshot.state,
+                    attempt_id=command.attempt_id,
+                ),
+            )
+            raise
+
+        transition = InterviewTransitionResult(
+            event=result.event,
+            session=result.session,
+        )
+        self._log_transition(
+            before=session,
+            result=transition,
+            event_type=InterviewEventType.ANSWER_RECEIVED,
             attempt_id=command.attempt_id,
-            answer_number=command.answer_number,
-            transcript=command.transcript,
-            answer_started_at=command.started_at,
-            answer_ended_at=command.ended_at,
-            answer_id=command.answer_id,
+        )
+        return AnswerReceivedResult(
+            transition=transition,
+            answer=result.answer,
         )
 
-        return AnswerReceivedResult(
-            transition=InterviewTransitionResult(
-                event=result.event,
-                session=result.session,
-            ),
-            answer=result.answer,
+    @staticmethod
+    def _transition_log_context(
+        *,
+        session: InterviewSessionRecord,
+        event_type: InterviewEventType,
+        to_state: object,
+        attempt_id: str,
+        version: int | None = None,
+    ) -> dict[str, object]:
+        return {
+            "interview_id": session.interview_id,
+            "session_id": session.id,
+            "attempt_id": attempt_id,
+            "question_id": session.current_question_id,
+            "from_state": session.state.value,
+            "event": event_type.value,
+            "to_state": getattr(to_state, "value", str(to_state)),
+            "version": version if version is not None else session.version,
+        }
+
+    def _log_transition(
+        self,
+        *,
+        before: InterviewSessionRecord,
+        result: InterviewTransitionResult,
+        event_type: InterviewEventType,
+        attempt_id: str,
+    ) -> None:
+        logger.info(
+            "interview.state_transition.persisted",
+            extra=self._transition_log_context(
+                session=before,
+                event_type=event_type,
+                to_state=result.session.state,
+                attempt_id=attempt_id,
+                version=result.session.version,
+            )
+            | {"question_id": result.session.current_question_id},
         )
 
     def _calculate_transition(

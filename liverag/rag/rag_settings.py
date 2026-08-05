@@ -96,7 +96,7 @@ class RAGSettings:
     rag_log_dir: str = _path_env("LIGHTRAG_LOG_DIR", DEFAULT_RAG_LOG_DIR)
     workspace: str = _str_env("LIGHTRAG_WORKSPACE", _str_env("WORKSPACE", ""))
     kb_id: str = _str_env("LIGHTRAG_KB_ID", "default")
-    kb_name: str = _str_env("LIGHTRAG_KB_NAME", "默认知识库")
+    kb_name: str = _str_env("LIGHTRAG_KB_NAME", "个人简历")
 
     #=============LigthRAG存储后端配置===================
     kv_storage: str = _str_env("LIGHTRAG_KV_STORAGE", "JsonKVStorage")

@@ -43,6 +43,7 @@ logger=logging.getLogger("liverag.rag.server")
 class KnowledgeBaseCreateRequest(BaseModel):
     """创建知识库请求模型"""
 
+    kb_id: str | None = None
     name:str=Field(min_length=1)
     description:str=""
 
@@ -243,6 +244,7 @@ async def create_knowledge_base(request:KnowledgeBaseCreateRequest)->dict[str,An
        meta = manager.kb_store.create(
             name=request.name,
             description=request.description,
+            kb_id=request.kb_id,
         )
     except ValueError as exc:
         raise HTTPException(

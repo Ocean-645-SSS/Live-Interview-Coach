@@ -208,12 +208,14 @@ tests/interview/
 
 ### 4.1 面试前准备
 
-1. 操作者选择已有知识库或上传简历、项目、README、技术总结。
-2. 操作者提交 JD、公司、岗位、地区、面试轮次和时长。
-3. Profile Service 从 RAG 检索候选人证据，生成 CandidateProfile；JD Analyzer 生成 JobProfile。
-4. Intelligence Service 在 feature flag 开启时调用 provider，标准化并聚合 CompanyInterviewProfile；失败则记录降级原因。
-5. Planner 将 CandidateProfile、JobProfile、CompanyInterviewProfile、SkillProgress 和结构化 Question Bank 合并为 InterviewPlan。
-6. 操作者预览/确认计划，状态由 `PREPARING` 进入 `READY`。
+1. 系统把不可删除的默认知识库 `default` 固定命名为“个人简历”；用户在其中更新一份当前简历，并可补充通用项目 README 或经历说明，不在每场面试前重复选择简历库。
+2. 用户可以创建多个目标岗位资料库；创建时必须填写公司名称和具体岗位，系统自动按“公司 · 岗位”命名。库内可上传 JD、岗位要求、与该岗位相关的项目 README 和其他准备材料。
+3. 创建面试时必须选择一个目标岗位资料库，并填写或确认公司、岗位、轮次和时长。
+4. Profile Service 分别从固定个人资料库和所选岗位资料库检索证据，生成 CandidateProfile 与 JobProfile。本场快照保存在 InterviewPlan 中，之后资料更新不会悄悄改变已开始的面试。
+5. 公共 Question Bank 是平台内部的版本化数据，只参与 Planner 选题，不作为知识库展示、上传或编辑入口暴露给前端。
+6. Intelligence Service 在 feature flag 开启时调用 provider，标准化并聚合 CompanyInterviewProfile；失败则记录降级原因。
+7. Planner 将 CandidateProfile、JobProfile、CompanyInterviewProfile、SkillProgress 和结构化 Question Bank 合并为 InterviewPlan。
+8. 操作者预览/确认计划，状态由 `PREPARING` 进入 `READY`。
 
 ### 4.2 实时面试
 
@@ -459,12 +461,11 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 
 | 页面 | 主要能力 |
 |---|---|
-| `/interview` | 面试列表、状态、继续/查看报告 |
-| `/interview/new` | 选择知识库，填写 JD、公司、地区、轮次和配置 |
-| `/interview/[id]/plan` | 准备进度、画像摘要、情报来源、计划预览与确认 |
-| `/interview/[id]/live` | LiveKit 音频、当前阶段、题号/时间、字幕、暂停和退出 |
-| `/interview/[id]/report` | 分数、rubric 证据、薄弱点、训练建议 |
-| `/interview/progress` | 当前 CandidateProfile 的技能趋势与历史证据（第四步） |
+| `/knowledge` | 统一管理不可删除的“个人简历”和多个按“公司 · 岗位”自动命名的目标岗位资料库 |
+| `/interviews` | 面试列表、状态、继续/查看报告 |
+| `/interviews/new` | 选择一个目标岗位，确认公司、岗位和面试配置；固定使用 `default` 个人简历库 |
+| `/interviews/[id]/live` | LiveKit 音频、当前阶段、题号/时间、字幕、暂停和退出 |
+| `/interviews/[id]/report` | 分数、rubric 证据、薄弱点、训练建议 |
 
 沿用现有连接组件和 local hooks，新增 `types/interview.ts`、API client 与 `useInterviewSession`；复杂状态由服务端状态机驱动，前端 reducer 只投影服务端状态。Live 页视觉上应突出“问题轨道、剩余时间、连接/评价状态”，而不是通用聊天气泡列表。
 
@@ -559,6 +560,8 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 - [√] 通过 FastAPI 暴露创建计划、Session、Attempt、Answer、Event 和 Report 接口。
 - [√] 实现独立 LiveKit Interview Agent worker，并继续复用现有 RagGateway/LightRAG 候选人资料基础设施；实时逐轮链路不新增阻塞式 RAG 查询。
 - [√] 完成创建、Live、报告三个最小前端页面。
+- [√] 将资料入口收敛为唯一个人简历库和多个目标岗位 JD 库；创建面试时选择目标岗位，公共题库不在前端显示。
+- [√] 在 InterviewPlan 中冻结 CandidateProfile 与 JobProfile，并用两类画像为公共题库选题加权。
 
 **测试：** SQLAlchemy + 临时 SQLite、状态机、API TestClient、fake voice worker、LightRAG fake、Playwright happy path 与掉线恢复；完整 LiveRAG 回归。
 
