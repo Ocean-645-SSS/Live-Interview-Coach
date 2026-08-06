@@ -17,10 +17,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 
-from liverag.interview.orchestrator import AnswerReceivedCommand, AnswerReceivedResult
+from liverag.interview.application.orchestrator import AnswerReceivedCommand, AnswerReceivedResult
 from liverag.interview.records import InterviewSessionRecord, generate_id
 from liverag.interview.schemas import InterviewState
-from liverag.interview.service import EvaluationDecisionResult, InterviewService
+from liverag.interview.application.service import EvaluationDecisionResult, InterviewService
 from liverag.interview.state_machine import InterviewEventType
 
 

@@ -9,15 +9,15 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from liverag.interview.evaluator import AnswerEvaluationProviderError
-from liverag.interview.orchestrator import AnswerReceivedCommand
-from liverag.interview.repository import (
+from liverag.interview.application.evaluator import AnswerEvaluationProviderError
+from liverag.interview.application.orchestrator import AnswerReceivedCommand
+from liverag.interview.persistence.repository import (
     ConcurrentUpdateError,
     DuplicateEventError,
     RecordNotFoundError,
 )
 from liverag.interview.schemas import InterviewConfig, InterviewPlan
-from liverag.interview.service import InterviewService
+from liverag.interview.application.service import InterviewService
 from liverag.interview.state_machine import InterviewEventType, InterviewTransitionError
 
 

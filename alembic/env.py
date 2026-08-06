@@ -7,7 +7,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import URL, engine_from_config, pool
 
-from liverag.interview.models import Base
+from liverag.interview.persistence.models import Base
 from liverag.runtime.paths import build_runtime_paths
 
 

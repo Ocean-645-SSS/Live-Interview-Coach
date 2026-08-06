@@ -1,4 +1,4 @@
-from liverag.interview.planner import InterviewPlanner
+from liverag.interview.application.planner import InterviewPlanner
 from liverag.interview.question_bank.catalog import QuestionBank, QuestionBankDocument
 from liverag.interview.schemas import (
     CandidateProfile,

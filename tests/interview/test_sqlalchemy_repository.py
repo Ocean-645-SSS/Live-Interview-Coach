@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from liverag.interview.db import create_session_factory, create_sqlite_engine
-from liverag.interview.models import Base
+from liverag.interview.persistence.db import create_session_factory, create_sqlite_engine
+from liverag.interview.persistence.models import Base
 from liverag.interview.records import (
     AnswerState,
     AttemptState,
@@ -18,7 +18,7 @@ from liverag.interview.records import (
     InterviewSessionRecord,
     ReportState,
 )
-from liverag.interview.repository import (
+from liverag.interview.persistence.repository import (
     AnswerTransitionResult,
     ConcurrentUpdateError,
     DuplicateEventError,
@@ -39,7 +39,7 @@ from liverag.interview.schemas import (
     QuestionType,
     RubricPoint,
 )
-from liverag.interview.sqlalchemy_repository import SQLAlchemyInterviewRepository
+from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
 
 
 def _plan(config: InterviewConfig) -> InterviewPlan:

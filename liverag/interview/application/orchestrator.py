@@ -11,7 +11,7 @@ from liverag.interview.records import (
     InterviewEventRecord,
     InterviewSessionRecord,
 )
-from liverag.interview.repository import DuplicateEventError, InterviewRepository
+from liverag.interview.persistence.repository import DuplicateEventError, InterviewRepository
 from liverag.interview.state_machine import (
     InterviewEventType,
     InterviewStateMachine,

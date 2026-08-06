@@ -48,16 +48,16 @@ from liverag.config.settings import (
     merge_runtime_rag_config,
 )
 from liverag.context.store import ContextStore
-from liverag.interview.db import create_database_engine, create_session_factory
-from liverag.interview.evaluator import (
+from liverag.interview.persistence.db import create_database_engine, create_session_factory
+from liverag.interview.application.evaluator import (
     AnswerEvaluator,
     OpenAIAnswerEvaluationProvider,
     OpenAIAnswerEvaluationSettings,
 )
-from liverag.interview.profile_service import InterviewProfileService
+from liverag.interview.application.profile_service import InterviewProfileService
 from liverag.interview.question_bank.catalog import QuestionBank
-from liverag.interview.service import InterviewService
-from liverag.interview.sqlalchemy_repository import SQLAlchemyInterviewRepository
+from liverag.interview.application.service import InterviewService
+from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
 from liverag.context.overview import KnowledgeOverviewGenerator
 from liverag.runtime.paths import build_runtime_paths
 from liverag.rag.metadata_store import MetadataStore

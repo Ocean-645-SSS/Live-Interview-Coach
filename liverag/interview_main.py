@@ -27,17 +27,17 @@ from liverag.agent.interview_assistant import (
 )
 from liverag.agent.providers import build_agent_session
 from liverag.config.settings import load_app_settings, load_environment
-from liverag.interview.controller import InterviewAgentController
-from liverag.interview.db import create_database_engine, create_session_factory
-from liverag.interview.evaluator import (
+from liverag.interview.application.controller import InterviewAgentController
+from liverag.interview.persistence.db import create_database_engine, create_session_factory
+from liverag.interview.application.evaluator import (
     AnswerEvaluator,
     OpenAIAnswerEvaluationProvider,
     OpenAIAnswerEvaluationSettings,
 )
 from liverag.interview.records import AttemptState
 from liverag.interview.schemas import InterviewState
-from liverag.interview.service import InterviewService
-from liverag.interview.sqlalchemy_repository import SQLAlchemyInterviewRepository
+from liverag.interview.application.service import InterviewService
+from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
 
 logger = logging.getLogger("liverag.interview.worker")
 server = AgentServer()  # 语音agent的任务服务器

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from liverag.interview.repository import InterviewRepository
+from liverag.interview.persistence.repository import InterviewRepository
 
 
 class InterviewReportBuilder:

@@ -5,12 +5,12 @@ from pathlib import Path
 
 from sqlalchemy import inspect, select
 
-from liverag.interview.db import (
+from liverag.interview.persistence.db import (
     create_session_factory,
     create_sqlite_engine,
     session_scope,
 )
-from liverag.interview.models import (
+from liverag.interview.persistence.models import (
     AnswerEvaluationModel,
     Base,
     InterviewAnswerModel,

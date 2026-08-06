@@ -11,12 +11,12 @@ from enum import Enum
 
 from livekit.agents import Agent, ModelSettings, llm
 
-from liverag.interview.controller import (
+from liverag.interview.application.controller import (
     InterviewAgentController,
     InterviewSpeech,
     InterviewSpeechKind,
 )
-from liverag.interview.orchestrator import AnswerReceivedResult
+from liverag.interview.application.orchestrator import AnswerReceivedResult
 from liverag.interview.schemas import InterviewState
 
 logger = logging.getLogger("liverag.interview.agent")

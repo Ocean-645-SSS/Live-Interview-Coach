@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 
-from liverag.interview.db import (
+from liverag.interview.persistence.db import (
     create_session_factory,
     create_sqlite_engine,
     session_scope,

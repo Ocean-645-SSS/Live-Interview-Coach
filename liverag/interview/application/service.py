@@ -25,16 +25,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from liverag.interview.evaluator import AnswerEvaluator
+from liverag.interview.application.evaluator import AnswerEvaluator
 from liverag.interview.follow_up import FollowUpDecision, FollowUpPolicy
-from liverag.interview.orchestrator import (
+from liverag.interview.application.orchestrator import (
     AnswerReceivedCommand,
     AnswerReceivedResult,
     InterviewOrchestrator,
     InterviewTransitionResult,
 )
-from liverag.interview.planner import InterviewPlanner
-from liverag.interview.profile_service import InterviewProfileService
+from liverag.interview.application.planner import InterviewPlanner
+from liverag.interview.application.profile_service import InterviewProfileService
 from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.records import (
     InterviewAnswerRecord,
@@ -46,8 +46,8 @@ from liverag.interview.records import (
     ReportState,
     generate_id,
 )
-from liverag.interview.report import InterviewReportBuilder
-from liverag.interview.repository import InterviewRepository, RecordNotFoundError
+from liverag.interview.application.report import InterviewReportBuilder
+from liverag.interview.persistence.repository import InterviewRepository, RecordNotFoundError
 from liverag.interview.schemas import AnswerEvaluation, InterviewConfig, InterviewPlan
 from liverag.interview.state_machine import InterviewEventType
 

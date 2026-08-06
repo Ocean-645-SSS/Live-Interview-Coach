@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from liverag.api.rag_gateway import RagGateway
-from liverag.interview.profile_service import KnowledgeContext
+from liverag.interview.application.profile_service import KnowledgeContext
 
 
 class RagGatewayProfileSource:

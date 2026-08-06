@@ -1,4 +1,4 @@
-from liverag.interview.profile_service import InterviewProfileService, KnowledgeContext
+from liverag.interview.application.profile_service import InterviewProfileService, KnowledgeContext
 from liverag.interview.question_bank.catalog import QuestionBank, QuestionBankDocument
 from liverag.interview.schemas import (
     InterviewDifficulty,

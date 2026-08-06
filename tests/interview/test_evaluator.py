@@ -8,7 +8,7 @@ import pytest
 from openai import AsyncOpenAI
 
 from liverag.config.settings import VoiceSettings
-from liverag.interview.evaluator import (
+from liverag.interview.application.evaluator import (
     AnswerEvaluationProviderError,
     OpenAIAnswerEvaluationProvider,
     OpenAIAnswerEvaluationSettings,

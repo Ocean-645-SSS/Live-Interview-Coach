@@ -5,14 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from liverag.interview.controller import (
+from liverag.interview.application.controller import (
     InterviewAgentController,
     InterviewSpeechKind,
 )
-from liverag.interview.db import create_session_factory, create_sqlite_engine
-from liverag.interview.evaluator import AnswerEvaluator
-from liverag.interview.models import Base
-from liverag.interview.orchestrator import AnswerReceivedCommand
+from liverag.interview.persistence.db import create_session_factory, create_sqlite_engine
+from liverag.interview.application.evaluator import AnswerEvaluator
+from liverag.interview.persistence.models import Base
+from liverag.interview.application.orchestrator import AnswerReceivedCommand
 from liverag.interview.records import InterviewAnswerRecord, utc_now_iso
 from liverag.interview.schemas import (
     AnswerEvaluation,
@@ -28,8 +28,8 @@ from liverag.interview.schemas import (
     QuestionType,
     RubricPoint,
 )
-from liverag.interview.service import InterviewService
-from liverag.interview.sqlalchemy_repository import SQLAlchemyInterviewRepository
+from liverag.interview.application.service import InterviewService
+from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
 from liverag.interview.state_machine import InterviewEventType
 
 

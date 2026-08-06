@@ -18,8 +18,8 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from liverag.interview.db import session_scope
-from liverag.interview.models import (
+from liverag.interview.persistence.db import session_scope
+from liverag.interview.persistence.models import (
     AnswerEvaluationModel,
     Base,
     InterviewAnswerModel,
@@ -41,7 +41,7 @@ from liverag.interview.records import (
     ReportState,
     generate_id,
 )
-from liverag.interview.repository import (
+from liverag.interview.persistence.repository import (
     AnswerTransitionResult,
     ConcurrentUpdateError,
     DuplicateEventError,

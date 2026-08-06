@@ -58,9 +58,39 @@ FastAPI 应用（端口 9821），前端唯一后端入口：
 
 ### 2.3 liverag/interview/ — 面试业务域
 
-完整的 Interview Coach 业务实现，分层如下：
+完整的 Interview Coach 业务实现，按层分目录组织：
 
-**领域层（纯数据与规则）：**
+```text
+liverag/interview/
+  schemas.py               # Pydantic 数据契约
+  records.py               # 不可变 dataclass 记录
+  state_machine.py         # InterviewStateMachine（纯计算）
+  follow_up.py             # FollowUpPolicy 规则化决策
+  application/             # 应用层 —— 用例编排
+    service.py             # InterviewService
+    orchestrator.py        # InterviewOrchestrator
+    controller.py           # InterviewAgentController
+    evaluator.py           # AnswerEvaluator + Provider
+    planner.py             # InterviewPlanner
+    profile_service.py     # InterviewProfileService
+    report.py              # InterviewReportBuilder
+  persistence/             # 持久化层 —— 数据库访问
+    models.py              # SQLAlchemy ORM 模型（7 张表）
+    repository.py          # InterviewRepository Protocol
+    sqlalchemy_repository.py # SQLAlchemy 实现
+    db.py                  # Engine/Session 工厂
+  question_bank/           # 题库子系统
+    catalog.py             # 题库目录与选题
+    builder.py             # 题库组装
+    converter.py           # v1→v2 格式迁移
+    enricher.py            # LLM rubric 生成
+    cli.py                 # CLI 入口
+    data/                  # question_bank.v2.reviewed.json
+  prompts/                 # Prompt 模板
+    evaluation_prompts.py  # 回答评价 LLM system prompt
+```
+
+**领域层（`interview/` 根目录，纯数据与规则）：**
 
 | 文件 | 职责 |
 |------|------|
@@ -69,7 +99,7 @@ FastAPI 应用（端口 9821），前端唯一后端入口：
 | `state_machine.py` | `InterviewStateMachine`：14 状态 + 14 事件，纯计算不操作 DB |
 | `follow_up.py` | `FollowUpPolicy`：规则化追问决策 |
 
-**应用层（用例编排）：**
+**应用层（`application/`，用例编排）：**
 
 | 文件 | 职责 |
 |------|------|
@@ -81,7 +111,7 @@ FastAPI 应用（端口 9821），前端唯一后端入口：
 | `profile_service.py` | `InterviewProfileService`：通过 RAG 检索生成候选人/岗位画像 |
 | `report.py` | `InterviewReportBuilder`：汇总生成面试报告 |
 
-**持久化层：**
+**持久化层（`persistence/`，数据库访问）：**
 
 | 文件 | 职责 |
 |------|------|
@@ -101,11 +131,11 @@ FastAPI 应用（端口 9821），前端唯一后端入口：
 | `cli.py` | `liverag-build-question-bank` CLI 入口 |
 | `data/` | `question_bank.v2.reviewed.json` (约 1.85 MB) |
 
-**Prompt 模板：**
+**Prompt 模板（`prompts/`）：**
 
 | 文件 | 职责 |
 |------|------|
-| `prompts/evaluation_prompts.py` | 回答评价的 LLM system prompt |
+| `evaluation_prompts.py` | 回答评价的 LLM system prompt |
 
 ### 2.4 liverag/rag/ — RAG 核心层
 

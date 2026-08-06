@@ -1,9 +1,9 @@
-"""Local semantic turn detector for joining incomplete STT fragments."""
+"""防止纯基于静音的VAD只知道没有声音就结束，导致截断用户回答"""
 
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, cast
 
 _COMPLETE_PUNCTUATION = ("。", "！", "？", "?", "!", ".")
 _INCOMPLETE_PUNCTUATION = ("，", ",", "：", ":", "；", ";", "、")
@@ -60,7 +60,10 @@ class SemanticTurnDetector:
         messages = getattr(chat_ctx, "messages", [])
         if callable(messages):
             messages = messages()
-        for message in reversed(list(messages or [])):
+        if not messages:
+            return ""
+        messages = cast(list[Any], messages)
+        for message in reversed(messages):
             if getattr(message, "role", None) == "user":
                 return str(getattr(message, "text_content", "") or "")
         return ""
