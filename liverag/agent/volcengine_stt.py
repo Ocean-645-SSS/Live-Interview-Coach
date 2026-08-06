@@ -19,6 +19,8 @@ from livekit import rtc
 from livekit.agents import APIStatusError, utils
 from livekit.plugins.volcengine import bigmodel_stt
 
+from liverag.agent.hot_words import inject_hot_words_into_initial_request
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,6 +38,9 @@ class AuditedSpeechStream(bigmodel_stt.SpeechStream):
     _RECONNECT_AFTER_IDLE_SECONDS = 30.0  # 无识别结果超过此时间 → 自动重连
 
     def __init__(self, **kwargs: Any) -> None:
+        # ⚠️ 必须在 super().__init__() 之前 pop 掉自定义参数，
+        # 否则父类 SpeechStream.__init__ 收到不认识的参数会炸。
+        self._hot_words_json: str = kwargs.pop("hot_words_json", "")
         super().__init__(**kwargs)
         self.stream_id = utils.shortuuid()
         self.total_frames_received = 0
@@ -211,6 +216,10 @@ class AuditedSpeechStream(bigmodel_stt.SpeechStream):
                     # 等第一帧音频到达后才发送 Full Client Request，
                     # 确保火山会话创建与音频流开始时间对齐
                     initial = self._opts.get_ws_query_params(uid=self._request_id)
+                    # 注入热词（火山 ASR corpus.context）
+                    initial = inject_hot_words_into_initial_request(
+                        initial, self._hot_words_json
+                    )
                     logger.info(
                         "volcengine.stt.initial_content",
                         extra={
@@ -522,6 +531,10 @@ class AuditedSpeechStream(bigmodel_stt.SpeechStream):
 
         while True:
             try:
+                # 每次重连生成新的 request_id，确保火山引擎创建全新 ASR 会话。
+                # 旧的 uid 可能已在服务端被标记为 session ended（45000081），
+                # 复用旧 uid 会导致新 WebSocket 也无法创建有效会话。
+                self._request_id = utils.shortuuid()
                 ws = await self._connect_ws()
 
                 # 新 WebSocket 连接 = 新 ASR 会话，重置空闲计时器
@@ -604,11 +617,21 @@ class AuditedSpeechStream(bigmodel_stt.SpeechStream):
 class AuditedBigModelSTT(bigmodel_stt.BigModelSTT):
     """BigModel STT factory that creates :class:`AuditedSpeechStream`."""
 
+    def __init__(
+        self,
+        *,
+        hot_words_json: str = "",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._hot_words_json = hot_words_json
+
     def stream(self, *, language: Any = None, conn_options: Any = None) -> AuditedSpeechStream:
         kwargs: dict[str, Any] = {
             "stt": self,
             "opts": self._opts,
             "http_session": self._ensure_session(),
+            "hot_words_json": self._hot_words_json,
         }
         if conn_options is None:
             from livekit.agents import DEFAULT_API_CONNECT_OPTIONS

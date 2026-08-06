@@ -414,8 +414,8 @@ tests/e2e/
 - [√] RAG Core、API 和 Agent 共享 `/data`，但各自是独立进程。
 - [√] Compose 用 `depends_on` 与 healthcheck 管理启动顺序；应用代码不启动子进程。
 - [√] RAG Core 暴露 ready healthcheck，API/Agent 仅等待 ready。
-- [ ] 验证 Compose 重启后 SQLite、workspaces、sessions 和 history 均保留。
-- [ ] 提交：`ops: add five-service compose deployment`。
+- [√] 验证 Compose 重启后 SQLite、workspaces、sessions 和 history 均保留。
+- [√] 提交：`ops: add five-service compose deployment`。
 
 ## M4 工作包 C：指标、缓存和端到端验收
 

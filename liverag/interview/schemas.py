@@ -297,6 +297,22 @@ class DimensionScores(StrictModel):
         return round(weighted_score / 4 * 100, 2)
 
 
+class AnswerUncertainty(StrictModel):
+    """ASR 转写中疑似错误的技术术语，供评分器标注容错依据。"""
+
+    text: NonEmptyText = Field(description="回答中疑似 STT 转写错误的原始文本")
+    possible_term: NonEmptyText = Field(description="最可能被误识别的正确术语")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="置信度 0.0-1.0")
+    reason: str = Field(
+        default="phonetic_similarity",
+        description="误识别原因：phonetic_similarity / spelling / case_loss / segmentation / other",
+    )
+    impact: str = Field(
+        default="MEDIUM",
+        description="对评分的影响程度：HIGH / MEDIUM / LOW / NONE",
+    )
+
+
 class AnswerEvaluation(StrictModel):
     """一段最终回答经过 rubric 核对后的结构化评价结果。"""
 
@@ -307,6 +323,10 @@ class AnswerEvaluation(StrictModel):
     covered_points: list[NonEmptyText] = Field(default_factory=list)    #达到的知识点
     missing_points: list[NonEmptyText] = Field(default_factory=list)    #缺失的知识点
     errors: list[NonEmptyText] = Field(default_factory=list)    #错误的点
+    asr_uncertainties: list[AnswerUncertainty] = Field(
+        default_factory=list,
+        description="疑似由 ASR 转写错误导致的术语偏差，不应直接作为评分扣分依据",
+    )
     summary: NonEmptyText   #总结
     next_action: FollowUpAction  #下一步：追问/下一个问题/理解用户/结束
     follow_up_target: str | None = None    #追问目的
@@ -327,6 +347,7 @@ class AnswerEvaluation(StrictModel):
 
 __all__ = [
     "AnswerEvaluation",
+    "AnswerUncertainty",
     "CandidateProfile",
     "DimensionScores",
     "FollowUpAction",

@@ -74,7 +74,7 @@ _RAG_RUNTIME_FIELDS = {
 
 _MODEL_RUNTIME_FIELDS = {
     "voice": {
-        "stt": {"provider", "model", "app_id", "access_token"},
+        "stt": {"provider", "model", "app_id", "access_token", "hot_words_path"},
         "llm": {"model", "base_url", "api_key"},
         "tts": {"provider", "model", "voice", "api_key"},
     }
@@ -695,6 +695,7 @@ class VoiceSettings:
     stt_app_id: str = ""  # 火山引擎应用ID
     stt_access_token: str = ""
     stt_model: str = "bigmodel"
+    stt_hot_words_path: str = ""  # 热词表文件路径，为空时使用默认定稿 docs/HOT_WORDS.md
 
     llm_model: str = "qwen-flash"
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -752,6 +753,12 @@ def load_voice_settings(user_data_dir: Path | None = None) -> VoiceSettings:
             "stt",
             "model",
             base.stt_model,
+        ),
+        stt_hot_words_path=_override_str(
+            config,
+            "stt",
+            "hot_words_path",
+            base.stt_hot_words_path,
         ),
         llm_model=_override_str(
             config,
@@ -1056,6 +1063,7 @@ def _env_voice_settings() -> VoiceSettings:
         stt_app_id=_str_env("VOLCENGINE_STT_APP_ID", ""),
         stt_access_token=_str_env("VOLCENGINE_STT_ACCESS_TOKEN", ""),
         stt_model=_str_env("VOLCENGINE_BIGMODEL_STT_MODEL", "bigmodel"),
+        stt_hot_words_path=_str_env("STT_HOT_WORDS_PATH", ""),
         llm_model=_str_env("VOICE_LLM_MODEL", "qwen-flash"),
         llm_base_url=_str_env(
             "VOICE_LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"

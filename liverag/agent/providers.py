@@ -28,9 +28,11 @@ from livekit.agents import AgentSession
 from livekit.plugins import openai, silero
 
 from liverag.agent.dashscope_tts import DashScopeRealtimeTTS
+from liverag.agent.hot_words import load_hot_words
 from liverag.agent.turn_detector import SemanticTurnDetector
 from liverag.agent.volcengine_stt import AuditedBigModelSTT
 from liverag.config.settings import AppSettings
+from pathlib import Path
 
 
 def build_agent_session(settings: AppSettings) -> AgentSession:
@@ -48,6 +50,10 @@ def build_agent_session(settings: AppSettings) -> AgentSession:
     if voice.stt_provider != "volcengine_bigmodel":
         raise ValueError(f"当前只支持 volcengine_bigmodel STT，实际配置为：{voice.stt_provider}")
 
+    # 加载热词表（路径可通过环境变量 STT_HOT_WORDS_PATH 覆盖）
+    hot_words_path = Path(voice.stt_hot_words_path) if voice.stt_hot_words_path else None
+    hot_words_json = load_hot_words(hot_words_path)
+
     return AgentSession(
         # STT:用户语音转为文字
         stt=AuditedBigModelSTT(
@@ -55,6 +61,8 @@ def build_agent_session(settings: AppSettings) -> AgentSession:
             app_id=voice.stt_app_id,
             access_token=voice.stt_access_token,
             model_name=voice.stt_model,
+            # 热词
+            hot_words_json=hot_words_json,
             # 文本后处理
             enable_itn=False,  # 是否进行数字、日期、金额等文本格式规整
             enable_punc=True,  # 是否自动添加标点

@@ -12,7 +12,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from pydantic import ValidationError
 
 from liverag.config.settings import VoiceSettings
-from liverag.interview.evaluation_prompts import ANSWER_EVALUATION_SYSTEM_PROMPT
+from liverag.interview.prompts.evaluation_prompts import ANSWER_EVALUATION_SYSTEM_PROMPT
 from liverag.interview.records import InterviewAnswerRecord, generate_id
 from liverag.interview.repository import InterviewRepository
 from liverag.interview.schemas import AnswerEvaluation, InterviewQuestion

@@ -1,6 +1,6 @@
 # LiveRAG API 文档
 
-本文档面向前端联调。默认只访问管理 API 单端口：
+本文档面向前端联调。管理 API 统一访问：
 
 ```text
 http://127.0.0.1:9821
@@ -8,7 +8,11 @@ http://127.0.0.1:9821
 
 内部 RAG Core Service 的 `/v1/*` 只给后端使用，前端不要直接调用。
 
+---
+
 ## 通用约定
+
+### Envelope 格式
 
 RAG、模型配置、history、overview 接口使用统一 envelope：
 
@@ -36,7 +40,21 @@ RAG、模型配置、history、overview 接口使用统一 envelope：
 
 Prompt 和 session 读取接口保持轻量返回，不包 envelope。
 
-## 核心规则
+### Interview API 错误约定
+
+Interview API (`/api/interviews/*`) 不使用 envelope，直接返回业务数据或 HTTP 错误：
+
+| HTTP 状态码 | 场景 |
+|------------|------|
+| 404 | 业务资源不存在 |
+| 409 | 并发冲突 / 重复事件 |
+| 422 | 非法业务操作 / 参数校验失败 |
+| 502 | LLM Provider 调用失败 |
+| 503 | 服务未就绪 |
+
+---
+
+## 核心规则（通用语音助手）
 
 - 一次语音通话只锁定一个 `kb_id`。
 - 通话开始后不能切换知识库。
@@ -46,7 +64,9 @@ Prompt 和 session 读取接口保持轻量返回，不包 envelope。
 - 挂断后把本次 messages 压缩为当前知识库的一条 `history.jsonl`，随后清空 messages。
 - `rag_tool_mode` 只支持 `auto` 和 `never`。
 
-## 健康与运行态
+---
+
+## 一、健康与运行态
 
 ### GET /health
 
@@ -88,7 +108,9 @@ Prompt 和 session 读取接口保持轻量返回，不包 envelope。
 }
 ```
 
-## 语音模型配置
+---
+
+## 二、语音模型配置
 
 语音模型配置写入 `~/.LiveRAG/model/config.json`。修改后当前通话不热切，挂断重连后生效。
 
@@ -96,34 +118,14 @@ Prompt 和 session 读取接口保持轻量返回，不包 envelope。
 
 读取下次通话使用的 STT、LLM、TTS 配置，并返回前端模型选择需要的 `options`。密钥只返回掩码和是否已设置。
 
-STT 和 TTS 的固定 endpoint 不返回给前端。前端只展示后端返回的 provider、model、voice 和 provider 自己的配置字段。
-
 ### GET /model/options
 
 只读取模型选择页选项，不读取当前配置。
 
 返回内容：
-
-- `stt.providers`：已适配的语音识别 provider。
-- `tts.providers`：已适配的语音合成 provider。
-- 每个 provider 都包含 `models`、`voices`、`config_fields`、默认值和 `verified` 标记。
-- `voices[]` 固定包含 `id`、`label`、`verified`，并尽量包含 `name`、`description`、`language`、`description_source`。
-- `description_source=official` 表示描述来自 provider 官方文档或官方 API；`derived` 表示官方没有返回该 voice 的描述，后端只做可读化说明。
-- `llm` 保持手动配置模式，继续使用 `model`、`base_url`、`api_key`。
-
-`voices[]` 示例：
-
-```json
-{
-  "id": "Cherry",
-  "label": "芊悦（Cherry）",
-  "verified": true,
-  "name": "芊悦",
-  "description": "阳光积极、亲切自然小姐姐（女性）",
-  "language": "中文（普通话）、英语、法语、德语、俄语、意大利语、西班牙语、葡萄牙语、日语、韩语",
-  "description_source": "official"
-}
-```
+- `stt.providers`：已适配的语音识别 provider（当前：`volcengine_bigmodel`）
+- `tts.providers`：已适配的语音合成 provider（`minimax`、`dashscope_realtime`）
+- 每个 provider 都包含 `models`、`voices`、`config_fields`、默认值和 `verified` 标记
 
 ### PUT /model/config
 
@@ -147,43 +149,29 @@ STT 和 TTS 的固定 endpoint 不返回给前端。前端只展示后端返回�
     "llm": {
       "model": "gemma-4-e4b-it-4bit",
       "base_url": "http://127.0.0.1:8000/v1",
-      "api_key": "385496906Qwe"
+      "api_key": "..."
     }
   }
 }
 ```
 
-前端如果回填后端返回的 `sk*****abcd1234` 掩码值，原样提交不会覆盖真实密钥。
-
-当前后端已适配的 STT provider：
-
-- `volcengine_bigmodel`：model 只返回 `bigmodel`。
-
-`voice.tts.provider` 可选：
-
-- `minimax`：默认 MiniMax `speech-02-turbo` 链路。
-- `dashscope_realtime`：阿里 DashScope `qwen3-tts-flash-realtime` WebSocket 链路。
-
-TTS model 和 voice 必须从 `/model/options` 返回列表中选择。提交不在列表里的 model 或 voice 会返回 `422`。
-
-切换 TTS provider 不会热切当前通话，用户挂断后重新接通生效。
+前端如果回填后端返回的掩码值（如 `sk*****abcd1234`），原样提交不会覆盖真实密钥。
 
 ### GET /model/effective-state
 
 返回下次通话配置、当前或最近通话实际生效配置、是否需要重连。
 
-## Context Model 配置
+---
+
+## 三、Context Model 配置
 
 Context Model 独立于语音 LLM，用于：
-
-- 生成 `knowledge_overview.md`。
-- 挂断后压缩 `history.jsonl`。
+- 生成 `knowledge_overview.md`
+- 挂断后压缩 `history.jsonl`
 
 配置写入 `~/.LiveRAG/model/context_config.json`。
 
 ### GET /model/context-config
-
-响应：
 
 ```json
 {
@@ -210,20 +198,9 @@ Context Model 独立于语音 LLM，用于：
 
 局部更新。密钥掩码原样提交表示不修改密钥。
 
-```json
-{
-  "model": "qwen-max",
-  "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-  "api_key": "sk-xxx",
-  "temperature": 0,
-  "max_tokens": 2000,
-  "max_session_chars": 16000,
-  "history_reference_limit": 8,
-  "timeout_ms": 15000
-}
-```
+---
 
-## Prompt
+## 四、Prompt
 
 前端只暴露 `SOUL.md`，不暴露系统提示词模板。`system_prompt_template.md` 是后端内部模板文件，不能通过 API 读取或修改。
 
@@ -243,121 +220,37 @@ Context Model 独立于语音 LLM，用于：
 {"content":"新的 SOUL 内容"}
 ```
 
-## 会话数据
+---
+
+## 五、会话数据（通用语音助手）
 
 ### GET /session/{session_id}/messages
 
-读取当前通话 messages。挂断后后端会清空 messages，因此该接口主要用于通话中调试。
+读取当前通话 messages。挂断后后端会清空 messages。
 
-查询参数：
-
-- `limit`: 可选，返回最近 N 条。
-
-消息字段：
-
-```json
-{
-  "timestamp": "...",
-  "role": "user",
-  "content": "用户问题",
-  "turn_index": 1,
-  "metadata": {}
-}
-```
-
-assistant 消息 metadata：
-
-```json
-{
-  "char_count": 86,
-  "tts_text_chars": 86,
-  "tts_text_chars_source": "assistant_text",
-  "too_long": false,
-  "used_rag": true,
-  "rag_tool_mode": "auto"
-}
-```
+查询参数：`limit`（可选，返回最近 N 条）。
 
 ### GET /session/{session_id}/rag-context
 
-读取当前通话 RAG 工具调用事实日志。
-
-单条记录示例：
-
-```json
-{
-  "timestamp": "...",
-  "source": "tool",
-  "tool_name": "search_knowledge_base",
-  "kb_id": "kb_xxx",
-  "kb_name": "考研资料",
-  "turn_index": 3,
-  "query": "Claude 的 Agent Memory 怎么做？",
-  "original_query": "Claude 的 Agent Memory 怎么做？",
-  "effective_query": "Claude 的 Agent Memory 怎么做？",
-  "rewritten": false,
-  "hit": true,
-  "has_context": true,
-  "request_id": "...",
-  "metrics": {"latency_ms": 352.8, "cache_hit": false},
-  "error": null,
-  "context_preview": "【知识库检索上下文】...",
-  "evidence_documents": [
-    {
-      "kb_id": "kb_xxx",
-      "kb_name": "考研资料",
-      "document_id": "doc_xxx",
-      "file_path": "demo.md",
-      "title": "demo.md",
-      "chunk_count": 2
-    }
-  ],
-  "evidence_chunks": [
-    {
-      "kb_id": "kb_xxx",
-      "kb_name": "考研资料",
-      "chunk_id": "chunk_xxx",
-      "document_id": "doc_xxx",
-      "file_path": "demo.md",
-      "tokens": 128,
-      "score": 0.82,
-      "content_preview": "片段摘要"
-    }
-  ],
-  "evidence_count": 2,
-  "no_evidence_reason": null
-}
-```
+读取当前通话 RAG 工具调用事实日志。包含 evidence documents、chunks、metrics 等。
 
 ### GET /session/turns
 
-按 `turn_index` 聚合 messages 和 RAG 依据。通话中推荐使用，挂断后 messages 会被清空。
+按 `turn_index` 聚合 messages 和 RAG 依据。通话中推荐使用。
 
-`rag.status` 取值：
-
-- `not_queried`
-- `hit`
-- `miss`
-- `failed`
+`rag.status` 取值：`not_queried` / `hit` / `miss` / `failed`
 
 ### DELETE /session/{session_id}
 
 清空当前 session messages、rag_context、session_system_prompt 和 runtime state。
 
-## 会话知识库选择
+---
+
+## 六、会话知识库选择
 
 ### GET /session/knowledge-base
 
 返回下次通话配置和当前通话锁定知识库。
-
-```json
-{
-  "configured": {"kb_id": "kb_xxx", "name": "考研资料"},
-  "active_session": {"kb_id": "kb_xxx", "name": "考研资料", "locked_at": "..."},
-  "locked": true,
-  "pending_reconnect": false
-}
-```
 
 ### PUT /session/knowledge-base
 
@@ -369,44 +262,23 @@ assistant 消息 metadata：
 
 当前通话未结束时返回 `409 KnowledgeBaseLocked`。
 
-## RAG 配置
+---
+
+## 七、RAG 配置
 
 ### GET /rag/config
 
-读取语音链路 RAG 查询配置。
-
-关键字段：
-
-```json
-{
-  "enabled": true,
-  "base_url": "http://127.0.0.1:9721",
-  "api_key": "sk*****xxx",
-  "api_key_masked": "sk*****xxx",
-  "api_key_set": true,
-  "query_mode": "naive",
-  "timeout_ms": 900,
-  "top_k": 4,
-  "chunk_top_k": 4,
-  "context_max_chars": 1800,
-  "cache_ttl_s": 45,
-  "enable_rerank": false,
-  "rag_tool_mode": "auto"
-}
-```
+读取语音链路 RAG 查询配置。关键字段：`enabled`、`query_mode`、`top_k`、`chunk_top_k`、`context_max_chars`、`cache_ttl_s`、`enable_rerank`、`rag_tool_mode`。
 
 ### PUT /rag/config
 
 局部更新 RAG 查询配置。
 
-`rag_tool_mode` 只允许：
+`rag_tool_mode` 只允许 `auto` 或 `never`。提交 `always` 返回 `422`。
 
-- `auto`: 通话开始前注入工具规则，并提供 `search_knowledge_base` 工具。
-- `never`: 通话开始前注入禁用说明，不提供知识库工具。
+---
 
-提交 `always` 会返回 `422`。
-
-## 知识库管理
+## 八、知识库管理
 
 ### GET /rag/ready
 
@@ -414,24 +286,7 @@ assistant 消息 metadata：
 
 ### GET /rag/knowledge-bases
 
-返回全部知识库摘要。
-
-```json
-{
-  "knowledge_bases": [
-    {
-      "kb_id": "default",
-      "name": "默认知识库",
-      "description": "",
-      "document_count": 3,
-      "chunk_count": 24,
-      "created_at": "...",
-      "updated_at": "..."
-    }
-  ],
-  "total": 1
-}
-```
+返回全部知识库摘要（名称、文档数、chunk 数等）。
 
 ### POST /rag/knowledge-bases
 
@@ -454,7 +309,6 @@ assistant 消息 metadata：
 删除知识库 metadata、原文件、LightRAG storage 和 logs。
 
 约束：
-
 - `default` 禁止删除。
 - 当前通话锁定的知识库禁止删除。
 
@@ -462,86 +316,25 @@ assistant 消息 metadata：
 
 预热指定知识库 engine。
 
-## 知识库上下文
+---
 
-前端只暴露当前知识库的 `knowledge_overview.md`。`history.jsonl` 是后端内部长期历史文件，不提供前端读取、清空或手动压缩接口。
+## 九、知识库上下文
 
 ### GET /rag/knowledge-bases/{kb_id}/context/overview
 
 读取当前知识库固定概览。如果文件不存在，后端会创建默认 `knowledge_overview.md` 和 meta。
 
-```json
-{
-  "kb_id": "kb_xxx",
-  "content": "# 知识库概览\n...",
-  "meta": {
-    "kb_id": "kb_xxx",
-    "updated_at": "...",
-    "stale": false,
-    "reason": "index_completed",
-    "source": "context_model",
-    "source_job_id": "insert_xxx"
-  }
-}
-```
-
 ### PUT /rag/knowledge-bases/{kb_id}/context/overview
 
-手动覆盖当前知识库的 `knowledge_overview.md`。这不是重新生成；生成时机仍只在索引任务完成后由后端触发。
+手动覆盖当前知识库的 `knowledge_overview.md`。不是重新生成，生成时机只在索引任务完成后由后端触发。
 
-```json
-{"content":"# 知识库概览\n..."}
-```
+---
 
-写入后 meta：
-
-```json
-{
-  "stale": false,
-  "reason": "manual_update",
-  "source": "manual"
-}
-```
-
-文档上传、删除、清空后，后端会把该知识库 overview 标记为 `stale=true`。新文件构建完成后会重新生成并写入 `source_job_id`。
-
-## 文档管理
+## 十、文档管理
 
 ### GET /rag/knowledge-bases/{kb_id}/documents
 
-读取指定知识库文档列表。
-
-查询参数：
-
-- `page`: 默认 `1`
-- `page_size`: 默认 `50`
-
-文档字段：
-
-```json
-{
-  "document_id": "doc_xxx",
-  "kb_id": "kb_xxx",
-  "kb_name": "考研资料",
-  "original_filename": "demo.md",
-  "file_path": "demo.md",
-  "source_file_path": "...",
-  "source_file_exists": true,
-  "source_file_size": 1200,
-  "source_sha256": "...",
-  "content_type": "text/markdown",
-  "extension": ".md",
-  "parse_status": "parsed",
-  "index_status": "processed",
-  "status": "processed",
-  "chunks_count": 3,
-  "content_summary": "",
-  "content_length": 1200,
-  "error_msg": null,
-  "created_at": "...",
-  "updated_at": "..."
-}
-```
+读取指定知识库文档列表。查询参数：`page`（默认 1）、`page_size`（默认 50）。
 
 ### GET /rag/knowledge-bases/{kb_id}/documents/{document_id}
 
@@ -549,32 +342,19 @@ assistant 消息 metadata：
 
 ### GET /rag/knowledge-bases/{kb_id}/documents/{document_id}/source
 
-读取原文件，用于预览或下载。
-
-查询参数：
-
-- `disposition=inline`: 默认，浏览器内联预览。
-- `disposition=attachment`: 下载。
+读取原文件。查询参数：`disposition=inline`（预览）/ `disposition=attachment`（下载）。
 
 ### POST /rag/knowledge-bases/{kb_id}/documents/text
 
 导入文本并保存为原始文本文件。
 
 ```json
-{
-  "text": "内容",
-  "file_source": "manual-note.md",
-  "document_id": "可选"
-}
+{"text": "内容", "file_source": "manual-note.md", "document_id": "可选"}
 ```
 
 ### POST /rag/knowledge-bases/{kb_id}/documents/files
 
-上传一个或多个文件。
-
-multipart 字段：
-
-- `files`: 文件数组。
+上传一个或多个文件。multipart 字段：`files`。
 
 ### GET /rag/knowledge-bases/{kb_id}/jobs/{job_id}
 
@@ -588,24 +368,13 @@ multipart 字段：
 
 清空该知识库全部文档、原文件和索引，但保留知识库本身。
 
-## 查询接口
+---
+
+## 十一、查询接口
 
 ### POST /rag/knowledge-bases/{kb_id}/query/context
 
 只查询指定知识库上下文，用于调试检索质量。
-
-```json
-{
-  "query": "xxx",
-  "profile": "voice",
-  "mode": "naive",
-  "top_k": 4,
-  "chunk_top_k": 4,
-  "include_references": true,
-  "include_chunk_content": true,
-  "context_max_chars": 1800
-}
-```
 
 ### POST /rag/knowledge-bases/{kb_id}/query/data
 
@@ -618,31 +387,139 @@ multipart 字段：
 ### POST /rag/session-query/data
 
 按当前 active session 锁定知识库查询结构化数据。不接收 `kb_id`。
-# Interview Coach V1 API
 
-Interview API 使用 `/api/interviews` 前缀。第一步仍然使用 SQLite，不需要 PostgreSQL、Redis 或用户身份。
+---
 
-## 创建可直接开始的面试
+## 十二、Interview Coach V1 API
 
-`POST /api/interviews/prepared`
+Interview API 使用 `/api/interviews` 前缀。第一步使用 SQLite，第二步起支持 PostgreSQL。不需要 Redis 或用户身份。
 
-请求体包含 `title` 和 `InterviewConfig`。服务会从 `question_bank.v1.json` 确定性选题，同时创建 Interview、冻结的 Plan 和 Session。
+### 12.1 创建面试
 
-## 实时连接
+#### POST /api/interviews
 
-- `GET /api/interviews/sessions/{session_id}`：读取当前状态和题目位置。
-- `POST /api/interviews/sessions/{session_id}/attempts`：创建唯一 LiveKit room 和 Attempt。
-- `GET /api/interviews/attempts/{attempt_id}`：读取连接状态。
-- `GET /api/interviews/sessions/{session_id}/events`：读取状态事件。
-- `GET /api/interviews/sessions/{session_id}/answers`：读取最终回答。
-
-Next.js 的 `/api/connection-details` 接收 `sessionId`，调用 Attempt API 后签发仅能加入该 room 的 token，并固定调度 `interview-agent`。Worker metadata 格式为：
+创建 Interview 草稿（仅 config）。
 
 ```json
-{"session_id":"session_xxx","attempt_id":"attempt_xxx"}
+{"title": "阿里 Java 面试", "config": {...}}
 ```
 
-## 报告
+#### POST /api/interviews/prepared
 
-- `POST /api/interviews/sessions/{session_id}/report`：主动生成报告。
-- `GET /api/interviews/sessions/{session_id}/report`：读取报告；尚未生成时返回 `null`。
+从版本化题库选题，同时创建 Interview、冻结的 Plan 和 Session。返回完整的 `PreparedInterviewResult`。
+
+```json
+{
+  "title": "阿里 Java 面试",
+  "config": {
+    "duration_minutes": 30,
+    "difficulty": "INTERMEDIATE",
+    "question_count": 8,
+    "max_follow_ups_per_question": 2,
+    "target_kb_id": "kb_xxx",
+    "target_company": "阿里巴巴",
+    "target_role": "Java 后端开发"
+  }
+}
+```
+
+### 12.2 面试查询
+
+#### GET /api/interviews/{interview_id}
+
+获取 Interview 聚合状态。
+
+#### GET /api/interviews/reports?target_kb_id=xxx
+
+按目标岗位资料库列出历史面试报告。
+
+### 12.3 面试计划
+
+#### PUT /api/interviews/{interview_id}/plan
+
+冻结面试计划。
+
+```json
+{"plan": {...}, "expected_version": 1}
+```
+
+### 12.4 Session 管理
+
+#### POST /api/interviews/{interview_id}/sessions
+
+创建业务面试 Session。
+
+#### GET /api/interviews/sessions/{session_id}
+
+读取当前状态、题目位置和恢复信息。
+
+#### GET /api/interviews/sessions/{session_id}/events
+
+返回面试状态变化事件列表。
+
+#### GET /api/interviews/sessions/{session_id}/answers
+
+返回已提交的最终回答列表。
+
+### 12.5 实时连接
+
+#### POST /api/interviews/sessions/{session_id}/attempts
+
+创建 LiveKit room Attempt，返回唯一 room name 和 attempt ID。
+
+#### GET /api/interviews/attempts/{attempt_id}
+
+读取连接状态（CREATED / CONNECTED / DISCONNECTED / FAILED）。
+
+Next.js 的 `/api/connection-details` 接收 `sessionId`，调用 Attempt API 后签发仅能加入该 room 的 token，并固定调度 `interview-agent`。Worker metadata 格式：
+
+```json
+{"session_id":"session_xxx","attempt_id":"attempt_xxx","participant_identity":"user_xxx"}
+```
+
+### 12.6 状态事件
+
+#### POST /api/interviews/sessions/{session_id}/events
+
+提交普通状态迁移事件。
+
+```json
+{"event_id": "event_xxx", "event_type": "START", "payload": {}}
+```
+
+#### POST /api/interviews/sessions/{session_id}/answers
+
+提交最终回答并完成 ANSWER_RECEIVED 状态迁移。
+
+```json
+{
+  "attempt_id": "attempt_xxx",
+  "event_id": "event_xxx",
+  "transcript": "我认为...",
+  "answer_number": 1,
+  "started_at": "2026-08-06T10:00:00+00:00",
+  "ended_at": "2026-08-06T10:02:00+00:00"
+}
+```
+
+### 12.7 评价与报告
+
+#### POST /api/interviews/answers/{answer_id}/evaluation
+
+异步生成回答的结构化评价（四维评分 + 追问决策）。
+
+#### POST /api/interviews/sessions/{session_id}/report
+
+主动生成面试报告。
+
+#### GET /api/interviews/sessions/{session_id}/report
+
+读取已生成的报告；尚未生成时返回 `null`。
+
+---
+
+## 十三、前端 BFF 代理
+
+Next.js 通过 `/api/liverag/[...path]` 将所有管理请求代理到 FastAPI。通用语音的 LiveKit connection details 由 `/api/connection-details` 签发。
+
+Interview Coach 页面也沿用此 BFF 模式，通过 `/api/interview/connection-details` 签发面试专用 token 并调度 `interview-agent` Worker。

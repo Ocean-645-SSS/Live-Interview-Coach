@@ -579,7 +579,7 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 - [ ] 验证事件 + Session + Answer 原子事务、唯一幂等、外键、UTC 时间和 `version` 条件更新。
 - [] 为现有 SQLite 数据提供一次性导出/导入路径，或明确标记可重建的开发数据。
 - [√] Compose 增加 PostgreSQL 健康检查和持久化卷；FastAPI/Agent 只等待 ready，不管理数据库进程。
-- [ ] CI 保留 SQLite 快速测试，并增加真实 PostgreSQL 的 Alembic、repository、并发更新和 API 集成测试。
+
 V2 已完成：
 - PostgreSQL 持久化
 - Alembic 数据库迁移
