@@ -60,9 +60,9 @@ def build_agent_session(settings: AppSettings) -> AgentSession:
             enable_punc=True,  # 是否自动添加标点
             enable_ddc=False,  # 是否开启语义顺滑
             # 语音切句/判停
-            vad_segment_duration=1200,  # VAD语音分句的最大静音阈值
-            end_window_size=1200,  # 给短暂停顿留出合并窗口，避免半句话提前提交
-            force_to_speech_time=1000,  # 音频持续多久后，才允许按照静音阈值强制判停
+            vad_segment_duration=3000,  # VAD语音分句的最大静音阈值
+            end_window_size=3000,  # 给短暂停顿留出合并窗口，避免半句话提前提交
+            force_to_speech_time=3000,  # 音频持续多久后，才允许按照静音阈值强制判停
             # 流式结果
             interim_results=True,  # 是否持续返回最终尚未确认的中间识别结果
         ),

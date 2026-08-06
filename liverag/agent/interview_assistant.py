@@ -408,10 +408,11 @@ class LiveKitInterviewAgent(Agent):
                 raise ValueError("answer submit question_id does not match current question")
             if attempt_id and attempt_id != buffer.attempt_id:
                 raise ValueError("answer submit attempt_id does not match current attempt")
-            buffer.submitted = True
-            buffer.is_open = False
             if event_id:
                 self._processed_submit_event_ids.add(event_id)
+            # 提前标记防并发：防止 DB 写入期间重复提交通过检查
+            buffer.submitted = True
+            buffer.is_open = False
             timeout_task = self._answer_timeout_task
             if timeout_task and timeout_task is not asyncio.current_task():
                 timeout_task.cancel()
@@ -436,13 +437,32 @@ class LiveKitInterviewAgent(Agent):
                 "ANSWER_WINDOW_CLOSED",
                 extra=self._log_context(reason=reason.value, transcript_len=len(transcript)),
             )
-            received = self._controller.submit_answer(
-                answer_text,
-                started_at=buffer.opened_at.isoformat(),
-                ended_at=datetime.now(timezone.utc).isoformat(),
-                answer_disposition=disposition,
-                event_id=f"answer-submit:{event_id or buffer.answer_window_id}:{reason.value}",
-            )
+            # 使用 generate_id 确保 event_id 不超 interview_events.id 的 64 字符限制
+            from liverag.interview.records import generate_id as _gen_event_id
+
+            submit_event_id = _gen_event_id("event")
+            try:
+                received = self._controller.submit_answer(
+                    answer_text,
+                    started_at=buffer.opened_at.isoformat(),
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                    answer_disposition=disposition,
+                    event_id=submit_event_id,
+                )
+            except Exception:
+                # 数据库写入失败 → 清理残留 buffer 状态
+                # 标记为未提交，但将 buffer 置空以阻止死循环重试
+                buffer.submitted = False
+                buffer.is_open = False
+                self._answer_buffer = None
+                logger.exception(
+                    "interview.answer_persist.failed",
+                    extra=self._log_context(
+                        reason=reason.value,
+                        answer_window_id=buffer.answer_window_id,
+                    ),
+                )
+                raise
             self._answer_buffer = None
             new_state = received.transition.session.state
             logger.info("ANSWER_PERSISTED", extra=self._log_context(reason=reason.value))
@@ -484,15 +504,34 @@ class LiveKitInterviewAgent(Agent):
             assert current is not None
             if current.answer_window_id != buffer.answer_window_id:
                 return
+            from liverag.interview.records import generate_id as _gen_event_id
+
+            # 使用短唯一 ID 避免超过 interview_events.id 的 64 字符限制
+            # answer_window_id 已在日志和 buffer 中记录，无需放入 event_id
+            timeout_event_id = _gen_event_id("event")
+            logger.info(
+                "interview.answer_timeout.triggered",
+                extra=self._log_context(
+                    answer_window_id=buffer.answer_window_id,
+                    timeout_event_id=timeout_event_id,
+                ),
+            )
             await self.submit_active_answer(
                 session_id=buffer.session_id,
                 question_id=buffer.question_id,
                 reason=AnswerSubmitReason.TIMEOUT,
-                event_id=f"answer-timeout:{buffer.answer_window_id}",
+                event_id=timeout_event_id,
                 attempt_id=buffer.attempt_id,
             )
         except asyncio.CancelledError:
             return
+        except Exception:
+            logger.exception(
+                "interview.answer_timeout.crashed",
+                extra=self._log_context(
+                    answer_window_id=buffer.answer_window_id,
+                ),
+            )
 
     async def _wait_for_audio_ready(self) -> None:
         try:
