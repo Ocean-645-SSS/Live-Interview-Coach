@@ -27,6 +27,7 @@ EXPECTED_TABLES = {
     "answer_evaluations",
     "interview_answers",
     "interview_attempts",
+    "interview_background_jobs",
     "interview_events",
     "interview_reports",
     "interview_sessions",

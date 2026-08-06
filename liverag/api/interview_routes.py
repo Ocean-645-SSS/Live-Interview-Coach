@@ -11,11 +11,14 @@ from pydantic import BaseModel, Field
 
 from liverag.interview.application.evaluator import AnswerEvaluationProviderError
 from liverag.interview.application.orchestrator import AnswerReceivedCommand
+from liverag.interview.jobs.queue import RedisQueue
+from liverag.interview.jobs.repository import JobRepository
 from liverag.interview.persistence.repository import (
     ConcurrentUpdateError,
     DuplicateEventError,
     RecordNotFoundError,
 )
+from liverag.interview.records import JobStatus
 from liverag.interview.schemas import InterviewConfig, InterviewPlan
 from liverag.interview.application.service import InterviewService
 from liverag.interview.state_machine import InterviewEventType, InterviewTransitionError
@@ -63,6 +66,8 @@ class ReceiveAnswerRequest(BaseModel):
 
 
 _interview_service: InterviewService | None = None
+_job_repository: JobRepository | None = None
+_redis_queue: RedisQueue | None = None
 
 
 def configure_interview_service(service: InterviewService) -> None:
@@ -72,12 +77,36 @@ def configure_interview_service(service: InterviewService) -> None:
     _interview_service = service
 
 
+def configure_job_dependencies(
+    job_repo: JobRepository,
+    redis_queue: RedisQueue,
+) -> None:
+    """由 FastAPI 组合根在启动时注入 JobRepository 和 RedisQueue。"""
+    global _job_repository, _redis_queue
+    _job_repository = job_repo
+    _redis_queue = redis_queue
+
+
 def get_interview_service() -> InterviewService:
     """返回当前应用配置的 InterviewService，测试可通过依赖覆盖替换。"""
 
     if _interview_service is None:
         raise RuntimeError("InterviewService 尚未配置")
     return _interview_service
+
+
+def get_job_repository() -> JobRepository:
+    """返回当前应用配置的 JobRepository。"""
+    if _job_repository is None:
+        raise RuntimeError("JobRepository 尚未配置")
+    return _job_repository
+
+
+def get_redis_queue() -> RedisQueue:
+    """返回当前应用配置的 RedisQueue。"""
+    if _redis_queue is None:
+        raise RuntimeError("RedisQueue 尚未配置")
+    return _redis_queue
 
 
 def _execute(operation: Callable[[], Any]) -> Any:
@@ -294,13 +323,90 @@ def get_report(session_id: str, service: ServiceDependency):
     return _execute(lambda: service.get_report(session_id))
 
 
+# =========================== Background Job API ==============================
+JobRepoDependency = Annotated[JobRepository, Depends(get_job_repository)]
+RedisQueueDependency = Annotated[RedisQueue, Depends(get_redis_queue)]
+
+class CreateDemoJobRequest(BaseModel):
+    """测试用 Demo Job 请求。"""
+    delay_seconds: float = Field(default=3.0, ge=0.5, le=60.0)
+
+
+@router.post("/jobs/demo")
+async def create_demo_job(
+    request: CreateDemoJobRequest,
+    job_repo: JobRepoDependency,
+    redis_queue: RedisQueueDependency,
+):
+    """创建一个 Demo 后台任务，验证异步链路。"""
+
+    return await _execute_async(
+        lambda: _create_and_enqueue_demo(job_repo, redis_queue, request.delay_seconds)
+    )
+
+
+async def _create_and_enqueue_demo(
+    job_repo: JobRepository,
+    redis_queue: RedisQueue,
+    delay_seconds: float,   #延迟时间
+) -> dict[str, Any]:
+    """创建后台任务，验证异步链路"""
+
+    import uuid
+    resource_id = uuid.uuid4().hex[:12]
+
+    #创建后台任务
+    job = job_repo.create_job(
+        job_type="demo",    #测试
+        idempotency_key=f"demo_{resource_id}_{uuid.uuid4().hex[:8]}",   #幂等键
+        business_resource_id=resource_id,   #业务资源id
+        payload={"delay_seconds": delay_seconds},   
+    )
+    #后台任务入队
+    await redis_queue.enqueue(job_type="demo", job_id=job.id)
+    
+    return {"job_id": job.id, "status": job.status.value}
+
+
+@router.get("/jobs/{job_id}")
+def get_job_status(job_id: str, job_repo: JobRepoDependency):
+    """查询后台任务状态和结果。"""
+
+    return _execute(lambda: _read_job_status(job_repo, job_id))
+
+
+def _read_job_status(job_repo: JobRepository, job_id: str) -> dict[str, Any]:
+    """读取后台任务状态和结果"""
+
+    #获取job
+    job = job_repo.get_job(job_id)
+
+    import json
+    return {
+        "job_id": job.id,
+        "job_type": job.job_type,
+        "status": job.status.value,
+        "attempt": job.attempt,
+        "max_attempts": job.max_attempts,
+        "result": json.loads(job.result_json) if job.result_json else None,
+        "error": job.error_message,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "completed_at": job.completed_at,
+    }
+
+
 __all__ = [
+    "CreateDemoJobRequest",
     "CreateInterviewRequest",
     "CreatePreparedInterviewRequest",
     "ReceiveAnswerRequest",
     "SavePlanRequest",
     "TransitionRequest",
     "configure_interview_service",
+    "configure_job_dependencies",
     "get_interview_service",
+    "get_job_repository",
+    "get_redis_queue",
     "router",
 ]

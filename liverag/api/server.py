@@ -24,6 +24,7 @@ from pydantic import BaseModel,Field
 from liverag.api.interview_profile_source import RagGatewayProfileSource
 from liverag.api.interview_routes import (
     configure_interview_service,
+    configure_job_dependencies,
     router as interview_router,
 )
 from liverag.api.rag_gateway import RagGateway,GatewayResponse,envelope
@@ -161,6 +162,33 @@ interview_service = InterviewService(
 configure_interview_service(interview_service)
 #把Interview Router安装进FastAPI app
 app.include_router(interview_router)
+
+#Background Job 基础设施（Redis 可选
+try:
+    import redis.asyncio as _aredis
+
+    from liverag.interview.jobs.queue import RedisQueue
+    from liverag.interview.jobs.repository import JobRepository
+
+    #建立redis连接
+    _redis_conn = _aredis.from_url(
+        settings.redis.url,
+        decode_responses=True,
+    )
+    #创建job关联数据库 repository层 
+    _job_repo = JobRepository(create_session_factory(interview_engine))
+    #创建redis队列+锁管理
+    _redis_queue = RedisQueue(
+        _redis_conn,
+        lock_ttl_seconds=settings.redis.lock_ttl_seconds,
+    )
+    #注入两者
+    configure_job_dependencies(_job_repo, _redis_queue)
+    logger.info("Background Job 基础设施已就绪")
+except ImportError:
+    logger.info("redis 库未安装，跳过 Background Job 基础设施")
+except Exception:
+    logger.exception("Background Job 基础设施初始化失败，继续启动")
 
 UPLOAD_FILES = File(...)
 

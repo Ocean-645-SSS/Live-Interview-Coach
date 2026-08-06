@@ -27,6 +27,8 @@ dependencies = [
     "torch",
     "alembic>=1.16,<2.0",
     "psycopg[binary]>=3.3.4",
+    "redis>=5.0",
+    "hiredis>=2.0",
 ]
 
 [project.scripts]
@@ -35,12 +37,14 @@ liverag-api = "liverag.api.main:main"
 liverag-rag-service = "liverag.rag.cli:main"
 liverag-build-question-bank = "liverag.interview.question_bank.cli:main"
 liverag-interview-agent = "liverag.interview_main:main"
+liverag-interview-worker = "liverag.interview.jobs.worker_main:main"
 
 [dependency-groups]
 dev = [
     "pytest",
     "pytest-asyncio",
     "ruff",
+    "fakeredis[lua]>=2.20",
 ]
 
 [build-system]

@@ -160,6 +160,43 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    container_name: liverag-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - liverag-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+
+  liverag-interview-worker:
+    image: liverag-backend:local
+    container_name: liverag-interview-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      liverag-rag:
+        condition: service_healthy
+    env_file:
+      - .env.local
+    environment:
+      <<: *liverag-env
+      INTERVIEW_DATABASE_URL: postgresql+psycopg://interview_coach:interview_coach_dev@postgres:5432/interview_coach
+      INTERVIEW_REDIS_URL: redis://redis:6379/0
+    command: ["python", "-m", "liverag.interview.jobs.worker_main"]
+    volumes:
+      - liverag-data:/data
+
 volumes:
   liverag-data:
   liverag-postgres-data:
+  liverag-redis-data:

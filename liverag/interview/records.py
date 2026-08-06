@@ -1,6 +1,6 @@
-"""Live Interview Coach V1 的持久化记录模型，和数据库表中参数一一对应
+"""Live Interview Coach 的持久化记录模型，和数据库表中参数一一对应
 
-用来承接 SQLite 查询结果，它们只描述“数据库中保存了什么”，不执行 SQL，也不决定面试状态如何迁移。
+用来承接 SQLite 查询结果，只描述“数据库中保存了什么”，不执行 SQL，也不决定面试状态如何迁移。
 
 `schemas.py/model.py 与本文件的区别：
 - `schemas.py` 定义业务输入、输出和校验规则；
@@ -43,6 +43,16 @@ class ReportState(str, Enum):
     GENERATING = "GENERATING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+
+
+class JobStatus(str, Enum):
+    """Background Job 的生命周期状态。"""
+
+    PENDING = "PENDING"
+    QUEUED = "QUEUED"   #入队Redis
+    RUNNING = "RUNNING" #Worker抢到
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"   #attempt+1
 
 
 def utc_now_iso() -> str:
@@ -181,15 +191,41 @@ class InterviewReportRecord:
     completed_at: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class BackgroundJobRecord:
+    """保存一个后台异步任务的状态和结果。
+
+    任务由 API 创建并写入 PostgreSQL，入队到 Redis 后由 Worker 异步消费。
+    Redis 重启不会丢失已完成业务结果，最终幂等由 PostgreSQL 唯一约束保证。
+    """
+
+    id: str
+    job_type: str   #任务类型，区分业务操作
+    idempotency_key: str    #幂等键：保证不重复创建任务
+    status: JobStatus   #任务生命周期状态
+    business_resource_id: str   #关联的业务资源，方便查询此次任务由哪个对象创建
+    payload_json: str   #任务携带的输入数据
+    result_json: str | None #任务完成的结构化输出
+    error_message: str | None   #错误信息
+    attempt: int    #重试次数
+    max_attempts: int   #最多重试次数
+    started_at: str | None  #任务开始时间戳
+    completed_at: str | None    #任务结束时间戳
+    created_at: str
+    updated_at: str
+
+
 __all__ = [
     "AnswerState",
     "AttemptState",
+    "BackgroundJobRecord",
     "InterviewAnswerRecord",
     "InterviewAttemptRecord",
     "InterviewEventRecord",
     "InterviewRecord",
     "InterviewReportRecord",
     "InterviewSessionRecord",
+    "JobStatus",
     "ReportState",
     "generate_id",
     "utc_now_iso",

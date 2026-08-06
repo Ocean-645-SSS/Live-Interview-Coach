@@ -17,7 +17,7 @@ from sqlalchemy import (
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from liverag.interview.records import AnswerState, AttemptState, ReportState
+from liverag.interview.records import AnswerState, AttemptState, JobStatus, ReportState
 from liverag.interview.schemas import InterviewState
 
 
@@ -392,8 +392,63 @@ class InterviewReportModel(Base):
     session: Mapped[InterviewSessionModel] = relationship(back_populates="report")
 
 
+class BackgroundJobModel(Base):
+    """持久化后台异步任务，由 API 写入、Worker 消费。
+
+    Redis 只保存队列与可重建协调状态，权威状态永远存储在 PostgreSQL 中。
+    相同 job_type + idempotency_key 由数据库唯一约束保证幂等。
+    """
+
+    __tablename__ = "interview_background_jobs"
+    __table_args__ = (
+        CheckConstraint("attempt >= 0", name="ck_background_jobs_attempt"),
+        CheckConstraint("max_attempts >= 1", name="ck_background_jobs_max_attempts"),
+        UniqueConstraint(
+            "job_type",
+            "idempotency_key",
+            name="uq_background_jobs_idempotency",
+        ),
+        Index("idx_background_jobs_status", "status", "created_at"),
+        Index(
+            "idx_background_jobs_resource",
+            "job_type",
+            "business_resource_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[JobStatus] = mapped_column(
+        SqlEnum(
+            JobStatus,
+            name="ck_background_jobs_status_values",
+            native_enum=False,
+            create_constraint=True,
+            validate_strings=True,
+        ),
+        default=JobStatus.PENDING,
+        nullable=False,
+    )
+    business_resource_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    result_json: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    attempt: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+
 __all__ = [
     "AnswerEvaluationModel",
+    "BackgroundJobModel",
     "Base",
     "InterviewAnswerModel",
     "InterviewAttemptModel",

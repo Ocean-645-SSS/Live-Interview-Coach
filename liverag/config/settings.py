@@ -1029,6 +1029,48 @@ class InterviewDatabaseSettings:
 
 
 @dataclass(frozen=True)
+class RedisSettings:
+    """Redis 连接与超时配置。"""
+
+    url: str = field(
+        default_factory=lambda: _str_env(
+            "INTERVIEW_REDIS_URL",
+            "redis://127.0.0.1:6379/0",
+        )
+    )
+    #Redis队列阻塞读取时间，控制最多等待多久
+    queue_timeout_seconds: float = field(
+        default_factory=lambda: _float_env("INTERVIEW_REDIS_QUEUE_TIMEOUT", 5.0)
+    )
+    #Redis分布式锁的自动过期时间：如果worker崩溃，锁会在TTL后自动释放防止死锁
+    lock_ttl_seconds: int = field(
+        default_factory=lambda: _int_env("INTERVIEW_REDIS_LOCK_TTL", 300)
+    )
+
+
+@dataclass(frozen=True)
+class WorkerSettings:
+    """Background Worker 运行参数。"""
+
+    # Worker 轮训间隔时间
+    poll_timeout_seconds: float = field(
+        default_factory=lambda: _float_env("INTERVIEW_WORKER_POLL_TIMEOUT", 5.0)
+    )
+    # Worker 最大重试次数
+    max_retries: int = field(
+        default_factory=lambda: _int_env("INTERVIEW_WORKER_MAX_RETRIES", 3)
+    )
+    # Worker 任务超时时间
+    task_timeout_seconds: int = field(
+        default_factory=lambda: _int_env("INTERVIEW_WORKER_TASK_TIMEOUT", 300)
+    )
+    # Worker 并发任务数
+    concurrency: int = field(
+        default_factory=lambda: _int_env("INTERVIEW_WORKER_CONCURRENCY", 4)
+    )
+
+
+@dataclass(frozen=True)
 class AppSettings:
     """LiveRAG Agent 统一配置"""
 
@@ -1046,6 +1088,8 @@ class AppSettings:
     interview_database: InterviewDatabaseSettings = field(
         default_factory=InterviewDatabaseSettings
     )
+    redis: RedisSettings = field(default_factory=RedisSettings)
+    worker: WorkerSettings = field(default_factory=WorkerSettings)
 
 
 def load_app_settings() -> AppSettings:

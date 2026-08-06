@@ -9,12 +9,14 @@ from typing import Any, Protocol, runtime_checkable
 from liverag.interview.records import (
     AnswerState,
     AttemptState,
+    BackgroundJobRecord,
     InterviewAnswerRecord,
     InterviewAttemptRecord,
     InterviewEventRecord,
     InterviewRecord,
     InterviewReportRecord,
     InterviewSessionRecord,
+    JobStatus,
 )
 from liverag.interview.schemas import (
     AnswerEvaluation,
@@ -270,10 +272,73 @@ class InterviewRepository(Protocol):
     ) -> InterviewReportRecord: ...
 
 
+@runtime_checkable
+class JobRepository(Protocol):
+    """Background Job 的 PostgreSQL 持久化契约。"""
+
+    # ==================== 创建 ====================
+    def create_job(
+        self,
+        *,
+        job_type: str,
+        idempotency_key: str,
+        business_resource_id: str,
+        payload: dict[str, Any] | None = None,
+        max_attempts: int = 3,
+        job_id: str | None = None,
+    ) -> BackgroundJobRecord: ...
+
+    def find_by_idempotency(
+        self,
+        *,
+        job_type: str,
+        idempotency_key: str,
+    ) -> BackgroundJobRecord | None: ...
+
+    # ==================== 查询 ====================
+
+    def get_job(self, job_id: str) -> BackgroundJobRecord: ...
+
+    def get_job_by_resource(
+        self,
+        *,
+        job_type: str,
+        business_resource_id: str,
+    ) -> BackgroundJobRecord | None: ...
+
+    def list_pending_jobs(
+        self,
+        *,
+        job_type: str,
+        limit: int = 10,
+    ) -> list[BackgroundJobRecord]: ...
+
+    # ==================== 状态更新 ====================
+
+    def mark_queued(self, job_id: str) -> BackgroundJobRecord: ...
+
+    def mark_running(self, job_id: str) -> BackgroundJobRecord: ...
+
+    def mark_completed(
+        self,
+        job_id: str,
+        result: dict[str, Any],
+    ) -> BackgroundJobRecord: ...
+
+    def mark_failed(
+        self,
+        job_id: str,
+        error: str,
+    ) -> BackgroundJobRecord: ...
+
+    def retry_job(self, job_id: str) -> BackgroundJobRecord: ...
+
+
 __all__ = [
     "AnswerTransitionResult",
     "ConcurrentUpdateError",
     "DuplicateEventError",
     "InterviewRepository",
+    "JobRepository",
     "RecordNotFoundError",
 ]
