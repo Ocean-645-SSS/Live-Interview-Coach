@@ -17,12 +17,16 @@ from openai import AsyncOpenAI
 
 from liverag.interview.jobs.repository import BackgroundJobRecord
 from liverag.interview.application.profile_service import KnowledgeContextSource
-from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.jobs.repository import JobRepository
 from liverag.interview.application.resume_parser import ResumeParser
 from liverag.interview.application.profile_service import InterviewProfileService
-from liverag.interview.application.planner import InterviewPlanner
+from liverag.interview.application.planner import InterviewPlanner, validate_plan_quality
+from liverag.interview.persistence.repository import ConcurrentUpdateError, InterviewRepository
+from liverag.interview.question_bank.catalog import QuestionBank
+from liverag.interview.application.report import InterviewReportBuilder
+from liverag.interview.records import ReportState
 from liverag.interview.schemas import CandidateFacts, InterviewConfig
+
 
 logger = logging.getLogger("liverag.interview.jobs.tasks")
 
@@ -121,7 +125,6 @@ async def _generate_candidate_profile(
     job_repo: JobRepository,
     kb_id: str,
     candidate_facts_job_id: str | None,
-    kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     """生成候选人画像"""
 
@@ -197,7 +200,6 @@ async def profile_generation_task(
     *,
     profile_source: KnowledgeContextSource,
     job_repo: JobRepository,
-    question_bank: QuestionBank,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """画像生成任务：根据 profile_type 分流到候选人画像或岗位画像。
@@ -216,9 +218,8 @@ async def profile_generation_task(
     #区分candidate_profile / job_profile
     profile_type = payload.get("profile_type")
     kb_id = payload.get("kb_id", "default")
-    #获取题库的一级标签和主题
-    labels = [*question_bank.list_categories(), *question_bank.list_topics()]
-    service = InterviewProfileService(profile_source, labels)
+
+    service = InterviewProfileService(profile_source)
 
     if profile_type == "candidate_profile":
         return await _generate_candidate_profile(
@@ -227,7 +228,6 @@ async def profile_generation_task(
             job_repo=job_repo,
             kb_id=kb_id,
             candidate_facts_job_id=payload.get("candidate_facts_job_id"),
-            kwargs=kwargs,
         )
 
     if profile_type == "job_profile":
@@ -291,9 +291,21 @@ async def interview_preparation_task(
     job: BackgroundJobRecord,
     *,
     job_repo: JobRepository,
+    profile_source: KnowledgeContextSource,
+    llm_client: AsyncOpenAI,
+    llm_model: str,
+    question_bank: QuestionBank,
+    interview_repo: InterviewRepository | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """面试准备 Workflow：直接复用 ResumeParser、ProfileService、Planner 等 Service。
+    
+    创建面试前准备任务
+            ↓
+    依次执行：
+    简历解析 → 候选人画像 → 岗位画像 → 公司面经增强 → 面试计划
+            ↓
+    保存每一步结果和状态
 
     completed_steps / current_stage / stage_results 用于幂等恢复和前端展示。
     只有 COMPANY_INTELLIGENCE 允许降级缺失。
@@ -318,33 +330,29 @@ async def interview_preparation_task(
     config_json = payload.get("config_json", "{}")
     interview_config = InterviewConfig.model_validate_json(config_json)
 
-    # ── 构建 Service（直接从 worker 注入的 deps 获取依赖）──
-    profile_source = kwargs["profile_source"]
-    llm_client = kwargs["llm_client"]
-    llm_model = kwargs["llm_model"]
-    question_bank = kwargs["question_bank"]
-
     resume_parser = ResumeParser(
         profile_source=profile_source,
         llm_client=llm_client,
         llm_model=llm_model,
     )
-    labels = [*question_bank.list_categories(), *question_bank.list_topics()]
-    profile_service = InterviewProfileService(profile_source, labels)
-    planner = InterviewPlanner(question_bank)
+    profile_service = InterviewProfileService(profile_source)
+    planner = InterviewPlanner(question_bank, llm_client=llm_client, llm_model=llm_model)
 
-    # ── stage_results 不再保存完整对象，Worker 重启后无法恢复领域对象 ──
+    # 当前 stage_results 不保存领域对象，仅保存摘要，因此 Worker 重启后需要重新执行生成领域对象的 stage。
     # 如果下游 stage 未完成，需要重新执行上游 stage 以生成领域对象
     if "PLAN_GENERATION" not in completed_steps:
-        # PLAN_GENERATION 需要 CandidateProfile + JobProfile，两者必须重跑
+        # PLAN_GENERATION → CANDIDATE_PROFILE → RESUME_PARSE（需要 CandidateFacts）
+        # PLAN_GENERATION → JOB_PROFILE
+        # 三个都必须重跑，否则依赖链断裂（CandidateFacts 不存在时 Profile 为空壳）
         completed_steps = [
             s for s in completed_steps
-            if s not in ("CANDIDATE_PROFILE", "JOB_PROFILE")
+            if s not in ("RESUME_PARSE", "CANDIDATE_PROFILE", "JOB_PROFILE")
         ]
 
     candidate_facts = None
     candidate_profile = None
     job_profile = None
+    company_intel = None
 
     logger.info(
         "Preparation Workflow 开始",
@@ -421,18 +429,39 @@ async def interview_preparation_task(
 
             # ── COMPANY_INTELLIGENCE（可降级）──
             elif step_name == "COMPANY_INTELLIGENCE":
-                degraded = True
-                degradation_reasons.append(f"{step_name}: 功能尚未实现，降级跳过")
-                completed_steps.append(step_name)
-                stage_results[step_name.lower()] = {
-                    "status": "degraded",
-                    "stage": stage_name,
-                    "reason": "not_implemented",
-                }
-                logger.warning(
-                    f"Stage {stage_name} 降级跳过（未实现）",
-                    extra={"job_id": job.id},
-                )
+                if not target_company:
+                    degraded = True
+                    degradation_reasons.append(
+                        f"{step_name}: 未提供目标公司（COMPANY_NOT_PROVIDED）"
+                    )
+                    completed_steps.append(step_name)
+                    stage_results[step_name.lower()] = {
+                        "status": "degraded",
+                        "stage": stage_name,
+                        "reason": "company_not_provided",
+                    }
+                    company_intel = None
+                    logger.info(
+                        "未提供目标公司，跳过 Company Intelligence",
+                        extra={"job_id": job.id},
+                    )
+                else:
+                    # TODO: 3.3 接入 MCP Client + Nowcoder Adapter
+                    degraded = True
+                    degradation_reasons.append(
+                        f"NOWCODER_MCP_NOT_ENABLED"
+                    )
+                    completed_steps.append(step_name)
+                    stage_results[step_name.lower()] = {
+                        "status": "degraded",
+                        "stage": stage_name,
+                        "reason": "not_implemented",
+                    }
+                    company_intel = None
+                    logger.warning(
+                        f"Stage {stage_name} 降级跳过（未实现）",
+                        extra={"job_id": job.id},
+                    )
 
             # ── PLAN_GENERATION（CandidateProfile + JobProfile 强制）──
             elif step_name == "PLAN_GENERATION":
@@ -441,18 +470,67 @@ async def interview_preparation_task(
                 if job_profile is None:
                     raise RuntimeError("PLAN_GENERATION 需要 JobProfile，但尚未生成")
 
-                plan = planner.build(
+                # 生成LLM改写过的个性化面试计划
+                plan = await planner.build(
                     title=f"模拟面试 - {interview_id}",
                     config=interview_config,
                     candidate_profile=candidate_profile,
                     job_profile=job_profile,
+                    company_intel=company_intel,
                 )
+
+                # ──  增强复核 ──
+                quality_issues = validate_plan_quality(plan)
+                if quality_issues:
+                    logger.warning(
+                        "面试计划复核发现问题",
+                        extra={
+                            "job_id": job.id,
+                            "interview_id": interview_id,
+                            "issues": quality_issues,
+                        },
+                    )
+                    # 复核问题作为降级记录，不阻塞流程
+                    for issue in quality_issues:
+                        degradation_reasons.append(f"PLAN_QUALITY: {issue}")
+                    degraded = True
+
+                # ── 持久化 InterviewPlan + 状态 READY ──
+                if interview_repo is not None:
+                    try:
+                        interview = interview_repo.get_interview(interview_id)
+                        interview_repo.save_interview_plan(
+                            interview_id=interview_id,
+                            plan=plan,
+                            expected_version=interview.version,
+                        )
+                        logger.info(
+                            "InterviewPlan 已持久化，Interview.state → READY",
+                            extra={
+                                "job_id": job.id,
+                                "interview_id": interview_id,
+                                "plan_id": plan.id,
+                            },
+                        )
+                    except ConcurrentUpdateError:
+                        # 幂等：plan 已由之前的部分执行持久化
+                        logger.info(
+                            "InterviewPlan 已存在（版本冲突），按幂等跳过",
+                            extra={"job_id": job.id, "interview_id": interview_id},
+                        )
+                else:
+                    logger.warning(
+                        "interview_repo 未注入，跳过 InterviewPlan 持久化",
+                        extra={"job_id": job.id, "interview_id": interview_id},
+                    )
+
                 completed_steps.append(step_name)
                 stage_results[step_name.lower()] = {
                     "status": "completed",
                     "stage": stage_name,
                     "plan_id": plan.id,
                     "question_count": len(plan.questions),
+                    "quality_issues": quality_issues,
                 }
                 logger.info(
                     "面试计划生成完成",
@@ -516,6 +594,90 @@ async def interview_preparation_task(
         "degradation_reasons": degradation_reasons,
         "stage_results": stage_results,
     }
+
+
+# ====================== Report Generation Workflow ============================
+
+@register("report_generation")
+async def report_generation_task(
+    job: BackgroundJobRecord,
+    *,
+    interview_repo: InterviewRepository,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """报告生成任务：加载 Session 的所有评价 → 聚合生成报告 → 持久化。
+
+    输入（payload）：
+        - session_id: 面试 Session ID（必填）
+    输出：
+        {report_id, session_id, state: "COMPLETED"}
+    幂等键：report:{session_id}
+
+    流程：
+    1. 加载 InterviewPlan + Answers + Evaluations
+    2. InterviewReportBuilder 聚合生成报告
+    3. DB 状态转换：PENDING/GENERATING → COMPLETED
+    """
+
+    payload = json.loads(job.payload_json) if job.payload_json else {}
+    session_id = payload.get("session_id", "")
+    if not session_id.strip():
+        raise ValueError("report_generation 必须提供 session_id")
+
+    builder = InterviewReportBuilder(interview_repo)
+
+    # ── 幂等检查：已有 COMPLETED 报告 → 直接返回 ──
+    existing = interview_repo.get_report_by_session(session_id)
+    if existing is not None and existing.state is ReportState.COMPLETED:
+        logger.info(
+            "报告已生成，跳过",
+            extra={"job_id": job.id, "session_id": session_id, "report_id": existing.id},
+        )
+        return {
+            "report_id": existing.id,
+            "session_id": session_id,
+            "state": "COMPLETED",
+        }
+
+    # ── 创建或复用报告记录 ──
+    if existing is None:
+        report = interview_repo.create_report(session_id=session_id)
+    else:
+        report = existing
+
+    # ── 标记开始生成 ──
+    interview_repo.start_report_generation(report.id)
+
+    try:
+        # ── 聚合生成 ──
+        content = builder.build(session_id)
+        # ── 持久化完成 ──
+        completed = interview_repo.complete_report(
+            report_id=report.id, content=content
+        )
+        logger.info(
+            "报告生成完成",
+            extra={
+                "job_id": job.id,
+                "session_id": session_id,
+                "report_id": completed.id,
+                "evaluation_count": len(content.get("evaluations", [])),
+                "overall_score": content.get("overall_score"),
+            },
+        )
+        return {
+            "report_id": completed.id,
+            "session_id": session_id,
+            "state": "COMPLETED",
+        }
+    except Exception as exc:
+        error_msg = str(exc) or type(exc).__name__
+        interview_repo.fail_report(report_id=report.id, error_message=error_msg)
+        logger.error(
+            "报告生成失败",
+            extra={"job_id": job.id, "session_id": session_id, "error": error_msg},
+        )
+        raise
 
 
 __all__ = ["get_handler", "register", "registered_types"]

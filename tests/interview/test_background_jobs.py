@@ -803,24 +803,19 @@ class TestProfileGenerationTask:
         assert handler is not None
 
         parameters = inspect.signature(handler).parameters
-        for name in ("profile_source", "question_bank"):
+        for name in ("profile_source", "job_repo"):
             assert name in parameters
             assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
             assert parameters[name].default is inspect.Parameter.empty
 
     @pytest.mark.asyncio
     async def test_candidate_profile_generation(self, job_repo: JobRepository):
-        """完整流程：创建 Job → 检索 RAG → 标签匹配 → 返回 CandidateProfile。"""
-        # 1. 准备假 profile_source
+        """完整流程：创建 Job → 检索 RAG → 返回 CandidateProfile（skills 来自 CandidateFacts）。"""
         fake_source = self._make_fake_profile_source(
             context="项目：使用 Python 实现异步编程服务，负责 Redis 缓存和 PostgreSQL 数据库设计。",
             evidence_refs=("resume.pdf",),
         )
 
-        # 2. 准备假 QuestionBank（含 Python、Redis、PostgreSQL 分类）
-        fake_bank = self._make_fake_question_bank(["Python", "Redis", "PostgreSQL"])
-
-        # 3. 创建 Job
         job = job_repo.create_job(
             job_type="profile_generation",
             idempotency_key=f"profile_candidate_{generate_id('key')}",
@@ -828,33 +823,29 @@ class TestProfileGenerationTask:
             payload={"profile_type": "candidate_profile", "kb_id": "default"},
         )
 
-        # 4. 获取 handler 并执行
         handler = get_handler("profile_generation")
         assert handler is not None
 
         result = await handler(
             job,
             profile_source=fake_source,
-            question_bank=fake_bank,
+            job_repo=job_repo,
         )
 
-        # 5. 验证结果
+        # 无 CandidateFacts → skills 为空
         assert result["kb_id"] == "default"
-        assert len(result["skills"]) >= 1
-        assert "Python" in result["skills"]
+        assert result["skills"] == []
         assert len(result["projects"]) >= 1
         assert len(result["evidence_refs"]) >= 1
         assert "resume.pdf" in result["evidence_refs"]
 
     @pytest.mark.asyncio
     async def test_job_profile_generation(self, job_repo: JobRepository):
-        """完整流程：创建 Job → 检索 RAG → 标签匹配 → 返回 JobProfile。"""
+        """完整流程：创建 Job → 检索 RAG → 返回 JobProfile。"""
         fake_source = self._make_fake_profile_source(
             context="岗位要求熟悉 Python 和异步编程，负责后端服务开发。",
             evidence_refs=("jd.txt",),
         )
-
-        fake_bank = self._make_fake_question_bank(["Python", "异步编程"])
 
         job = job_repo.create_job(
             job_type="profile_generation",
@@ -874,22 +865,19 @@ class TestProfileGenerationTask:
         result = await handler(
             job,
             profile_source=fake_source,
-            question_bank=fake_bank,
+            job_repo=job_repo,
         )
 
         assert result["kb_id"] == "target_kb"
         assert result["company"] == "测试公司"
         assert result["role"] == "后端工程师"
-        assert len(result["required_skills"]) >= 1
+        assert result["required_skills"] == []
         assert "jd.txt" in result["evidence_refs"]
 
     @pytest.mark.asyncio
     async def test_job_profile_missing_role_raises(self, job_repo: JobRepository):
         """job_profile 类型缺少 role → 应抛出 ValueError。"""
-        from unittest.mock import AsyncMock
-
         fake_source = self._make_fake_profile_source(context="测试内容")
-        fake_bank = self._make_fake_question_bank()
 
         job = job_repo.create_job(
             job_type="profile_generation",
@@ -909,14 +897,13 @@ class TestProfileGenerationTask:
             await handler(
                 job,
                 profile_source=fake_source,
-                question_bank=fake_bank,
+                job_repo=job_repo,
             )
 
     @pytest.mark.asyncio
     async def test_invalid_profile_type_raises(self, job_repo: JobRepository):
         """不支持的 profile_type → 应抛出 ValueError。"""
         fake_source = self._make_fake_profile_source(context="测试内容")
-        fake_bank = self._make_fake_question_bank()
 
         job = job_repo.create_job(
             job_type="profile_generation",
@@ -935,7 +922,7 @@ class TestProfileGenerationTask:
             await handler(
                 job,
                 profile_source=fake_source,
-                question_bank=fake_bank,
+                job_repo=job_repo,
             )
 
     @pytest.mark.asyncio
@@ -949,7 +936,6 @@ class TestProfileGenerationTask:
             context="候选人张三，5年Python后端开发经验。",
             evidence_refs=("resume.pdf",),
         )
-        fake_bank = self._make_fake_question_bank(["Python", "Redis"])
 
         # 1. 创建一个"已完成"的 resume_parse Job（模拟 CandidateFacts 产出）
         resume_job = job_repo.create_job(
@@ -1005,7 +991,6 @@ class TestProfileGenerationTask:
         result = await handler(
             job,
             profile_source=fake_source,
-            question_bank=fake_bank,
             job_repo=job_repo,
         )
 
@@ -1018,12 +1003,11 @@ class TestProfileGenerationTask:
     async def test_candidate_profile_without_facts_uses_rules(
         self, job_repo: JobRepository
     ):
-        """无 CandidateFacts → experience_level 应为空（规则匹配模式，向后兼容）。"""
+        """无 CandidateFacts → experience_level 为空，skills 为空。"""
         fake_source = self._make_fake_profile_source(
             context="候选人，熟悉 Python。",
             evidence_refs=("resume.pdf",),
         )
-        fake_bank = self._make_fake_question_bank(["Python"])
 
         job = job_repo.create_job(
             job_type="profile_generation",
@@ -1038,10 +1022,11 @@ class TestProfileGenerationTask:
         result = await handler(
             job,
             profile_source=fake_source,
-            question_bank=fake_bank,
+            job_repo=job_repo,
         )
 
         assert result["kb_id"] == "default"
+        assert result["skills"] == []
         assert result["experience_level"] == ""  # 无 CandidateFacts → 不推理
 
 
@@ -1110,7 +1095,7 @@ class TestInterviewPreparationTask:
             "target_kb_id": "default",
             "target_role": "后端工程师",
             "target_company": "某公司",
-            "config_json": '{"question_count":1,"candidate_kb_id":"default"}',
+            "config_json": '{"question_count":1,"candidate_kb_id":"default","topic_weights":{"Python":1.0}}',
             "current_stage": "PENDING",
             "completed_steps": [],
             "degraded": False,
@@ -1156,7 +1141,7 @@ class TestInterviewPreparationTask:
         assert "PLAN_GENERATION" in result["completed_steps"]
         # COMPANY_INTELLIGENCE 无 handler → 降级
         assert result["degraded"] is True
-        assert len(result["degradation_reasons"]) == 1
+        assert len(result["degradation_reasons"]) == 2  # NOWCODER_MCP + PLAN_QUALITY
         # stage_results 只保存摘要信息（skills_count / plan_id 等）
         assert "skills_count" in result["stage_results"]["resume_parse"]
         assert "skills_count" in result["stage_results"]["candidate_profile"]
@@ -1199,10 +1184,10 @@ class TestInterviewPreparationTask:
 
         assert result["status"] == "READY"
         assert len(result["completed_steps"]) == 5
-        # RESUME_PARSE 跳过（stage_results 中旧数据保留），CANDIDATE_PROFILE 重跑
+        # 恢复逻辑清除 RESUME_PARSE/CANDIDATE_PROFILE/JOB_PROFILE，全部重跑
         assert result["completed_steps"][0] == "RESUME_PARSE"
         assert result["completed_steps"][1] == "CANDIDATE_PROFILE"
-        assert "facts" in result["stage_results"]["resume_parse"]  # 旧数据保留
+        assert "skills_count" in result["stage_results"]["resume_parse"]  # 重跑后为摘要
         assert "skills_count" in result["stage_results"]["candidate_profile"]  # 重跑后为摘要
 
     @pytest.mark.asyncio
@@ -1306,7 +1291,7 @@ class TestPreparationWorkerEndToEnd:
             "target_kb_id": "default",
             "target_role": "后端工程师",
             "target_company": "某公司",
-            "config_json": '{"question_count":2,"candidate_kb_id":"default"}',
+            "config_json": '{"question_count":2,"candidate_kb_id":"default","topic_weights":{"Python":1.0}}',
             "current_stage": "PENDING",
             "completed_steps": [],
             "degraded": False,

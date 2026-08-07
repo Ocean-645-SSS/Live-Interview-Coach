@@ -1,3 +1,5 @@
+import pytest
+
 from liverag.interview.application.planner import InterviewPlanner
 from liverag.interview.question_bank.catalog import QuestionBank, QuestionBankDocument
 from liverag.interview.schemas import (
@@ -32,7 +34,8 @@ def _question(question_id: str, category: str) -> InterviewQuestion:
     )
 
 
-def test_planner_prioritizes_job_and_candidate_topics():
+@pytest.mark.asyncio
+async def test_planner_prioritizes_job_and_candidate_topics():
     bank = QuestionBank(
         QuestionBankDocument(
             version=3,
@@ -46,7 +49,7 @@ def test_planner_prioritizes_job_and_candidate_topics():
         target_role="Python 后端",
     )
 
-    plan = InterviewPlanner(bank).build(
+    plan = await InterviewPlanner(bank).build(
         title="岗位模拟面试",
         config=config,
         candidate_profile=CandidateProfile(skills=["Python"]),
@@ -65,7 +68,8 @@ def test_planner_prioritizes_job_and_candidate_topics():
     assert plan.plan_version == 3
 
 
-def test_planner_rejects_source_specific_term_missing_from_profiles():
+@pytest.mark.asyncio
+async def test_planner_rejects_source_specific_term_missing_from_profiles():
     generic = _question("q-agent", "Agent")
     generic = generic.model_copy(update={"topics": ["Agent架构"]})
     source_specific = _question("q-todo", "Agent").model_copy(
@@ -75,7 +79,7 @@ def test_planner_rejects_source_specific_term_missing_from_profiles():
         QuestionBankDocument(version=1, questions=[source_specific, generic])
     )
 
-    plan = InterviewPlanner(bank).build(
+    plan = await InterviewPlanner(bank).build(
         title="Agent 面试",
         config=InterviewConfig(question_count=1, target_kb_id="job", target_role="Agent"),
         candidate_profile=CandidateProfile(

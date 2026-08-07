@@ -1,10 +1,11 @@
 """把个人资料库和目标岗位库整理成可用于选题的轻量画像。
 
+正确调用链：ProfileService → CandidateFacts → Profile
+不再依赖题库标签做字符串匹配，skills 直接从结构化事实中提取。
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import date
 from typing import Protocol
@@ -34,12 +35,10 @@ class KnowledgeContextSource(Protocol):
 
 
 class InterviewProfileService:
-    """读取个人简历+岗位JD，并提取题库能够识别的技术标签。"""
+    """读取个人简历+岗位JD，从结构化事实中生成画像。"""
 
-    def __init__(self, source: KnowledgeContextSource, labels: list[str]):
+    def __init__(self, source: KnowledgeContextSource):
         self._source = source
-        #去重后的一级分类标签和主题标签
-        self._labels = _unique_labels(labels)
 
     async def build_candidate_profile(
         self,
@@ -47,10 +46,12 @@ class InterviewProfileService:
         *,
         candidate_facts: CandidateFacts | None = None,
     ) -> CandidateProfile:
-        """读取简历资料库，找出技术栈和项目线索。
+        """读取简历资料库，从 CandidateFacts 提取技术栈和项目线索。
 
-        当 candidate_facts 不为 None 时，利用事实数据推理 experience_level；
-        否则保持规则匹配模式（向后兼容）。
+        当 candidate_facts 不为 None 时：
+          - skills 直接取自 facts.skills
+          - experience_level 从 work_experience 时间跨度推理
+        否则 skills 为空（向后兼容）。
         """
 
         result = await self._source.retrieve(
@@ -61,15 +62,16 @@ class InterviewProfileService:
             ),
         )
 
-        #推断用户经验
         experience_level = ""
+        skills: list[str] = []
         if candidate_facts is not None:
+            skills = list(candidate_facts.skills)
             experience_level = _infer_experience_level(candidate_facts.work_experience)
 
         return CandidateProfile(
             kb_id=kb_id,
             summary=_limit_text(result.context),
-            skills=self._match_labels(result.context),
+            skills=skills,
             projects=_project_lines(result.context),
             experience_level=experience_level,
             evidence_refs=list(result.evidence_refs),
@@ -82,7 +84,7 @@ class InterviewProfileService:
         company: str | None,
         role: str,
     ) -> JobProfile:
-        """读取选中的公司岗位库，找出招聘要求对应的技术标签。"""
+        """读取选中的公司岗位库，生成岗位画像。"""
 
         result = await self._source.retrieve(
             kb_id=kb_id,
@@ -96,42 +98,9 @@ class InterviewProfileService:
             company=company,
             role=role,
             summary=_limit_text(result.context),
-            required_skills=self._match_labels(result.context),
+            required_skills=[],
             evidence_refs=list(result.evidence_refs),
         )
-
-    def _match_labels(self, text: str) -> list[str]:
-        """从简历或JD文本里，提取出题库已经认识的技术标签"""
-
-        normalized = text.casefold()  # 不区分大小写
-        return [
-            label
-            for label in self._labels
-            if _contains_label(normalized, label.casefold())
-        ]
-
-
-def _contains_label(normalized_text: str, normalized_label: str) -> bool:
-    """匹配完整英文技术词，避免把 PPO 从 support、SSE 从 assessment 中误提取。"""
-
-    if re.search(r"[a-z0-9]", normalized_label):
-        pattern = rf"(?<![a-z0-9]){re.escape(normalized_label)}(?![a-z0-9])"
-        return re.search(pattern, normalized_text) is not None
-    return normalized_label in normalized_text
-
-
-def _unique_labels(labels: list[str]) -> list[str]:
-    """标签去重"""
-
-    seen: set[str] = set()
-    result: list[str] = []
-    for label in labels:
-        normalized = label.casefold()
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        result.append(label)
-    return result
 
 
 def _limit_text(text: str, maximum: int = 6000) -> str:

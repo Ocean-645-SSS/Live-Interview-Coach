@@ -20,7 +20,7 @@ from liverag.interview.persistence.repository import (
     RecordNotFoundError,
 )
 from liverag.interview.records import JobStatus
-from liverag.interview.schemas import InterviewConfig, InterviewPlan, PreparationStage
+from liverag.interview.schemas import InterviewConfig, InterviewPlan, InterviewState, PreparationStage
 from liverag.interview.application.service import InterviewService
 from liverag.interview.state_machine import InterviewEventType, InterviewTransitionError
 
@@ -307,13 +307,34 @@ async def evaluate_answer(
     answer_id: str,
     service: ServiceDependency,
 ):
-    """异步生成答案"""
+    """异步生成答案评价"""
 
     return await _execute_async(lambda: service.evaluate_answer(answer_id))
 
 
 @router.post("/sessions/{session_id}/report")
-def generate_report(session_id: str, service: ServiceDependency):
+async def generate_report(
+    session_id: str,
+    service: ServiceDependency,
+    job_repo: JobRepoDependency = Depends(get_job_repository),
+    redis_queue: RedisQueueDependency = Depends(get_redis_queue),
+    async_mode: bool = Query(default=False, alias="async"),
+):
+    """生成面试报告。
+
+    当 async_mode=true 时：
+    - 创建 report_generation Job 并入队
+    - 立即返回 job_id 供前端轮询
+    - Worker 在后台异步生成报告
+
+    当 async_mode=false（默认）时：
+    - 保持现有同步行为（直接生成并返回报告）
+    """
+
+    if async_mode:
+        return await _execute_async(
+            lambda: _create_report_generation_job(service, job_repo, redis_queue, session_id)
+        )
     return _execute(lambda: service.generate_report(session_id))
 
 
@@ -351,21 +372,28 @@ async def _create_and_enqueue_demo(
     redis_queue: RedisQueue,
     delay_seconds: float,   #延迟时间
 ) -> dict[str, Any]:
-    """创建后台任务+后台任务异步入队"""
+    """创建后台任务+后台任务异步入队（按 3.2.8 幂等流程）。"""
 
     import uuid
     resource_id = uuid.uuid4().hex[:12]
+
+    # 步骤 2：Redis 锁 — 短暂重复投递保护（demo 使用随机 resource_id，天然不冲突）
+    await redis_queue.acquire_lock(
+        job_type="demo",
+        resource_id=resource_id,
+        ttl=60,
+    )
 
     #创建后台任务
     job = job_repo.create_job(
         job_type="demo",    #测试
         idempotency_key=f"demo_{resource_id}_{uuid.uuid4().hex[:8]}",   #幂等键
         business_resource_id=resource_id,   #业务资源id
-        payload={"delay_seconds": delay_seconds},   
+        payload={"delay_seconds": delay_seconds},
     )
     #后台任务入队
     await redis_queue.enqueue(job_type="demo", job_id=job.id)
-    
+
     return {"job_id": job.id, "status": job.status.value}
 
 
@@ -466,7 +494,7 @@ async def _create_preparation_job(
     #构建幂等键（interview_id 本身已唯一，配置变更由业务层判断）
     idempotency_key = f"interview_preparation:{interview_id}"
 
-    #幂等检查：已有 COMPLETED Job → 直接返回
+    # 步骤 1：幂等键查询 — 已有 Job 则直接返回
     existing = job_repo.find_by_idempotency(
         job_type="interview_preparation",
         idempotency_key=idempotency_key,
@@ -476,6 +504,28 @@ async def _create_preparation_job(
             return {"job_id": existing.id, "status": existing.status.value}
         if existing.status in (JobStatus.PENDING, JobStatus.QUEUED, JobStatus.RUNNING):
             return {"job_id": existing.id, "status": existing.status.value}
+
+    # 步骤 2：Redis 锁 — 短暂重复投递保护（3.2.8）
+    lock_acquired = await redis_queue.acquire_lock(
+        job_type="interview_preparation",
+        resource_id=interview_id,
+        ttl=60,
+    )
+    if not lock_acquired:
+        # 另一并发请求正在创建 → 重新查询获取 job_id
+        import asyncio as _asyncio
+        await _asyncio.sleep(0.1)
+        retry_existing = job_repo.find_by_idempotency(
+            job_type="interview_preparation",
+            idempotency_key=idempotency_key,
+        )
+        if retry_existing is not None:
+            return {"job_id": retry_existing.id, "status": retry_existing.status.value}
+        # 极端情况：锁还在但 Job 仍未创建 → 返回 409
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="面试准备任务正在创建中，请稍后重试",
+        )
 
     #构建 payload
     payload = {
@@ -504,8 +554,12 @@ async def _create_preparation_job(
     #入队 Redis
     await redis_queue.enqueue(job_type="interview_preparation", job_id=job.id)
 
-    #更新 Interview.state: CREATED → PREPARING（如果有对应方法）
-    # 注：3.2-A 骨架阶段暂不修改 Interview.state，后续 3.2-D 中实现
+    #更新 Interview.state: CREATED → PREPARING
+    service.update_interview_state(
+        interview_id=interview_id,
+        state=InterviewState.PREPARING,
+        expected_version=interview.version,
+    )
 
     return {"job_id": job.id, "status": job.status.value}
 
@@ -552,6 +606,73 @@ def _read_preparation_status(
         updated_at=job.updated_at,
         error=job.error_message,
     )
+
+
+# ====================== Report Generation Job API ==============================
+
+async def _create_report_generation_job(
+    service: InterviewService,
+    job_repo: JobRepository,
+    redis_queue: RedisQueue,
+    session_id: str,
+) -> dict[str, Any]:
+    """创建 report_generation Job 并入队。"""
+
+    # 验证 Session 存在
+    service.get_session(session_id)
+
+    # 构建幂等键
+    idempotency_key = f"report:{session_id}"
+
+    # 步骤 1：幂等键查询 — 已有 Job 则直接返回
+    existing = job_repo.find_by_idempotency(
+        job_type="report_generation",
+        idempotency_key=idempotency_key,
+    )
+    if existing is not None:
+        if existing.status is JobStatus.COMPLETED:
+            return {"job_id": existing.id, "status": existing.status.value}
+        if existing.status in (JobStatus.PENDING, JobStatus.QUEUED, JobStatus.RUNNING):
+            return {"job_id": existing.id, "status": existing.status.value}
+
+    # 步骤 2：Redis 锁 — 短暂重复投递保护
+    lock_acquired = await redis_queue.acquire_lock(
+        job_type="report_generation",
+        resource_id=session_id,
+        ttl=60,
+    )
+    if not lock_acquired:
+        import asyncio as _asyncio
+        await _asyncio.sleep(0.1)
+        retry_existing = job_repo.find_by_idempotency(
+            job_type="report_generation",
+            idempotency_key=idempotency_key,
+        )
+        if retry_existing is not None:
+            return {"job_id": retry_existing.id, "status": retry_existing.status.value}
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="报告生成任务正在创建中，请稍后重试",
+        )
+
+    # 构建 payload
+    payload = {
+        "session_id": session_id,
+    }
+
+    # 创建 Job
+    job = job_repo.create_job(
+        job_type="report_generation",
+        idempotency_key=idempotency_key,
+        business_resource_id=session_id,
+        payload=payload,
+        max_attempts=3,
+    )
+
+    # 入队 Redis
+    await redis_queue.enqueue(job_type="report_generation", job_id=job.id)
+
+    return {"job_id": job.id, "status": job.status.value}
 
 
 __all__ = [

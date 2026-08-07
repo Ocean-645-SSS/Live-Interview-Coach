@@ -151,6 +151,18 @@ class CandidateFacts(StrictModel):
     raw_evidence_refs: list[str] = Field(default_factory=list)   #原始文档来源
 
 
+class CompanyInterviewProfile(StrictModel):
+    """公司面试情报 — 基于外部面经来源归纳的面试参考信息。
+
+    3.2 占位模型，3.3 由 MCP Client + Nowcoder Adapter 补全字段。
+    为 None 时 Planner 正常降级工作，不影响 Plan 生成。
+    """
+
+    company: str = ""
+    source: str = ""
+    frequent_topics: list[str] = Field(default_factory=list)  #高频考察主题
+
+
 class JobProfile(StrictModel):
     """从用户选中的公司岗位资料库中提取的岗位快照。"""
 
@@ -309,7 +321,7 @@ class InterviewPlan(StrictModel):
 
     @model_validator(mode="after")
     def validate_plan_consistency(self) -> InterviewPlan:
-        """保证题目数量、标识和执行顺序满足实时编排要求。"""
+        """保证题目数量、标识、执行顺序和时长满足实时编排要求。"""
 
         if len(self.questions) != self.config.question_count:
             raise ValueError("问题列表数量必须与面试配置的问题数量一致")
@@ -322,6 +334,15 @@ class InterviewPlan(StrictModel):
         expected_order = list(range(1, len(self.questions) + 1))
         if actual_order != expected_order:
             raise ValueError("面试问题必须从 1 开始连续排序")
+
+        # 复核：总预计时长不能超过面试配置时长
+        total_seconds = sum(q.estimated_seconds for q in self.questions)
+        max_seconds = self.config.duration_minutes * 60
+        if total_seconds > max_seconds:
+            raise ValueError(
+                f"问题总预计时长（{total_seconds}s）超过面试配置时长 "
+                f"（{max_seconds}s，即 {self.config.duration_minutes} 分钟）"
+            )
         return self
 
 
@@ -398,6 +419,7 @@ __all__ = [
     "AnswerUncertainty",
     "CandidateFacts",
     "CandidateProfile",
+    "CompanyInterviewProfile",
     "DimensionScores",
     "FollowUpAction",
     "InterviewConfig",

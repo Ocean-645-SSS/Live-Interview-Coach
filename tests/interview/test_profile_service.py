@@ -51,9 +51,9 @@ class _Source:
 
 
 async def test_profile_service_builds_candidate_and_job_profiles():
-    bank = _bank()
-    labels = [*bank.list_categories(), *bank.list_topics()]
-    service = InterviewProfileService(_Source(), labels)
+    """ProfileService 不再通过题库标签匹配 skills；skills 来自 CandidateFacts，
+    required_skills 为空（JobProfile 不依赖标签匹配）。"""
+    service = InterviewProfileService(_Source())
 
     candidate = await service.build_candidate_profile("default")
     job = await service.build_job_profile(
@@ -62,39 +62,11 @@ async def test_profile_service_builds_candidate_and_job_profiles():
         role="后端开发",
     )
 
-    assert candidate.skills == ["Python", "异步编程"]
+    # 无 CandidateFacts 时 skills 为空
+    assert candidate.skills == []
     assert candidate.projects == ["项目：使用 Python 实现异步编程服务，负责系统设计。"]
     assert candidate.evidence_refs == ["resume.pdf"]
-    assert job.required_skills == ["Python", "异步编程"]
+    # required_skills 不再由标签匹配产生
+    assert job.required_skills == []
     assert job.company == "字节跳动"
     assert job.evidence_refs == ["jd.txt"]
-
-
-def test_profile_service_does_not_match_english_labels_inside_other_words():
-    bank = QuestionBank(
-        QuestionBankDocument(
-            version=1,
-            questions=[
-                _bank().get_question("q-python"),
-                InterviewQuestion(
-                    id="q-short-labels",
-                    order=2,
-                    type=QuestionType.TECHNICAL_KNOWLEDGE,
-                    source=QuestionSource.QUESTION_BANK,
-                    difficulty=InterviewDifficulty.INTERMEDIATE,
-                    category="Agent",
-                    topics=["PPO", "SSE"],
-                    question_text="解释强化学习与流式传输。",
-                    objective="检查技术基础",
-                    rubric=QuestionRubric(
-                        expected_points=[RubricPoint(id="point", content="关键点")]
-                    ),
-                    reference_answer="参考答案",
-                    source_reference="test.md#labels",
-                ),
-            ],
-        )
-    )
-    service = InterviewProfileService(_Source(), [*bank.list_categories(), *bank.list_topics()])
-
-    assert service._match_labels("support and assessment") == []

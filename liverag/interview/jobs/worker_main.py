@@ -26,15 +26,10 @@ from liverag.config.settings import (
 )
 from liverag.interview.jobs.queue import RedisQueue
 from liverag.interview.jobs.repository import JobRepository
-from liverag.interview.jobs.tasks import (
-    demo_task,  
-    interview_preparation_task,  
-    profile_generation_task,  
-    registered_types,
-    resume_parse_task, 
-)
+from liverag.interview.jobs.tasks import registered_types
 from liverag.interview.jobs.worker import BackgroundWorker
 from liverag.interview.persistence.db import create_database_engine, create_session_factory
+from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
 from liverag.api.interview_profile_source import RagGatewayProfileSource
 from liverag.api.rag_gateway import RagGateway
 from liverag.interview.question_bank.catalog import QuestionBank, QuestionBankError
@@ -57,6 +52,8 @@ def _build_worker(
 
     #注册Job持久层Repository
     job_repo = JobRepository(session_factory)
+    #注册Interview持久层Repository（供 preparation workflow 持久化 InterviewPlan）
+    interview_repo = SQLAlchemyInterviewRepository(session_factory)
     #注册Redis队列+锁
     redis_queue = RedisQueue(
         redis_conn,
@@ -100,6 +97,7 @@ def _build_worker(
         llm_client=llm_client,
         profile_source=profile_source,
         llm_model=llm_model,
+        interview_repo=interview_repo,
         poll_timeout=settings.worker.poll_timeout_seconds,
         task_timeout=settings.worker.task_timeout_seconds,
         max_retries=settings.worker.max_retries,

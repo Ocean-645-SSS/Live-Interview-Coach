@@ -24,6 +24,7 @@ from liverag.interview.application.profile_service import KnowledgeContextSource
 from liverag.interview.jobs.queue import RedisQueue
 from liverag.interview.jobs.repository import BackgroundJobRecord, JobRepository
 from liverag.interview.jobs.tasks import get_handler, registered_types
+from liverag.interview.persistence.repository import InterviewRepository
 from liverag.interview.records import JobStatus
 from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.agent.tool.rag_client import RagClient
@@ -44,6 +45,7 @@ class BackgroundWorker:
         llm_client: AsyncOpenAI,
         profile_source: KnowledgeContextSource,
         rag_client: RagClient | None = None,
+        interview_repo: InterviewRepository | None = None,
         poll_timeout: float = 5.0,  #轮询间隔
         task_timeout: float = 300.0,   #超时时间
         max_retries: int = 3,   #最大轮次
@@ -55,6 +57,7 @@ class BackgroundWorker:
         self._profile_source = profile_source
         self._llm_model = llm_model
         self._rag_client = rag_client
+        self._interview_repo = interview_repo
         self._poll_timeout = poll_timeout
         self._task_timeout = task_timeout
         self._max_retries = max_retries
@@ -200,6 +203,8 @@ class BackgroundWorker:
         }
         if self._rag_client is not None:
             handler_kwargs["rag_client"] = self._rag_client
+        if self._interview_repo is not None:
+            handler_kwargs["interview_repo"] = self._interview_repo
 
         try:
             result = await asyncio.wait_for(

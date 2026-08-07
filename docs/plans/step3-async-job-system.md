@@ -585,12 +585,10 @@ question_bank: QuestionBank
 2. **从题库加载 candidate questions：** `QuestionBank.select_questions()`
 3. **程序级选题（现有逻辑）：** `InterviewPlanner.build()` —— 基于画像权重调整选题
 4. **Pydantic 校验：** `InterviewPlan` 自带 validator
-5. **程序级复核（增强）：**
+5. **复核（增强）：**
    - 总题数 = `config.question_count`
-   - section 分布合理（技术知识 + 项目深入 + 系统设计 ≥ 总题数的 60%）
    - 总时长 ≤ `config.duration_minutes`
-   - 单题时长在 `30-1800s` 范围内
-   - 难度分布与 `config.difficulty` 匹配，和CandidateProfile中的experience_level 匹配
+   - 难度分布与 `config.difficulty` 匹配
    - 必要 section 存在（TECHNICAL_KNOWLEDGE + PROJECT_DEEP_DIVE 至少各 1 题）
 6. **持久化 InterviewPlan：**
    - 写入 `InterviewModel.plan_json`（`InterviewPlan.model_dump_json()`）
@@ -617,7 +615,7 @@ question_bank: QuestionBank
 
 **关键规则：**
 - `Interview.state = PREPARING` 在 Preparation Job 创建时设置
-- `Interview.state = READY` 在 PLAN_GENERATION stage 成功完成后设置
+- `Interview.state = READY` 在 Preparation Workflow 成功收尾时设置
 - `Job.status = COMPLETED` 在所有 stage 完成后设置
 - 两者不混用，API 返回时分别展示
 
@@ -779,35 +777,6 @@ API: 创建 Job 前
   4. enqueue → Worker 消费
 ```
 
----
-
-### 3.2.9 文件修改清单
-
-#### 新增文件
-
-| 文件 | 说明 |
-|---|---|
-| `liverag/interview/application/resume_parser.py` | ResumeParser 类（从 resume_parse_task 抽取的业务逻辑） |
-| `liverag/interview/prompts/resume_facts_prompts.py` | CandidateFacts 抽取专用 prompt（替换原 resume_parse_prompts） |
-| `alembic/versions/xxxx_add_preparation_stage.py` | 无需新增表；仅需确保 Interview.state 枚举值含 PREPARING |
-
-#### 修改文件
-
-| 文件 | 说明 |
-|---|---|
-| `liverag/interview/schemas.py` | +`CandidateFacts`、+`EducationFact`、+`WorkExperienceFact`、+`ProjectFact`、+`PreparationStage`；扩展 `CandidateProfile`（新增可选推理字段）；扩展 `InterviewPlan`（新增 snapshot 元数据字段） |
-| `liverag/interview/records.py` | +`PreparationStage` 枚举（或放在 schemas.py） |
-| `liverag/interview/application/profile_service.py` | 增强 `InterviewProfileService`：新增 LLM 增强路径（接收 `CandidateFacts` 参数，生成推理字段） |
-| `liverag/interview/application/planner.py` | 增强 `InterviewPlanner.build()`：接收 `CompanyInterviewProfile` 可选参数；新增程序级校验 |
-| `liverag/interview/application/report.py` | 增强 `InterviewReportBuilder`：新增 LLM 生成 qualitative 部分 |
-| `liverag/interview/application/service.py` | 新增 `prepare_interview_async()` 方法（创建 Preparation Job）；重构 `generate_report()` 支持 async 路径 |
-| `liverag/interview/jobs/tasks.py` | 新增 `interview_preparation` handler；重构 `resume_parse_task` 为薄层（调 ResumeParser）；重构 `profile_generation_task` 为薄层（调 InterviewProfileService）；新增 `report_generation` handler |
-| `liverag/interview/prompts/resume_parse_prompts.py` | 更新 prompt 为事实抽取模式（或新增 `resume_facts_prompts.py` 后废弃此文件） |
-| `liverag/api/interview_routes.py` | 新增 `POST /{id}/prepare?async=true`；新增 `GET /{id}/preparation`；新增 `POST /sessions/{id}/complete?async=true` |
-| `liverag/interview/persistence/repository.py` | 可能需要新增 `update_interview_state()` 方法 |
-| `liverag/interview/persistence/sqlalchemy_repository.py` | 实现 `update_interview_state()` |
-| `tests/interview/test_background_jobs.py` | 扩展：Preparation Workflow 测试、幂等测试、降级测试、snapshot 测试 |
-
 #### 不需要的改动
 
 - **不需要新增 DB 表：** `CandidateFacts` 作为 Pydantic schema 存储在 Job `result_json` 中
@@ -816,108 +785,6 @@ API: 创建 Job 前
 
 ---
 
-### 3.2.10 测试计划
-
-#### Preparation Workflow
-
-- [ ] `interview_preparation` handler：resume_parse → profile → plan 正常串行执行
-- [ ] 某个 stage 失败后的有限 retry（attempt < max_attempts → 重试）
-- [ ] Worker 在中间 stage 重启后可以恢复（已完成 stage 不重复执行）
-- [ ] Preparation Job 最终正确进入 COMPLETED
-- [ ] Interview.state 最终正确进入 READY
-- [ ] `GET /api/interviews/{id}/preparation` 返回正确的 stage 和 completed_steps
-
-#### 幂等
-
-- [ ] 相同文档 snapshot 重复 prepare → 不重复生成 CandidateFacts（复用已有 `resume_parse` Job 结果）
-- [ ] 简历内容变化后（document_hash 变化）→ 产生新的 CandidateFacts
-- [ ] CandidateFacts 变化后 → 产生新的 CandidateProfile
-- [ ] CandidateProfile 变化后 → 重新生成 Plan
-- [ ] Evaluation 变化后 → 重新生成 Report
-- [ ] Redis 锁失效时 PostgreSQL 唯一约束仍能防止最终重复提交
-- [ ] `find_by_idempotency()` 返回已有 COMPLETED Job 时 API 直接返回已有 job_id
-
-#### MCP 降级
-
-- [ ] Nowcoder 正常 → CompanyInterviewProfile 可用，Plan 含面经标记
-- [ ] Nowcoder timeout → 降级，degraded=true，Plan 正常生成（仅用 CandidateProfile + JobProfile）
-- [ ] Nowcoder unavailable → 降级，degraded=true，Plan 正常生成
-- [ ] capability discovery 失败 → 降级
-- [ ] schema/contract 不符合要求 → 降级
-- [ ] 以上所有降级场景都不能阻塞 Preparation Workflow → 最终进入 READY
-
-
-#### 实时链路（回归）
-
-确保 LiveKit realtime interview：
-- [ ] 不访问 Redis Queue
-- [ ] 不调用 MCP
-- [ ] 不等待 Preparation Worker
-- [ ] final transcript 和实时状态迁移保持同步业务逻辑
-
-#### 渐进式 API
-
-- [ ] `?async=true` → 返回 `{job_id, status: "PENDING"}`，后台执行
-- [ ] `?async=false`（默认）→ 同步执行，直接返回结果
-- [ ] 两种路径使用相同的 Application Service 实例
-- [ ] Redis 不可用时 `?async=true` 返回 503 错误，`?async=false` 正常工作
-
----
-
-### 3.2.11 推荐实施顺序
-
-```
-3.2-A: PreparationStage 枚举 + interview_preparation Job 骨架
-       ├── 新增 PreparationStage 枚举
-       ├── 注册 interview_preparation handler（空 stage 循环）
-       ├── POST /{id}/prepare?async=true API
-       ├── GET /{id}/preparation API
-       └── 测试：空 stage 循环 + Job 状态流转
-
-3.2-B: Resume Facts Extraction（resume_parse）
-       ├── 新增 CandidateFacts Pydantic schema
-       ├── 新增 ResumeParser Application Service
-       ├── 更新 resume_parse prompt → 事实抽取模式
-       ├── 重构 resume_parse_task handler → 薄层
-       ├── 集成到 interview_preparation stage 1
-       └── 测试：CandidateFacts 抽取 + 幂等 + input_fingerprint
-
-3.2-C: Profile Generation 增强
-       ├── 扩展 CandidateProfile（新增可选推理字段）
-       ├── 增强 InterviewProfileService（LLM 增强路径）
-       ├── 重构 profile_generation_task handler → 薄层
-       ├── 集成到 interview_preparation stage 2 + 3
-       └── 测试：推理字段生成 + 溯源 + input_fingerprint
-
-3.2-D: Plan Generation 增强
-       ├── 扩展 InterviewPlan（snapshot 元数据字段）
-       ├── 增强 InterviewPlanner（程序级校验 + CompanyInterviewProfile 输入）
-       ├── Interview.state: PREPARING → READY
-       ├── 集成到 interview_preparation stage 4 + 5
-       └── 测试：Plan 生成 + snapshot 冻结 + Interview state 联动
-
-3.2-E: Report Generation 独立 Workflow
-       ├── 增强 InterviewReportBuilder（LLM qualitative 部分）
-       ├── 注册 report_generation handler
-       ├── POST /sessions/{id}/complete?async=true API
-       └── 测试：Report 生成 + 幂等 + input_fingerprint
-
-3.2-F: MCP Intelligence Integration（与 3.3 联动）
-       ├── COMPANY_INTELLIGENCE stage 集成
-       ├── 降级逻辑实现
-       └── 测试：正常 + timeout + unavailable + schema error
-
-3.2-G: 渐进式 API 完善 + 前端轮询
-       ├── sync/async 共享 Application Service 确认
-       ├── GET /{id}/preparation 完善
-       └── 端到端测试：sync + async 路径
-
-3.2-H: 幂等 / 恢复 / 回归测试完善
-       ├── PostgreSQL 唯一约束测试
-       ├── Redis 锁失效测试
-       ├── Worker 重启恢复测试
-       └── 实时链路回归测试
-```
 
 **阶段门槛：**
 - 3.2-B 依赖 3.2-A（需要 Preparation Workflow 骨架）

@@ -48,7 +48,7 @@ from liverag.interview.records import (
 )
 from liverag.interview.application.report import InterviewReportBuilder
 from liverag.interview.persistence.repository import InterviewRepository, RecordNotFoundError
-from liverag.interview.schemas import AnswerEvaluation, InterviewConfig, InterviewPlan
+from liverag.interview.schemas import AnswerEvaluation, InterviewConfig, InterviewPlan, InterviewState
 from liverag.interview.state_machine import InterviewEventType
 
 
@@ -146,7 +146,7 @@ class InterviewService:
                     )
                 )
         #生成面试顶层计划
-        plan = InterviewPlanner(question_bank).build(
+        plan = await InterviewPlanner(question_bank).build(
             title=title,
             config=config,
             candidate_profile=candidate_profile,
@@ -173,6 +173,20 @@ class InterviewService:
 
     def get_interview(self, interview_id: str) -> InterviewRecord:
         return self.repository.get_interview(interview_id)
+
+    def update_interview_state(
+        self,
+        *,
+        interview_id: str,
+        state: InterviewState,
+        expected_version: int,
+    ) -> InterviewRecord:
+        """更新 Interview 顶层状态（如 CREATED → PREPARING）。"""
+        return self.repository.update_interview_state(
+            interview_id=interview_id,
+            state=state,
+            expected_version=expected_version,
+        )
 
     def save_interview_plan(
         self,
