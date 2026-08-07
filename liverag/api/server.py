@@ -146,9 +146,10 @@ interview_question_bank = QuestionBank.from_file(
 )
 
 #配置profile service
+_labels = [*interview_question_bank.list_categories(), *interview_question_bank.list_topics()]
 interview_profile_service = InterviewProfileService(
     RagGatewayProfileSource(rag_gateway),
-    interview_question_bank,
+    _labels,
 )
 
 #注册interview的service层

@@ -253,13 +253,33 @@ class JobRepository(AbstractJobRepository):
             model = db.get(BackgroundJobModel, job_id)
             if model is None:
                 raise LookupError(f"Job 不存在：{job_id}")
-            
+
             #更新status
             model.status = status
             #更新更新时间
             model.updated_at = _utc_now()
             db.flush()
 
+            return _job_record(model)
+
+    def update_payload(
+        self,
+        job_id: str,
+        payload: dict[str, Any],
+    ) -> BackgroundJobRecord:
+        """更新 Job 的 payload_json，用于 stage 进度追踪等中途更新。
+
+        Worker handler 在长流程中通过此方法更新 Job 的当前 stage 和已完成步骤，
+        使 API 可以实时查询准备进度。
+        """
+
+        with session_scope(self._session_factory) as db:
+            model = db.get(BackgroundJobModel, job_id)
+            if model is None:
+                raise LookupError(f"Job 不存在：{job_id}")
+            model.payload_json = json.dumps(payload, ensure_ascii=False)
+            model.updated_at = _utc_now()
+            db.flush()
             return _job_record(model)
 
 

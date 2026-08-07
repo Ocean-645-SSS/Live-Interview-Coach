@@ -15,7 +15,9 @@ import asyncio
 import logging
 import signal
 
-import redis.asyncio as redis  # pyright: ignore[reportMissingImports]
+import redis.asyncio as redis 
+from openai import AsyncOpenAI
+from pathlib import Path
 
 from liverag.config.settings import (
     AppSettings,
@@ -24,10 +26,18 @@ from liverag.config.settings import (
 )
 from liverag.interview.jobs.queue import RedisQueue
 from liverag.interview.jobs.repository import JobRepository
-from liverag.interview.jobs.tasks import registered_types
-from liverag.interview.jobs.tasks import demo_task  # noqa: F401  # pyright: ignore[reportUnusedImport]  — 导入时触发 @register("demo") 装饰器
+from liverag.interview.jobs.tasks import (
+    demo_task,  
+    interview_preparation_task,  
+    profile_generation_task,  
+    registered_types,
+    resume_parse_task, 
+)
 from liverag.interview.jobs.worker import BackgroundWorker
 from liverag.interview.persistence.db import create_database_engine, create_session_factory
+from liverag.api.interview_profile_source import RagGatewayProfileSource
+from liverag.api.rag_gateway import RagGateway
+from liverag.interview.question_bank.catalog import QuestionBank, QuestionBankError
 
 logger = logging.getLogger("liverag.interview.jobs.worker_main")
 
@@ -53,9 +63,43 @@ def _build_worker(
         lock_ttl_seconds=settings.redis.lock_ttl_seconds,
     )
 
+    #interview profile source检索来源
+    profile_source = RagGatewayProfileSource(RagGateway(settings))
+
+    # LLM 客户端：使用与实时语音相同的 LLM 配置
+    if not settings.voice.llm_api_key.strip():
+        raise RuntimeError(
+            "Background Worker 的 resume_parse 任务需要配置 "
+            "VOICE_LLM_API_KEY 或 DASHSCOPE_API_KEY"
+        )
+    llm_model = settings.voice.llm_model
+    llm_client = AsyncOpenAI(
+        api_key=settings.voice.llm_api_key,
+        base_url=settings.voice.llm_base_url,
+        timeout=120.0,  # 简历解析允许更长超时
+    )
+
+    #加载结构化题库（profile_generation / plan_generation 共用） ----
+    question_bank_path = (
+        Path(__file__).resolve().parents[1]
+        / "question_bank"
+        / "data"
+        / "question_bank.v1.json"
+    )
+    try:
+        question_bank = QuestionBank.from_file(question_bank_path)
+    except QuestionBankError as exc:
+        raise RuntimeError(
+            f"Background Worker 无法加载题库文件 {question_bank_path}：{exc}"
+        ) from exc
+
     return BackgroundWorker(
         job_repo=job_repo,
         redis_queue=redis_queue,
+        question_bank=question_bank,
+        llm_client=llm_client,
+        profile_source=profile_source,
+        llm_model=llm_model,
         poll_timeout=settings.worker.poll_timeout_seconds,
         task_timeout=settings.worker.task_timeout_seconds,
         max_retries=settings.worker.max_retries,

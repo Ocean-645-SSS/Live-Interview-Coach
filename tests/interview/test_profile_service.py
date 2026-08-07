@@ -51,7 +51,9 @@ class _Source:
 
 
 async def test_profile_service_builds_candidate_and_job_profiles():
-    service = InterviewProfileService(_Source(), _bank())
+    bank = _bank()
+    labels = [*bank.list_categories(), *bank.list_topics()]
+    service = InterviewProfileService(_Source(), labels)
 
     candidate = await service.build_candidate_profile("default")
     job = await service.build_job_profile(
@@ -93,6 +95,6 @@ def test_profile_service_does_not_match_english_labels_inside_other_words():
             ],
         )
     )
-    service = InterviewProfileService(_Source(), bank)
+    service = InterviewProfileService(_Source(), [*bank.list_categories(), *bank.list_topics()])
 
     assert service._match_labels("support and assessment") == []

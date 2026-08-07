@@ -1,13 +1,21 @@
-"""把个人资料库和目标岗位库整理成可用于选题的轻量画像。"""
+"""把个人资料库和目标岗位库整理成可用于选题的轻量画像。
+
+"""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Protocol
 
-from liverag.interview.question_bank.catalog import QuestionBank
-from liverag.interview.schemas import CandidateProfile, JobProfile
+from liverag.interview.schemas import (
+    CandidateFacts,
+    CandidateProfile,
+    InterviewDifficulty,
+    JobProfile,
+    WorkExperienceFact,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,18 +34,24 @@ class KnowledgeContextSource(Protocol):
 
 
 class InterviewProfileService:
-    """读取两个知识库，并提取题库能够识别的技术标签。"""
+    """读取个人简历+岗位JD，并提取题库能够识别的技术标签。"""
 
-    def __init__(self, source: KnowledgeContextSource, question_bank: QuestionBank):
+    def __init__(self, source: KnowledgeContextSource, labels: list[str]):
         self._source = source
-        self._question_bank = question_bank
         #去重后的一级分类标签和主题标签
-        self._labels = _unique_labels(
-            [*question_bank.list_categories(), *question_bank.list_topics()]
-        )
+        self._labels = _unique_labels(labels)
 
-    async def build_candidate_profile(self, kb_id: str) -> CandidateProfile:
-        """读取唯一的简历资料库，找出技术栈和项目线索。"""
+    async def build_candidate_profile(
+        self,
+        kb_id: str,
+        *,
+        candidate_facts: CandidateFacts | None = None,
+    ) -> CandidateProfile:
+        """读取简历资料库，找出技术栈和项目线索。
+
+        当 candidate_facts 不为 None 时，利用事实数据推理 experience_level；
+        否则保持规则匹配模式（向后兼容）。
+        """
 
         result = await self._source.retrieve(
             kb_id=kb_id,
@@ -46,11 +60,18 @@ class InterviewProfileService:
                 "系统设计和可以在面试中深入追问的技术细节。"
             ),
         )
+
+        #推断用户经验
+        experience_level = ""
+        if candidate_facts is not None:
+            experience_level = _infer_experience_level(candidate_facts.work_experience)
+
         return CandidateProfile(
             kb_id=kb_id,
             summary=_limit_text(result.context),
             skills=self._match_labels(result.context),
             projects=_project_lines(result.context),
+            experience_level=experience_level,
             evidence_refs=list(result.evidence_refs),
         )
 
@@ -126,6 +147,46 @@ def _project_lines(text: str) -> list[str]:
     markers = ("项目", "负责", "设计", "实现", "架构")
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return [line[:500] for line in lines if any(marker in line for marker in markers)][:8]
+
+
+def _infer_experience_level(
+    work_experience: list[WorkExperienceFact],
+) -> str:
+    """从工作经历事实中推断经验等级。
+
+    规则：
+    - 计算所有经历的有效起止年份跨度总和
+    - 0-1 年 → BEGINNER，1-3 年 → JUNIOR，3-5 年 → INTERMEDIATE
+    - 5-8 年 → SENIOR，8+ 年 → EXPERT
+    - 无法计算时返回空字符串
+    """
+
+    today = date.today()
+    total_years: float = 0.0
+
+    for exp in work_experience:
+        start = exp.start_at
+        end = exp.end_at if exp.end_at is not None else today
+
+        if start is None:
+            continue
+
+        years = (end - start).days / 365.25
+        if years < 0:
+            continue
+        total_years += years
+
+    if total_years <= 0:
+        return ""
+    if total_years <= 1:
+        return InterviewDifficulty.BEGINNER.value
+    if total_years <= 3:
+        return InterviewDifficulty.JUNIOR.value
+    if total_years <= 5:
+        return InterviewDifficulty.INTERMEDIATE.value
+    if total_years <= 8:
+        return InterviewDifficulty.SENIOR.value
+    return InterviewDifficulty.EXPERT.value
 
 
 __all__ = [

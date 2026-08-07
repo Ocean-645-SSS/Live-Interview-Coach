@@ -18,10 +18,15 @@ import logging
 import signal
 from typing import Any
 
+from openai import AsyncOpenAI
+
+from liverag.interview.application.profile_service import KnowledgeContextSource
 from liverag.interview.jobs.queue import RedisQueue
 from liverag.interview.jobs.repository import BackgroundJobRecord, JobRepository
 from liverag.interview.jobs.tasks import get_handler, registered_types
 from liverag.interview.records import JobStatus
+from liverag.interview.question_bank.catalog import QuestionBank
+from liverag.agent.tool.rag_client import RagClient
 
 logger = logging.getLogger("liverag.interview.jobs.worker")
 
@@ -34,17 +39,25 @@ class BackgroundWorker:
         *,
         job_repo: JobRepository,   #BackgroundJob的repository层
         redis_queue: RedisQueue,    #管理Redis的队列和锁
+        question_bank: QuestionBank,
+        llm_model: str,
+        llm_client: AsyncOpenAI,
+        profile_source: KnowledgeContextSource,
+        rag_client: RagClient | None = None,
         poll_timeout: float = 5.0,  #轮询间隔
         task_timeout: float = 300.0,   #超时时间
         max_retries: int = 3,   #最大轮次
-        deps: dict[str, Any] | None = None, #给任务处理器的工具箱（llm_client/rag_client)
     ) -> None:
         self._repo = job_repo
         self._queue = redis_queue
+        self._question_bank = question_bank
+        self._llm_client = llm_client
+        self._profile_source = profile_source
+        self._llm_model = llm_model
+        self._rag_client = rag_client
         self._poll_timeout = poll_timeout
         self._task_timeout = task_timeout
         self._max_retries = max_retries
-        self._deps = deps or {}
         self._shutdown_event = asyncio.Event()  #初始状态
         self._running = False
 
@@ -177,9 +190,20 @@ class BackgroundWorker:
         #标记运行中：QUEUE->RUNNING
         self._repo.mark_running(job_id)
 
+        # 组装 handler 依赖注入
+        handler_kwargs = {
+            "job_repo": self._repo,
+            "profile_source": self._profile_source,
+            "llm_client": self._llm_client,
+            "llm_model": self._llm_model,
+            "question_bank": self._question_bank,
+        }
+        if self._rag_client is not None:
+            handler_kwargs["rag_client"] = self._rag_client
+
         try:
             result = await asyncio.wait_for(
-                handler(job, self._repo, **self._deps),
+                handler(job, **handler_kwargs),
                 timeout=self._task_timeout,
             )
             #标记任务完成

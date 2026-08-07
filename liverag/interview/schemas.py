@@ -1,4 +1,4 @@
-"""Live Interview Coach V1 的业务数据契约。
+"""Live Interview Coach 的业务数据契约。
 
 本文件只负责定义跨模块传递的数据结构和基础校验规则，不负责数据库读写、
 状态迁移、模型调用或 HTTP 接口。状态机、题库、面试计划、评价服务和报告
@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from enum import Enum
 from typing import Annotated
 
@@ -83,6 +84,18 @@ class TimeoutAction(str, Enum):
     END_INTERVIEW = "END_INTERVIEW"   #结束面试
 
 
+class PreparationStage(str, Enum):
+    """面试准备 Workflow 的阶段，用于 interview_preparation Job 的内部 stage 追踪。"""
+
+    PENDING = "PENDING" #等待
+    RESUME_PARSING = "RESUME_PARSING"   #解析简历
+    CANDIDATE_PROFILE_GENERATION = "CANDIDATE_PROFILE_GENERATION"   #生成个人经历profile
+    JOB_PROFILE_GENERATION = "JOB_PROFILE_GENERATION"   #生成岗位profile
+    COMPANY_INTELLIGENCE = "COMPANY_INTELLIGENCE"   #公司面经情报（可降级）
+    PLAN_GENERATION = "PLAN_GENERATION" #生成计划
+    READY = "READY" #完成
+
+
 class StrictModel(BaseModel):
     """所有 Interview 领域模型的共同基类。
 
@@ -100,7 +113,42 @@ class CandidateProfile(StrictModel):
     summary: str = ""   #个人简介
     skills: list[NonEmptyText] = Field(default_factory=list)    #个人技能
     projects: list[NonEmptyText] = Field(default_factory=list)  #项目经历
+    experience_level: str = ""      # 匹配 schemas.py 中的InterviewDifficulty字段
     evidence_refs: list[NonEmptyText] = Field(default_factory=list)  #画像信息对应的原始资料列表
+
+# ====================== Resume Facts Extraction ======================
+class WorkExperienceFact(StrictModel):
+    """工作经历事实"""
+
+    company: str = ""   #公司名称
+    role: str = ""  #职位
+    description: str = ""   #职责描述原文摘要
+    technologies: list[str] = Field(default_factory=list)  #工作中用到的技术
+    start_at: date | None = None
+    end_at: date | None = None
+
+class ProjectFact(StrictModel):
+    """项目经历事实"""
+
+    name: str = ""  #项目名称
+    role: str = ""  #在项目中的角色
+    description: str = ""   #项目描述
+    technologies: list[str] = Field(default_factory=list)  #项目中用到的技术
+
+
+class CandidateFacts(StrictModel):
+    """从候选人文档中提取的结构化事实
+
+    resume_parse Job 的输出类型，后续由 profile_generation 消费
+    并加工为 CandidateProfile（加入推理维度）。
+    """
+
+    kb_id: str = "default"   #知识库 ID
+    name: str = ""  #候选人姓名
+    work_experience: list[WorkExperienceFact] = Field(default_factory=list)   #工作经历
+    projects: list[ProjectFact] = Field(default_factory=list)    #项目经历
+    skills: list[str] = Field(default_factory=list)  #技术技能
+    raw_evidence_refs: list[str] = Field(default_factory=list)   #原始文档来源
 
 
 class JobProfile(StrictModel):
@@ -348,6 +396,7 @@ class AnswerEvaluation(StrictModel):
 __all__ = [
     "AnswerEvaluation",
     "AnswerUncertainty",
+    "CandidateFacts",
     "CandidateProfile",
     "DimensionScores",
     "FollowUpAction",
@@ -357,10 +406,13 @@ __all__ = [
     "InterviewQuestion",
     "InterviewState",
     "JobProfile",
+    "PreparationStage",
+    "ProjectFact",
     "QuestionRubric",
     "QuestionSource",
     "QuestionType",
     "RubricPoint",
     "StrictModel",
     "TimeoutAction",
+    "WorkExperienceFact",
 ]

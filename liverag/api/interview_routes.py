@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from liverag.interview.application.evaluator import AnswerEvaluationProviderError
@@ -19,7 +20,7 @@ from liverag.interview.persistence.repository import (
     RecordNotFoundError,
 )
 from liverag.interview.records import JobStatus
-from liverag.interview.schemas import InterviewConfig, InterviewPlan
+from liverag.interview.schemas import InterviewConfig, InterviewPlan, PreparationStage
 from liverag.interview.application.service import InterviewService
 from liverag.interview.state_machine import InterviewEventType, InterviewTransitionError
 
@@ -350,7 +351,7 @@ async def _create_and_enqueue_demo(
     redis_queue: RedisQueue,
     delay_seconds: float,   #延迟时间
 ) -> dict[str, Any]:
-    """创建后台任务，验证异步链路"""
+    """创建后台任务+后台任务异步入队"""
 
     import uuid
     resource_id = uuid.uuid4().hex[:12]
@@ -396,10 +397,169 @@ def _read_job_status(job_repo: JobRepository, job_id: str) -> dict[str, Any]:
     }
 
 
+# ====================== Preparation API ==============================
+
+class PrepareInterviewResponse(BaseModel):
+    """异步准备面试的响应。"""
+    job_id: str = Field(min_length=1)
+    status: str = Field(min_length=1)
+
+
+class PreparationStatusResponse(BaseModel):
+    """面试准备进度查询的响应。"""
+    job_id: str | None = None
+    status: str = "PENDING"
+    stage: str | None = None
+    completed_steps: list[str] = Field(default_factory=list)
+    degraded: bool = False
+    degradation_reasons: list[str] = Field(default_factory=list)
+    started_at: str | None = None
+    updated_at: str | None = None
+    error: str | None = None
+
+
+@router.post("/{interview_id}/prepare")
+async def prepare_interview_async(
+    interview_id: str,
+    service: ServiceDependency,
+    job_repo: JobRepoDependency,
+    redis_queue: RedisQueueDependency,
+    async_mode: bool = Query(default=False, alias="async"),
+):
+    """触发面试异步准备。
+
+    当 async_mode=true 时：
+    - 创建 interview_preparation Job 并入队
+    - 立即返回 job_id 供前端轮询
+    - Worker 在后台按 stage 执行准备流程
+
+    当 async_mode=false（默认）时：
+    - 保持现有同步行为（复用 create_prepared_interview 逻辑）
+    """
+
+    #同步执行，报错
+    if not async_mode:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="async=false 暂未实现——请使用 POST /api/interviews/prepared 同步创建已准备的面试",
+        )
+
+    return await _execute_async(
+        lambda: _create_preparation_job(service, job_repo, redis_queue, interview_id)
+    )
+
+
+async def _create_preparation_job(
+    service: InterviewService,
+    job_repo: JobRepository,
+    redis_queue: RedisQueue,
+    interview_id: str,
+) -> dict[str, Any]:
+    """创建 interview_preparation Job 并入队。"""
+
+    #验证 interview 存在
+    interview = service.get_interview(interview_id)
+
+    #解析 interview config 获取准备参数
+    config = InterviewConfig.model_validate_json(interview.config_json)
+
+    #构建幂等键（interview_id 本身已唯一，配置变更由业务层判断）
+    idempotency_key = f"interview_preparation:{interview_id}"
+
+    #幂等检查：已有 COMPLETED Job → 直接返回
+    existing = job_repo.find_by_idempotency(
+        job_type="interview_preparation",
+        idempotency_key=idempotency_key,
+    )
+    if existing is not None:
+        if existing.status is JobStatus.COMPLETED:
+            return {"job_id": existing.id, "status": existing.status.value}
+        if existing.status in (JobStatus.PENDING, JobStatus.QUEUED, JobStatus.RUNNING):
+            return {"job_id": existing.id, "status": existing.status.value}
+
+    #构建 payload
+    payload = {
+        "interview_id": interview_id,
+        "config_json": interview.config_json,
+        "target_kb_id": config.target_kb_id,
+        "target_company": config.target_company,
+        "target_role": config.target_role,
+        "candidate_kb_id": config.candidate_kb_id,
+        "current_stage": PreparationStage.PENDING.value,
+        "completed_steps": [],
+        "degraded": False,
+        "degradation_reasons": [],
+        "stage_results": {},
+    }
+
+    #创建 Job
+    job = job_repo.create_job(
+        job_type="interview_preparation",
+        idempotency_key=idempotency_key,
+        business_resource_id=interview_id,
+        payload=payload,
+        max_attempts=3,
+    )
+
+    #入队 Redis
+    await redis_queue.enqueue(job_type="interview_preparation", job_id=job.id)
+
+    #更新 Interview.state: CREATED → PREPARING（如果有对应方法）
+    # 注：3.2-A 骨架阶段暂不修改 Interview.state，后续 3.2-D 中实现
+
+    return {"job_id": job.id, "status": job.status.value}
+
+
+@router.get("/{interview_id}/preparation")
+def get_preparation_status(
+    interview_id: str,
+    job_repo: JobRepoDependency,
+):
+    """查询面试准备的当前进度。
+    返回 Preparation Workflow 的阶段、已完成步骤、降级信息等。
+    前端通过此端点轮询准备进度。
+    """
+    return _execute(lambda: _read_preparation_status(job_repo, interview_id))
+
+
+def _read_preparation_status(
+    job_repo: JobRepository,
+    interview_id: str,
+) -> PreparationStatusResponse:
+    """从 interview_preparation Job 中读取准备状态。"""
+
+    # 查找该 interview 最近的 preparation Job
+    job = job_repo.get_job_by_resource(
+        job_type="interview_preparation",
+        business_resource_id=interview_id,
+    )
+
+    # 未找到任何 preparation Job → 未开始
+    if job is None:
+        return PreparationStatusResponse(status="NOT_STARTED")
+
+    # 从 payload_json 读取 stage 追踪信息
+    payload = json.loads(job.payload_json) if job.payload_json else {}
+
+    return PreparationStatusResponse(
+        job_id=job.id,
+        status=job.status.value,
+        stage=payload.get("current_stage"),
+        completed_steps=payload.get("completed_steps", []),
+        degraded=payload.get("degraded", False),
+        degradation_reasons=payload.get("degradation_reasons", []),
+        started_at=job.started_at,
+        updated_at=job.updated_at,
+        error=job.error_message,
+    )
+
+
 __all__ = [
     "CreateDemoJobRequest",
     "CreateInterviewRequest",
     "CreatePreparedInterviewRequest",
+    "PreparationStatusResponse",
+    "PrepareInterviewResponse",
     "ReceiveAnswerRequest",
     "SavePlanRequest",
     "TransitionRequest",

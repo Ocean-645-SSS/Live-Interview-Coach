@@ -512,7 +512,7 @@ def _has_specific_topic_match(
             return True
 
     # 2. 检查一级分类
-    category = question.category
+    category = _normalize_topic(question.category)
 
     if category != "agent" and category != "未分类":
         if normalized_weights.get(category, 0.0) > 0:

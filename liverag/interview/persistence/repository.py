@@ -271,7 +271,7 @@ class InterviewRepository(Protocol):
         content: dict[str, Any],
     ) -> InterviewReportRecord: ...
 
-
+#===================== Background Worker ======================
 @runtime_checkable
 class JobRepository(Protocol):
     """Background Job 的 PostgreSQL 持久化契约。"""
@@ -332,6 +332,12 @@ class JobRepository(Protocol):
     ) -> BackgroundJobRecord: ...
 
     def retry_job(self, job_id: str) -> BackgroundJobRecord: ...
+
+    def update_payload(
+        self,
+        job_id: str,
+        payload: dict[str, Any],
+    ) -> BackgroundJobRecord: ...
 
 
 __all__ = [
