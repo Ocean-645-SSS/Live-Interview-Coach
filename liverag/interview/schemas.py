@@ -151,18 +151,6 @@ class CandidateFacts(StrictModel):
     raw_evidence_refs: list[str] = Field(default_factory=list)   #原始文档来源
 
 
-class CompanyInterviewProfile(StrictModel):
-    """公司面试情报 — 基于外部面经来源归纳的面试参考信息。
-
-    3.2 占位模型，3.3 由 MCP Client + Nowcoder Adapter 补全字段。
-    为 None 时 Planner 正常降级工作，不影响 Plan 生成。
-    """
-
-    company: str = ""
-    source: str = ""
-    frequent_topics: list[str] = Field(default_factory=list)  #高频考察主题
-
-
 class JobProfile(StrictModel):
     """从用户选中的公司岗位资料库中提取的岗位快照。"""
 
@@ -318,6 +306,7 @@ class InterviewPlan(StrictModel):
     plan_version: PositiveInt = 1
     candidate_profile: CandidateProfile | None = None   #用户画像
     job_profile: JobProfile | None = None   #岗位画像
+    intelligence_status: str | None = None  # 公司面经情报状态（审计用）
 
     @model_validator(mode="after")
     def validate_plan_consistency(self) -> InterviewPlan:
@@ -419,7 +408,6 @@ __all__ = [
     "AnswerUncertainty",
     "CandidateFacts",
     "CandidateProfile",
-    "CompanyInterviewProfile",
     "DimensionScores",
     "FollowUpAction",
     "InterviewConfig",

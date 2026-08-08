@@ -15,6 +15,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 from openai import AsyncOpenAI
 
+from liverag.interview.intelligence.provider import InterviewIntelligenceQuery
+from liverag.interview.intelligence.service import IntelligenceService
 from liverag.interview.jobs.repository import BackgroundJobRecord
 from liverag.interview.application.profile_service import KnowledgeContextSource
 from liverag.interview.jobs.repository import JobRepository
@@ -296,6 +298,7 @@ async def interview_preparation_task(
     llm_model: str,
     question_bank: QuestionBank,
     interview_repo: InterviewRepository | None = None,
+    intelligence_service: IntelligenceService | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """面试准备 Workflow：直接复用 ResumeParser、ProfileService、Planner 等 Service。
@@ -353,6 +356,7 @@ async def interview_preparation_task(
     candidate_profile = None
     job_profile = None
     company_intel = None
+    intelligence_enrichment_result = None
 
     logger.info(
         "Preparation Workflow 开始",
@@ -429,14 +433,11 @@ async def interview_preparation_task(
 
             # ── COMPANY_INTELLIGENCE（可降级）──
             elif step_name == "COMPANY_INTELLIGENCE":
+                # 未提供公司名，主动跳过（不算降级）
                 if not target_company:
-                    degraded = True
-                    degradation_reasons.append(
-                        f"{step_name}: 未提供目标公司（COMPANY_NOT_PROVIDED）"
-                    )
                     completed_steps.append(step_name)
                     stage_results[step_name.lower()] = {
-                        "status": "degraded",
+                        "status": "skipped",
                         "stage": stage_name,
                         "reason": "company_not_provided",
                     }
@@ -446,22 +447,64 @@ async def interview_preparation_task(
                         extra={"job_id": job.id},
                     )
                 else:
-                    # TODO: 3.3 接入 MCP Client + Nowcoder Adapter
-                    degraded = True
-                    degradation_reasons.append(
-                        f"NOWCODER_MCP_NOT_ENABLED"
-                    )
-                    completed_steps.append(step_name)
-                    stage_results[step_name.lower()] = {
-                        "status": "degraded",
-                        "stage": stage_name,
-                        "reason": "not_implemented",
-                    }
-                    company_intel = None
-                    logger.warning(
-                        f"Stage {stage_name} 降级跳过（未实现）",
-                        extra={"job_id": job.id},
-                    )
+                    if intelligence_service is None:
+                        # IntelligenceService 未注入 → 降级
+                        degraded = True
+                        degradation_reasons.append(
+                            f"{step_name}: IntelligenceService 未注入 (NO_SERVICE)"
+                        )
+                        completed_steps.append(step_name)
+                        stage_results[step_name.lower()] = {
+                            "status": "degraded",
+                            "stage": stage_name,
+                            "reason": "no_intelligence_service",
+                        }
+                        company_intel = None
+                        logger.warning(
+                            "IntelligenceService 未注入，降级跳过 Company Intelligence",
+                            extra={"job_id": job.id},
+                        )
+
+                    else:
+                        # 构建查询并调用 IntelligenceService 生成 CompanyProfile
+                        query = InterviewIntelligenceQuery(
+                            company=target_company,
+                            role=target_role or "",
+                        )
+                        enrichment = await intelligence_service.get_company_profile(query)
+                        intelligence_enrichment_result = enrichment
+                        company_intel = enrichment.profile
+
+                        # 记录 stage 结果元数据
+                        stage_result: dict[str, Any] = {
+                            "status": enrichment.status.value,
+                            "stage": stage_name,
+                            "provider": enrichment.provider,
+                            "snapshot_hash": enrichment.snapshot_hash,
+                        }
+                        #如果enrich降级
+                        if enrichment.degraded:
+                            degraded = True
+                            for reason in enrichment.degradation_reasons:
+                                degradation_reasons.append(
+                                    f"{step_name}: {reason}"
+                                )
+                            stage_result["degraded"] = True
+                        if enrichment.cache_age_seconds is not None:
+                            stage_result["cache_age_seconds"] = enrichment.cache_age_seconds
+
+                        completed_steps.append(step_name)
+                        stage_results[step_name.lower()] = stage_result
+
+                        logger.info(
+                            "Company Intelligence 完成",
+                            extra={
+                                "job_id": job.id,
+                                "status": enrichment.status.value,
+                                "company": target_company,
+                                "degraded": enrichment.degraded,
+                            },
+                        )
 
             # ── PLAN_GENERATION（CandidateProfile + JobProfile 强制）──
             elif step_name == "PLAN_GENERATION":
@@ -478,6 +521,14 @@ async def interview_preparation_task(
                     job_profile=job_profile,
                     company_intel=company_intel,
                 )
+
+                # 设置公司情报审计状态
+                if intelligence_enrichment_result is not None:
+                    plan = plan.model_copy(
+                        update={
+                            "intelligence_status": intelligence_enrichment_result.status.value
+                        }
+                    )
 
                 # ──  增强复核 ──
                 quality_issues = validate_plan_quality(plan)

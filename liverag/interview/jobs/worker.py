@@ -46,6 +46,7 @@ class BackgroundWorker:
         profile_source: KnowledgeContextSource,
         rag_client: RagClient | None = None,
         interview_repo: InterviewRepository | None = None,
+        intelligence_service: object | None = None,
         poll_timeout: float = 5.0,  #轮询间隔
         task_timeout: float = 300.0,   #超时时间
         max_retries: int = 3,   #最大轮次
@@ -57,6 +58,7 @@ class BackgroundWorker:
         self._profile_source = profile_source
         self._llm_model = llm_model
         self._rag_client = rag_client
+        self._intelligence_service = intelligence_service
         self._interview_repo = interview_repo
         self._poll_timeout = poll_timeout
         self._task_timeout = task_timeout
@@ -205,6 +207,8 @@ class BackgroundWorker:
             handler_kwargs["rag_client"] = self._rag_client
         if self._interview_repo is not None:
             handler_kwargs["interview_repo"] = self._interview_repo
+        if self._intelligence_service is not None:
+            handler_kwargs["intelligence_service"] = self._intelligence_service
 
         try:
             result = await asyncio.wait_for(

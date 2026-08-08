@@ -110,11 +110,11 @@ class ProviderSearchResult(StrictModel):
 
     items: list[RawInterviewExperience] = Field(default_factory=list)
     provider: str = ""
-    fetched_at: datetime | None = None
-    latency_ms: float = 0.0
-    discovered_count: int = 0
-    collected_count: int = 0
-    failed_count: int = 0
+    fetched_at: datetime | None = None  #生成时间
+    latency_ms: float = 0.0 #查询耗时
+    discovered_count: int = 0   #总共查询个数
+    collected_count: int = 0    #有效查询个数
+    failed_count: int = 0   #查询失败数量
 
     @property
     def partial(self) -> bool:
@@ -135,13 +135,7 @@ class InterviewIntelligenceProvider(Protocol):
         self,
         query: InterviewIntelligenceQuery,
     ) -> ProviderSearchResult:
-        """根据业务查询搜索面经。
-
-        Args:
-            query: 业务查询条件（公司、岗位、轮次等）。
-        Returns:
-            ProviderSearchResult 包含原始面经列表及统计信息。
-        """
+        """根据业务查询搜索面经。"""
         ...
 
 
@@ -196,7 +190,101 @@ class ProviderError(Exception):
         return str(self)
 
 
+# ====================== 聚合结果模型 ======================
+
+class TopicFrequency(StrictModel):
+    """单个技术主题的统计频次。"""
+
+    topic: str = ""
+    count: int = 0
+    ratio: float = 0.0
+
+
+class EvidenceRef(StrictModel):
+    """面经数据来源标识，不嵌入全文。"""
+
+    provider: str = ""
+    source_id: str = ""
+    content_hash: str = ""
+
+
+class RoundPattern(StrictModel):
+    """单个面试轮次的考察模式。"""
+
+    round: InterviewRound | None = None
+    common_topics: list[str] = Field(default_factory=list)
+    common_questions: list[str] = Field(default_factory=list)
+    description: str = ""
+
+
+class CompanyInterviewProfile(StrictModel):
+    """公司面试情报画像 — 基于外部面经来 源归纳的面试参考信息。
+
+    由 Aggregator从 NormalizedInterviewExperience[]聚合生成。
+    为 None 时 Planner 正常降级工作，不影响 Plan 生成。
+    """
+
+    company: str = ""
+    role: str = ""
+    region: str = ""
+
+    # 样本统计
+    sample_count: int = 0
+    usable_sample_count: int = 0
+
+    # 高频主题
+    top_topics: list[TopicFrequency] = Field(default_factory=list)
+
+    # 代表性题目（有限数量，不全量塞给 Planner）
+    representative_questions: list[str] = Field(default_factory=list)
+
+    # 不同轮次考察模式
+    round_patterns: list[RoundPattern] = Field(default_factory=list)
+
+    # 来源证据（只保存 provider + source_id + content_hash）
+    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+
+    # 生成元数据
+    generated_at: datetime | None = None
+    snapshot_hash: str = ""
+
+    @property
+    def frequent_topics(self) -> list[str]:
+        """高频考察主题名（纯字符串列表，供 Planner 使用）。"""
+        return [t.topic for t in self.top_topics]
+
+
+# ====================== Service 返回模型 ======================
+
+class IntelligenceStatus(str, Enum):
+    """Intelligence Service 的状态枚举。"""
+
+    FRESH = "FRESH"  # provider 成功获取并生成新 profile
+    DISABLED = "DISABLED"  # feature flag 未开启
+    SKIPPED = "SKIPPED"  # 无 company 等不满足查询条件
+    CACHE_HIT = "CACHE_HIT"  # fresh cache 直接命中
+    PARTIAL = "PARTIAL"  # provider 部分失败，但有效数据足够生成 profile
+    STALE_FALLBACK = "STALE_FALLBACK"  # provider 失败，使用过期缓存
+    DEGRADED = "DEGRADED"  # provider 失败且无可用缓存
+
+
+class IntelligenceEnrichmentResult(StrictModel):
+    """Intelligence Service 的统一返回 envelope。"""
+
+    status: IntelligenceStatus
+    profile: CompanyInterviewProfile | None = None
+    provider: str | None = None
+    degraded: bool = False  # 是否降级
+    degradation_reasons: list[str] = Field(default_factory=list)  # 降级理由
+    snapshot_hash: str | None = None
+    cache_age_seconds: int | None = None  # 缓存年龄（秒），仅 CACHE_HIT / STALE_FALLBACK 时有值
+
+
 __all__ = [
+    "CompanyInterviewProfile",
+    "EvidenceRef",
+    "IntelligenceEnrichmentResult",
+    "IntelligenceStatus",
     "InterviewIntelligenceProvider",
     "InterviewIntelligenceQuery",
     "InterviewRound",
@@ -206,4 +294,6 @@ __all__ = [
     "ProviderErrorCode",
     "ProviderSearchResult",
     "RawInterviewExperience",
+    "RoundPattern",
+    "TopicFrequency",
 ]

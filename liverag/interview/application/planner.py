@@ -10,9 +10,11 @@ from openai import AsyncOpenAI
 from liverag.interview.prompts.plan_prompts import PLAN_PERSONALIZATION_SYSTEM_PROMPT
 from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.records import generate_id
+from liverag.interview.intelligence.provider import (
+    CompanyInterviewProfile,
+)
 from liverag.interview.schemas import (
     CandidateProfile,
-    CompanyInterviewProfile,
     InterviewConfig,
     InterviewPlan,
     InterviewQuestion,

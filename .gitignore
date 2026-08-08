@@ -7,6 +7,7 @@ __pycache__/
 .idea
 KMS
 .venv/
+.tmp
 .uvtool/
 .uv-cache/
 node_modules/
@@ -17,6 +18,8 @@ tts-debug.txt
 .pytest_cache
 .pytest-runs/
 .ruff_cache
+data/
+interview-experience-spider-main/
 
 # Claude Code
 .claude/settings.local.json

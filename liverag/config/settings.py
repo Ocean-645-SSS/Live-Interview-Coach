@@ -1071,6 +1071,54 @@ class WorkerSettings:
 
 
 @dataclass(frozen=True)
+class InterviewIntelligenceSettings:
+    """面试情报 Service 配置。"""
+
+    enabled: bool = field(
+        default_factory=lambda:
+            _bool_env(
+                "INTERVIEW_INTELLIGENCE_ENABLED",
+                False,
+            )
+    )
+    provider: str = field(
+        default_factory=lambda:
+            _str_env(
+                "INTERVIEW_INTELLIGENCE_PROVIDER",
+                "community_nowcoder_spider",
+            )
+    )
+    max_results: int = field(
+        default_factory=lambda:
+            _int_env(
+                "INTERVIEW_INTELLIGENCE_MAX_RESULTS",
+                10,
+            )
+    )
+    provider_timeout_seconds: float = field(
+        default_factory=lambda:
+            _float_env(
+                "INTERVIEW_INTELLIGENCE_PROVIDER_TIMEOUT",
+                30.0,
+            )
+    )
+    cache_fresh_seconds: int = field(
+        default_factory=lambda:
+            _int_env(
+                "INTERVIEW_INTELLIGENCE_CACHE_FRESH",
+                3600,
+            )
+    )
+    cache_stale_seconds: int = field(
+        default_factory=lambda:
+            _int_env(
+                "INTERVIEW_INTELLIGENCE_CACHE_STALE",
+                86400,
+            )
+    )
+
+
+@dataclass(frozen=True)
 class AppSettings:
     """LiveRAG Agent 统一配置"""
 
@@ -1090,6 +1138,9 @@ class AppSettings:
     )
     redis: RedisSettings = field(default_factory=RedisSettings)
     worker: WorkerSettings = field(default_factory=WorkerSettings)
+    interview_intelligence: InterviewIntelligenceSettings = field(
+        default_factory=InterviewIntelligenceSettings
+    )
 
 
 def load_app_settings() -> AppSettings:

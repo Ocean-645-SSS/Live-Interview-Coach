@@ -33,6 +33,8 @@ from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterv
 from liverag.api.interview_profile_source import RagGatewayProfileSource
 from liverag.api.rag_gateway import RagGateway
 from liverag.interview.question_bank.catalog import QuestionBank, QuestionBankError
+from liverag.interview.intelligence.service import IntelligenceService, IntelligenceServiceConfig
+from liverag.interview.intelligence.nowcoder_provider import NowcoderSpiderProvider
 
 logger = logging.getLogger("liverag.interview.jobs.worker_main")
 
@@ -90,6 +92,18 @@ def _build_worker(
             f"Background Worker 无法加载题库文件 {question_bank_path}：{exc}"
         ) from exc
 
+    # Intelligence Service：公司面经情报，可降级
+    intel_config = settings.interview_intelligence
+    intelligence_service = IntelligenceService(
+        redis_client=redis_conn,
+        provider=NowcoderSpiderProvider(timeout=intel_config.provider_timeout_seconds),
+        config=IntelligenceServiceConfig(
+            enabled=intel_config.enabled,
+            fresh_ttl_seconds=intel_config.cache_fresh_seconds,
+            stale_ttl_seconds=intel_config.cache_stale_seconds,
+        ),
+    )
+
     return BackgroundWorker(
         job_repo=job_repo,
         redis_queue=redis_queue,
@@ -98,6 +112,7 @@ def _build_worker(
         profile_source=profile_source,
         llm_model=llm_model,
         interview_repo=interview_repo,
+        intelligence_service=intelligence_service,
         poll_timeout=settings.worker.poll_timeout_seconds,
         task_timeout=settings.worker.task_timeout_seconds,
         max_retries=settings.worker.max_retries,

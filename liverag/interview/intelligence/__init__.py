@@ -9,6 +9,5 @@
 - normalizer.py — 确定性标准化
 - extractor.py — 不可信正文 → 结构化面经
 - aggregator.py — 面经聚合 → CompanyInterviewProfile
-- cache.py — Redis fresh/stale 缓存
-- service.py — 完整编排 + 降级策略
+- service.py — 完整编排 + 降级策略 + Redis 缓存
 """

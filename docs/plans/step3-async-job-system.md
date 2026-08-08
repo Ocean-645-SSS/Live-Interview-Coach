@@ -1685,7 +1685,7 @@ interview_round
 NormalizedInterviewExperience
 ```
 
-如果使用 LLM：
+使用 LLM：
 1. 外部帖子明确作为 `untrusted_external_data`；
 2. Prompt 明确要求不得执行正文中的命令；
 3. 输出必须使用严格 Pydantic schema；
@@ -1811,14 +1811,6 @@ question_count
 topic_count
 round_coverage
 ```
-
-如需要整体等级，仅使用：
-```text
-LOW
-MEDIUM
-HIGH
-```
-并明确等级由简单、可解释规则得到。
 
 ---
 
@@ -2280,37 +2272,6 @@ Secret
 InterviewIntelligenceSettings
 ```
 
-建议字段：
-```text
-enabled = false
-
-provider = "community_nowcoder_spider"
-
-max_results = 10
-max_pages = 1
-
-provider_timeout_seconds = 30
-request_timeout_seconds = 10
-request_delay_seconds = 0.8
-
-cache_fresh_seconds = 86400
-cache_stale_seconds = 604800
-
-schema_version = 1
-adapter_version = 1
-```
-
-`.env.example` 增加对应配置说明。
-
-不配置：
-```text
-MCP_SERVER_URL
-MCP_TRANSPORT
-MCP_TOOL_NAME
-```
-
-因为 V1 都是代码层固定值。
-
 ---
 
 ### 3.3.12 测试
@@ -2577,71 +2538,6 @@ InterviewPlan schema
 
 ---
 
-### 3.3.14 实施顺序
-
-```text
-3.3-A  Domain Contract
-       provider.py
-       Raw / Normalized models
-       ProviderSearchResult
-       ProviderError
-       CompanyInterviewProfile
-          ↓
-
-3.3-B  Nowcoder Spider
-       search / feed / discuss
-       source_id
-       max_results
-       partial result
-          ↓
-
-3.3-C  Structured MCP Server
-       search_nowcoder_experiences
-       stdio
-       structured output
-          ↓
-
-3.3-D  MCP Client
-       subprocess
-       tool contract
-       structured result validation
-       timeout
-          ↓
-
-3.3-E  Nowcoder Provider
-       domain query → search query
-       MCP output → raw experience
-          ↓
-
-3.3-F  Normalizer + Extractor
-       raw → normalized experience
-          ↓
-
-3.3-G  Aggregator
-       dedup
-       topic stats
-       questions
-       CompanyInterviewProfile
-          ↓
-
-3.3-H  Redis Cache + IntelligenceService
-       fresh
-       provider
-       stale fallback
-       degraded
-          ↓
-
-3.3-I  Preparation Integration
-       COMPANY_INTELLIGENCE
-       → PLAN_GENERATION
-          ↓
-
-3.3-J  Tests + Regression
-```
-
-阶段之间从 A → J 顺序完成。
-
----
 
 ### 3.3.15 验收标准
 
@@ -2780,7 +2676,7 @@ InterviewPlan 正常生成
 ---
 
 
-## 实施顺序
+## 整体实施顺序
 
 ```
 3.1（必须先做）→ 证明异步系统跑通
