@@ -797,130 +797,1988 @@ API: 创建 Job 前
 
 ---
 
-## 3.3 MCP Client + Nowcoder Adapter + 降级策略
+## 3.3 MCP Client + Nowcoder Spider Adapter + 降级策略
 
 > **状态：** ⏳ 待开始
+>
+> **定位：** 在 `interview_preparation` 的 `COMPANY_INTELLIGENCE` stage 中，通过本地 stdio MCP Server 接入牛客公开面经数据，为 `InterviewPlanner` 提供可选的公司面试情报增强。
+>
+> **核心原则：**
+>
+> * 牛客面经增强属于 optional enrichment，不是 Interview Plan 的必要依赖。如果mcp调用出错，降级策略为只依赖 CandidateProfile + JobProfile 作为生成 Plan 的依据。
+> * 只在 `PREPARING` 阶段调用，实时 LiveKit 面试链路禁止调用 MCP。
+> * 不把第三方 Spider 的数据结构、文件路径或实现细节泄漏到业务 Service。
+> * 不直接运行第三方项目原始 `mcp_server.py`，仅参考/复用牛客抓取核心逻辑，重新提供适配 Interview Coach 的结构化 MCP Tool。
+> * 第三方帖子正文属于不可信外部数据，不直接进入 Planner。
+> * Redis 只承担缓存职责，不作为 Company Intelligence 的权威业务存储。
 
-在后台准备任务中接入可降级的牛客 MCP 面经增强，仅在 `PREPARING` 阶段调用，不影响实时语音链路。
+---
+### 3.3.0 架构决策记录
 
-### 3.3.1 依赖倒置层（`intelligence/provider.py`）
+#### 决策 1：数据来源不是“牛客官方 MCP”
+当前接入来源为社区项目 `interview-experience-spider` 中实现的牛客 Spider。
 
-- [ ] 定义 `InterviewIntelligenceQuery` 查询对象
-  - 字段：company、role、region、round、limit、timeout
-- [ ] 定义 `InterviewExperienceSource` 结果对象
-  - 字段：id、company、role、interview_round、source、published_time、topics、questions、summary、confidence、content_hash
-- [ ] 定义 `InterviewIntelligenceProvider` Protocol
-  - `search_experiences(query) -> list[InterviewExperienceSource]`
-- [ ] 定义 `ProviderCapability` 和 `ProviderError` 类型
+实际链路：
+```text
+Nowcoder
+   ↓ HTTP
+Nowcoder Spider
+   ↓
+Interview Coach MCP Server
+   ↓ stdio MCP
+NowcoderSpiderProvider
+   ↓
+IntelligenceService
+```
 
-### 3.3.2 通用 MCP Client（`intelligence/mcp_client.py`）
+因此 Provider 命名使用：
+```text
+community_nowcoder_spider
+```
 
-- [ ] MCP transport 管理（优先 Streamable HTTP）
-- [ ] Server 初始化 + capability discovery
-- [ ] Tool discovery + schema 读取
-- [ ] Tool 调用 + 超时 + 重试
-- [ ] 优先消费 `structuredContent`；文本结果经 schema 校验
-- [ ] 连接池/生命周期管理
-- [ ] 配置白名单：允许的 MCP server、transport、tools
+数据原始来源仍标记：
+```text
+source = "nowcoder"
+```
+避免让系统或项目介绍误认为牛客官方提供 MCP 服务。
 
-### 3.3.3 牛客 Adapter（`intelligence/nowcoder_mcp.py`）
+#### 决策 2：不直接使用第三方原始 MCP Tool
 
-- [ ] 实现 `InterviewIntelligenceProvider` Protocol
-- [ ] 牛客工具名/参数 → 领域模型映射
-- [ ] 牛客返回结构 → `InterviewExperienceSource` 转换
-- [ ] 不泄漏牛客内部 schema 到 service 层
-- [ ] 默认关闭，需 feature flag 显式启用
-- [ ] 具体 tool name/schema 以实际 server capability discovery + 契约测试为准
+原项目的 `search_nowcoder` Tool：
 
-### 3.3.4 标准化（`intelligence/normalizer.py`）
+```text
+Spider 抓取
+    ↓
+写 output/nowcoder.json
+    ↓
+MCP 返回：
+“抓到多少篇 + 前几个标题 + 文件路径”
+```
+不适合 Interview Coach。
 
-- [ ] 公司名/岗位名/地区别名标准化
-- [ ] 面试轮次映射（一面/二面/终面 → 标准枚举）
-- [ ] 话题/问题类型归类
-- [ ] 来源标注（provider、source_id、抓取时间、内容哈希）
+原因：
+1. MCP 返回的是文本摘要，而不是结构化面经数据；
+2. Interview Coach 若再次读取 JSON 文件，会形成 filesystem coupling；
+3. 多 Interview 并发时共享 `output/nowcoder.json` 存在覆盖风险；
+4. MCP Server 与 Worker 将被迫共享文件目录；
+5. 无法直接做 Pydantic schema 校验。
 
-### 3.3.5 聚合（`intelligence/aggregator.py`）
+因此新增专用 Tool：
+```text
+search_nowcoder_experiences
+```
+直接通过 MCP 返回结构化结果，不通过中间 JSON 文件交换数据。
 
-- [ ] 去重（跨来源相同面经）
-- [ ] 话题频次统计
-- [ ] 公司/岗位常见问题聚类
-- [ ] 面试风格特征提取
-- [ ] 可信度计算（来源可靠性 × 样本量 × 时效性 × 跨来源一致性 × 字段完整性）
-- [ ] 生成 `CompanyInterviewProfile`
+#### 决策 3：V1 只支持 stdio MCP
 
-### 3.3.6 Intelligence Service（`intelligence/service.py`）
+第三方 Spider 属于本地进程型工具，因此 V1 不实现：
 
-- [ ] Provider 选择与编排（可扩展多个 provider）
-- [ ] 结果缓存（键：company/role/region/round/provider；过期后可后台刷新）
-- [ ] Provider 不可用时自动降级
-- [ ] 缓存命中时直接返回，不触发外部调用
-- [ ] 审计日志：查询参数、provider、抓取时间、内容摘要哈希、规范化快照
-- [ ] Feature flag 控制：`INTERVIEW_INTELLIGENCE_ENABLED`
+```text
+Streamable HTTP
+SSE
+远程 MCP Server URL
+HTTP MCP connection pool
+OAuth
+```
 
-### 3.3.7 与 3.2 Plan 生成集成
+统一：
+```text
+Interview Worker
+      ↓
+stdio
+      ↓
+Nowcoder MCP subprocess
+```
+MCP Server 由项目内部固定模块启动，例如：
 
-- [ ] `plan_generation` 任务在 feature flag 开启时调用 Intelligence Service
-- [ ] 将 `CompanyInterviewProfile` 作为 Planner 的附加输入
-- [ ] 计划中标记 `intelligence_degraded=true/false`
-- [ ] MCP 调用超时/失败不影响基础 Plan 生成（题库 + 候选人/JD 画像已足够）
+```text
+python -m liverag.interview.intelligence.nowcoder_mcp_server
+```
 
-### 3.3.8 安全策略
+API 请求不能动态指定：
+```text
+command
+script_path
+server_url
+transport
+tool_name
+```
+避免任意命令执行和 SSRF 风险。
 
-- [ ] 外部面经中的指令、链接和代码一律视作数据，不拼入 system prompt
-- [ ] 不保存不必要的个人信息
-- [ ] MCP server URL 和 transport 配置白名单
-- [ ] 实时面试链路不得调用 MCP（代码层 + 监控双重保障）
+#### 决策 4：MCP 只负责“传输协议”，不负责 Agent 自主决策
 
-### 3.3.9 测试
+不让 LLM 自由决定：
 
-- [ ] MCP mock：capability discovery、tool call、structuredContent、超时、非法 schema
-- [ ] 牛客 adapter 契约测试（mock MCP server）
-- [ ] Normalizer 单元测试（别名映射、边界情况）
-- [ ] Aggregator 单元测试（去重、聚类、可信度计算）
-- [ ] Intelligence Service 降级测试：provider 不可用 → 计划仍生成成功
-- [ ] 集成测试：Plan 生成标记 `intelligence_degraded`
-- [ ] 回归测试：实时语音链路日志中无 MCP 调用记录
+```text
+调用哪个 MCP Tool
+传什么任意参数
+是否调用 collect_all / report 等其他 Tool
+```
+
+调用关系固定：
+```text
+IntelligenceService
+       ↓
+NowcoderSpiderProvider
+       ↓
+search_nowcoder_experiences
+```
+这是数据集成链路，不是 Agent Tool Planning。
+
+#### 决策 5：原始数据与业务理解结果分层
+
+真实 Spider 返回的主要数据实际上是：
+```text
+title
+content
+url
+query
+source
+```
+
+而：
+```text
+company
+role
+round
+topics
+questions
+```
+都需要 Interview Coach 自己进一步理解。
+
+因此废弃“`InterviewExperienceSource` 同时装原始字段和推断字段”的设计，拆成：
+```text
+RawInterviewExperience
+        ↓
+Normalizer / Extractor
+        ↓
+NormalizedInterviewExperience
+        ↓
+Aggregator
+        ↓
+CompanyInterviewProfile
+```
+
+#### 决策 6：V1 不使用 `freshness_days`
+
+当前 Spider 没有稳定返回帖子发布时间，因此 V1 中：
+```text
+published_at: datetime | None
+```
+保留为可选字段，但不使用其进行强过滤。
+等后续确认能够稳定获取发布时间，再增加基于发布时间的 freshness 策略。
+
+#### 决策 7：缓存采用 Fresh → Provider → Stale Fallback
+
+由于 Spider 一次查询需要：
+```text
+搜索
++
+逐篇拉取正文
+```
+调用成本明显高于普通 API，因此缓存属于 P0 能力，而不是单纯性能优化。
+
+策略：
+```text
+请求
+ ↓
+Fresh Cache?
+ ├─ YES → 直接返回
+ │
+ └─ NO
+      ↓
+   调用 Provider
+      │
+      ├─ 成功 → 更新缓存 → 返回
+      │
+      └─ 失败
+           ↓
+       Stale Cache?
+       ├─ YES → stale fallback
+       └─ NO  → degraded
+```
+
+默认建议：
+```text
+fresh TTL = 24h
+stale TTL = 7d
+```
+Redis Key 的实际 TTL 使用 stale TTL；缓存对象内部记录 `fresh_until`。
+Redis 丢失缓存不会影响业务正确性。
+---
+
+### 3.3.1 Provider 领域契约（`intelligence/provider.py`）
+
+#### `InterviewRound`
+
+复用/新增标准轮次枚举：
+
+```python
+class InterviewRound(str, Enum):
+    FIRST = "first" #一面
+    SECOND = "second" #二面
+    THIRD = "third" #三面
+    FINAL = "final" #终面
+    HR = "hr" #HR面
+```
+不能识别的轮次使用 `None`，不强行推断。
 
 ---
 
-## 文件变更清单（第三步全部）
+#### `InterviewIntelligenceQuery`
 
-### 修改文件
+描述：
+> “业务希望查询什么面经”。
 
-| 文件 | 阶段 | 说明 |
-|---|---|---|
-| `pyproject.toml` | 3.1 | +redis、hiredis、fakeredis、worker entry |
-| `docker-compose.yml` | 3.1 | +Redis 服务、+Worker 服务 |
-| `.env.example` | 3.1 | +Redis/Worker 环境变量 |
-| `liverag/config/settings.py` | 3.1 | +RedisSettings、+WorkerSettings |
-| `liverag/interview/records.py` | 3.1 | +JobStatus、+BackgroundJobRecord |
-| `liverag/interview/persistence/models.py` | 3.1 | +BackgroundJobModel |
-| `liverag/api/interview_routes.py` | 3.1/3.2 | +Job API、+async 参数 |
-| `liverag/api/server.py` | 3.1 | +Job 依赖初始化 |
-| `liverag/interview/application/service.py` | 3.2 | 异步任务创建替代同步执行 |
-| `tests/interview/test_models.py` | 3.1 | 更新 EXPECTED_TABLES |
+字段：
+```text
+company: str
+role: str
+region: str | None
+interview_round: InterviewRound | None
+limit: int = 10 #约束：默认捕捉10条数据，最多20条
+```
 
-### 新增文件
-
-| 文件 | 阶段 | 说明 |
-|---|---|---|
-| `alembic/versions/75e3f27927f0_*.py` | 3.1 | BackgroundJob 迁移 |
-| `liverag/interview/jobs/__init__.py` | 3.1 | 包文档 |
-| `liverag/interview/jobs/repository.py` | 3.1 | JobRepository |
-| `liverag/interview/jobs/queue.py` | 3.1 | RedisQueue |
-| `liverag/interview/jobs/tasks.py` | 3.1/3.2 | 任务注册表 + 所有 handler |
-| `liverag/interview/jobs/worker.py` | 3.1 | BackgroundWorker |
-| `liverag/interview/jobs/worker_main.py` | 3.1 | Worker 进程入口 |
-| `liverag/interview/intelligence/__init__.py` | 3.3 | 包文档 |
-| `liverag/interview/intelligence/provider.py` | 3.3 | Provider Protocol |
-| `liverag/interview/intelligence/mcp_client.py` | 3.3 | 通用 MCP Client |
-| `liverag/interview/intelligence/nowcoder_mcp.py` | 3.3 | 牛客 Adapter |
-| `liverag/interview/intelligence/normalizer.py` | 3.3 | 标准化 |
-| `liverag/interview/intelligence/aggregator.py` | 3.3 | 聚合 |
-| `liverag/interview/intelligence/service.py` | 3.3 | Intelligence Service |
-| `tests/interview/test_background_jobs.py` | 3.1 | 19 个测试 |
+不包含：
+```text
+timeout
+retry
+MCP tool name
+pages
+delay
+```
+这些属于 Provider / Spider 执行策略，而不是领域查询条件。
 
 ---
+
+#### `RawInterviewExperience`
+
+表示 Provider 真正获得的原始面经。
+
+字段：
+```text
+provider
+source
+source_id
+source_type
+title
+content
+source_url
+matched_query
+published_at
+retrieved_at
+content_hash
+```
+
+建议语义：
+```text
+provider = "community_nowcoder_spider"
+source = "nowcoder"
+source_id
+    = 牛客 uuid / content_id
+source_type
+    = feed / discuss
+content_hash
+    = normalize(title + content) 后计算 SHA-256
+```
+
+`content_hash` 用于：
+* 内容指纹；
+* 精确去重；
+* 内容版本判断；
+* 缓存审计；
+* Plan 输入快照追踪。
+
+`published_at`：
+```text
+datetime | None
+```
+当前无法稳定获取时保持 `None`。
+
+---
+
+#### `NormalizedInterviewExperience`
+
+表示经过 Interview Coach 理解后的业务数据。
+
+字段：
+```text
+provider
+source
+source_id
+source_url
+company
+role
+region
+interview_round
+topics
+questions
+published_at
+retrieved_at
+content_hash
+```
+
+注意：
+
+```text
+topics
+questions
+interview_round
+```
+属于 Normalizer / Extractor 的产物，不再宣称是 Provider 原始字段。
+
+该模型不再携带完整 `content`，避免后续 Planner 意外接触第三方原文。
+
+---
+
+#### `ProviderSearchResult`
+
+Provider 的统一返回 Envelope：
+```text
+items: list[RawInterviewExperience]
+
+provider
+
+fetched_at
+latency_ms
+
+discovered_count
+collected_count
+failed_count
+
+partial
+```
+
+其中：
+```text
+partial = failed_count > 0 and collected_count > 0
+```
+例如：
+```text
+搜索发现 18 篇
+成功抓取 14 篇
+4 篇正文请求失败
+→ collected_count = 14
+→ failed_count = 4
+→ partial = true
+```
+部分失败时不丢弃已经获得的有效数据！
+
+---
+
+#### `InterviewIntelligenceProvider`
+
+定义：
+
+```python
+class InterviewIntelligenceProvider(Protocol):
+    async def search_experiences(
+        self,
+        query: InterviewIntelligenceQuery,
+    ) -> ProviderSearchResult:
+        ...
+```
+业务层只依赖 Protocol。
+
+---
+
+#### `ProviderCapability`
+
+只记录 Provider 的静态能力：
+```text
+provider_name
+transport
+tool_name
+schema_version
+supports_partial_results
+```
+
+V1：
+```text
+provider_name = community_nowcoder_spider
+transport = stdio
+tool_name = search_nowcoder_experiences
+```
+不为未来未知 Provider 设计复杂 capability framework。
+
+---
+
+#### `ProviderError`
+
+统一屏蔽：
+```text
+MCP exception
+subprocess exception
+HTTP Spider exception
+Pydantic validation error
+```
+上层只处理：
+```text
+ProviderError
+```
+
+建议错误码：
+```text
+TIMEOUT：超时
+UNAVAILABLE：provider整体不可用
+TOOL_NOT_FOUND：MCP Server 没有预期 Tool
+CONTRACT_MISMATCH：：接口契约和代码不一致
+INVALID_RESPONSE：返回数据不合法
+RATE_LIMITED：被限流
+NO_USABLE_DATA：没有可用数据
+```
+
+字段：
+```text
+code
+provider
+message
+retryable
+```
+
+---
+
+### 3.3.2 牛客 Spider 提取与改造
+
+#### 可参考/复用的第三方逻辑
+
+从 `interview-experience-spider/scrape_nowcoder.py` 中仅提取以下能力：
+
+```text
+html_to_text()
+
+search()
+    → 牛客搜索 API
+    → 获取 uuid / content_id
+
+fetch_feed()
+    → Feed 帖子正文
+
+fetch_discuss()
+    → Discuss 帖子正文
+```
+
+不复用：
+```text
+CLI argparse
+config.json 查询列表
+output/*.json 文件交换
+generate_report
+run_all
+小红书 Spider
+小红书签名代码
+HTML/Markdown 报告生成
+```
+
+---
+
+#### 新增 `intelligence/nowcoder/spider.py`
+
+负责：
+```text
+Nowcoder HTTP
+       ↓
+搜索帖子
+       ↓
+拉取详情
+       ↓
+RawNowcoderPost[]
+```
+
+新增内部模型：
+```text
+RawNowcoderPost:
+source_id
+source_type
+title
+content
+url
+matched_query
+```
+
+必须保留原项目搜索阶段已经拿到但最终丢失的：
+```text
+uuid
+content_id
+```
+作为 `source_id`。
+
+---
+
+#### 查询数量限制
+
+原 Spider 基于：
+```text
+max_pages
+```
+控制数量，不适合 Preparation。
+
+增加：
+```text
+max_results
+```
+一旦获得足够的有效面经：
+```text
+len(collected) >= max_results
+```
+立即停止继续抓取。
+
+建议默认：
+```text
+max_pages = 1
+max_results = 10
+hard max_results = 20
+```
+避免默认抓取数十甚至上百篇帖子。
+
+---
+
+#### HTTP 请求级失败处理
+
+单篇帖子失败：
+```text
+记录失败
+继续下一篇
+```
+不使整个 Spider 调用失败。
+可以对明确属于瞬时网络错误的单次 HTTP 请求进行最多一次有限重试。
+
+*禁止：*
+```text
+整个 search_nowcoder_experiences 自动重复执行多次
+```
+否则已经成功抓取的帖子会被再次请求。
+
+---
+
+### 3.3.3 Interview Coach MCP Server（`intelligence/mcp/server.py`）
+
+新增 Interview Coach 自己维护的薄 MCP Server。
+
+职责只有：
+```text
+暴露 Nowcoder Spider 为一个结构化 MCP Tool
+```
+
+不包含：
+```text
+Planner
+LLM
+Cache
+Normalizer
+Aggregator
+Interview 状态
+```
+---
+
+#### 唯一业务 Tool
+
+```text
+search_nowcoder_experiences
+```
+
+输入：
+```text
+queries: list[str]
+max_results: int
+```
+`max_pages`、HTTP timeout、delay 等运行参数由 Server Settings 控制，不允许上游请求任意修改。
+---
+
+#### MCP 输出模型
+
+定义：
+```text
+NowcoderSearchResult:
+
+items: list[RawNowcoderPost]
+
+discovered_count
+collected_count
+failed_count
+partial
+```
+Tool 直接返回 Pydantic / typed structured result。
+
+禁止：
+```text
+返回 JSON 文件路径
+让 Interview Coach 再读取 output 文件
+```
+
+---
+
+#### MCP Server 输出约束
+
+stdio 的 stdout 属于 MCP 协议通道。
+
+Spider 内：
+```text
+禁止 print() 普通日志到 stdout
+```
+
+统一使用：
+```text
+logging
+→ stderr
+```
+避免破坏 MCP 消息流。
+
+---
+
+### 3.3.4 MCP Client（`intelligence/mcp/mcp_client.py`）
+
+实现一个轻量、安全受控的 stdio MCP Client。
+
+职责：
+
+```text
+启动固定 MCP subprocess
+        ↓
+验证 Tool contract
+        ↓
+调用固定 Tool
+        ↓
+读取 structured result
+        ↓
+本地再次 Pydantic 校验
+```
+
+不自行实现 MCP JSON-RPC 协议。
+使用官方 Python MCP SDK。
+
+---
+
+#### Transport
+
+```text
+stdio only
+```
+不实现 Transport 抽象工厂。
+未来确有远程 Provider 后再扩展 Streamable HTTP。
+
+---
+
+#### Server 启动
+
+固定为项目内部模块。
+概念上：
+
+```text
+sys.executable
+-m
+liverag.interview.intelligence.nowcoder_mcp_server
+```
+请求参数不得控制 executable / module path。
+
+---
+
+#### Tool Contract 校验
+
+Client 第一次调用时获取 Tool metadata，并验证：
+
+```text
+存在 search_nowcoder_experiences
+input schema 符合预期
+支持结构化输出
+```
+
+若不符合：
+```text
+ProviderError(CONTRACT_MISMATCH)
+```
+Tool discovery 只用于契约验证，不用于让 LLM 动态选择工具。
+
+---
+
+#### 结构化结果
+
+优先且正常路径只消费：
+
+```text
+structuredContent
+```
+
+随后再次执行本地：
+```text
+NowcoderSearchResult.model_validate(...)
+```
+
+文本 content 仅用于：
+```text
+错误诊断 / 兼容日志
+```
+不作为正式数据源。
+
+---
+
+#### 生命周期
+
+当前版本不实现：
+```text
+MCP session pool
+MCP process pool
+connection pool
+```
+一次 Company Intelligence Provider 查询使用一次受控 MCP Client 生命周期即可。
+如果后续 profiling 证明 subprocess 启动成本明显，再考虑 Worker 级长生命周期 Client。
+
+---
+
+#### Timeout
+
+定义：
+```text
+INTELLIGENCE_PROVIDER_TIMEOUT_SECONDS
+```
+作为整个 MCP Provider stage 的时间预算。
+
+推荐初始值：
+```text
+20～30 秒
+```
+
+并要求：
+```text
+provider timeout < Worker 整体 task timeout
+```
+
+超时：
+```text
+ProviderError(TIMEOUT)
+```
+交由 Intelligence Service 做 stale fallback。
+
+---
+
+### 3.3.5 Nowcoder Spider Provider（`intelligence/nowcoder_provider.py`）
+
+实现：
+```text
+InterviewIntelligenceProvider
+```
+
+职责：
+```text
+领域 Query
+    ↓
+构造确定性搜索关键词
+    ↓
+调用 MCP Tool
+    ↓
+MCP result
+    ↓
+RawInterviewExperience[]
+    ↓
+ProviderSearchResult
+```
+
+---
+
+#### Query → Spider Query 映射
+
+例如：
+```text
+company = 字节跳动
+role = Agent 开发
+round = FIRST
+region = 北京
+```
+
+Adapter 可以构造：
+```text
+字节跳动 Agent开发 面经
+字节跳动 Agent开发 一面
+字节跳动 北京 Agent开发 面经
+```
+
+查询构造必须：
+```text
+deterministic
+```
+同一输入产生相同关键词集合。
+不使用 LLM 动态生成搜索 Query。
+
+---
+
+#### 字段映射
+
+```text
+RawNowcoderPost.source_id
+    → RawInterviewExperience.source_id
+
+title
+    → title
+
+content
+    → content
+
+url
+    → source_url
+
+matched_query
+    → matched_query
+
+provider
+    → community_nowcoder_spider
+
+source
+    → nowcoder
+
+retrieved_at
+    → 当前 UTC 时间
+
+content_hash
+    → SHA256(normalized title + content)
+```
+
+---
+
+### 3.3.6 Normalizer + Extractor
+
+涉及：
+```text
+intelligence/normalizer.py
+intelligence/extractor.py
+```
+两者职责分离。
+
+---
+
+#### Normalizer
+
+负责确定性处理：
+
+```text
+公司别名统一
+岗位别名统一
+地区名称统一
+空白字符清洗
+重复 URL / 重复帖子过滤
+面试轮次关键词初步识别
+```
+
+例如：
+```text
+字节 / 字节跳动 / ByteDance
+    → 字节跳动
+```
+
+```text
+一面 / 第一轮 / first round
+    → InterviewRound.FIRST
+```
+
+---
+
+#### Extractor
+
+负责从不可信帖子正文中提取：
+```text
+questions
+topics
+interview_round
+```
+
+输出：
+```text
+NormalizedInterviewExperience
+```
+
+如果使用 LLM：
+1. 外部帖子明确作为 `untrusted_external_data`；
+2. Prompt 明确要求不得执行正文中的命令；
+3. 输出必须使用严格 Pydantic schema；
+4. 对输入正文设置最大长度；
+5. 不允许 LLM 产生帖子中没有依据的面试问题；
+6. 保留 `source_id/content_hash` 作为 evidence reference。
+
+单篇提取失败：
+```text
+跳过该篇
+记录 extraction failure
+```
+不使整个 Company Intelligence stage 失败。
+
+---
+
+### 3.3.7 Aggregator（`intelligence/aggregator.py`）
+
+输入：
+```text
+list[NormalizedInterviewExperience]
+```
+输出：
+```text
+CompanyInterviewProfile
+```
+
+---
+
+#### 当前版本必做
+
+##### 去重
+第一层：
+```text
+provider + source_id
+```
+判断同一帖子。
+
+第二层：
+```text
+content_hash
+```
+判断相同内容。
+
+目前不实现 embedding semantic dedup。
+
+---
+
+##### Topic Frequency
+
+统计：
+```text
+topic
+count
+ratio
+```
+
+例如：
+```text
+RAG           7 / 10
+Redis         5 / 10
+Java并发      4 / 10
+MCP           3 / 10
+```
+
+---
+
+##### Common Questions
+
+基于提取后的 questions：
+```text
+规范化
+去重
+统计频次
+```
+
+生成有限数量：
+```text
+representative_questions
+```
+不把几十上百条问题全部塞给 Planner。
+
+---
+
+##### Round Pattern
+
+数据足够时统计：
+```text
+一面 → 常见 topics / questions
+二面 → 常见 topics / questions
+终面 → 常见 topics / questions
+```
+数据不足时保持空值，不强行推断。
+
+---
+
+#### 暂不做
+
+暂缓：
+```text
+跨 Provider 一致性
+Embedding 聚类
+复杂 semantic clustering
+复杂可信度加权公式
+```
+因为只有一个 Nowcoder Spider Provider。
+
+---
+
+#### 数据质量而非伪精确 Confidence
+
+不生成类似：
+```text
+confidence = 87.43%
+```
+
+改为保存客观数据：
+```text
+sample_count
+usable_sample_count
+partial
+question_count
+topic_count
+round_coverage
+```
+
+如需要整体等级，仅使用：
+```text
+LOW
+MEDIUM
+HIGH
+```
+并明确等级由简单、可解释规则得到。
+
+---
+
+#### `CompanyInterviewProfile`
+
+建议字段：
+
+```text
+company
+role
+region
+
+sample_count：本次进入聚合流程的面经数据样本量
+usable_sample_count：真正结构化、可统计的面经数据量
+
+top_topics：高频技术主题
+representative_questions：代表性高频题目
+round_patterns：不同面试轮次常见的考察内容：基础知识/项目拷打
+
+evidence_refs：帖子来源，只保存provider + source_id + content_hash作为识别
+
+generated_at：画像生成时间
+snapshot_hash：内容指纹
+```
+
+不直接嵌入第三方面经全文。
+
+---
+
+### 3.3.8 Intelligence Service（`intelligence/service.py`）
+
+Service 是 Company Intelligence 的业务入口。
+
+3.2 Preparation Workflow 不直接操作：
+```text
+MCP Client
+Spider
+Redis cache
+Normalizer
+Aggregator
+```
+
+只调用：
+```python
+await intelligence_service.get_company_profile(query)
+```
+
+---
+
+#### Service 返回模型
+
+新增：
+```text
+IntelligenceEnrichmentResult
+```
+
+字段：
+```text
+status
+profile: CompanyInterviewProfile | None
+provider: str | None
+degraded: bool  是否降级
+degradation_reasons: list[str] | None  降级理由
+snapshot_hash: str | None
+cache_age_seconds: int | None
+```
+
+---
+
+#### `IntelligenceStatus`
+
+建议：
+```text
+DISABLED：feature flag未开启
+SKIPPED：无company等不满足查询条件
+CACHE_HIT：fresh cache直接命中
+FRESH：provider成功获取并且生成新profile
+PARTIAL：provider部分失败，但有效数据足够生成profile
+STALE_FALLBACK：provider失败，使用过期但仍在stale window的缓存
+DEGRADED：provider失败且没有可用缓存，采用降级策略
+```
+
+---
+
+#### Feature Flag
+
+作用：控制是否启用 牛客MCP 增强
+
+继续保留：
+```text
+INTERVIEW_INTELLIGENCE_ENABLED=false
+```
+默认关闭。
+
+Feature flag 关闭属于：
+```text
+DISABLED
+```
+不认为是系统故障。
+
+---
+
+#### Query 缺 company
+
+如果：
+
+```text
+company is None / blank
+```
+
+返回：
+```text
+status = SKIPPED
+profile = None
+```
+
+建议同步修正 3.2：
+```text
+COMPANY_NOT_PROVIDED
+```
+不再标记整个 Preparation 为 `degraded=true`，因为这是业务输入缺失导致主动跳过，并非系统降级。
+
+---
+
+#### Cache Key
+
+基于规范化后的：
+
+```text
+provider
+company
+role
+region
+interview_round
+schema_version
+adapter_version
+```
+构造 canonical JSON，再 SHA-256：
+
+```text
+interview:intelligence:v1:{fingerprint}
+```
+不要直接把很长的 company/role 字符串拼成 Redis Key。
+
+---
+
+#### Cache Envelope
+
+缓存：
+
+```text
+profile
+provider
+fetched_at
+fresh_until
+stale_until
+snapshot_hash
+```
+
+Redis TTL：
+```text
+stale_until - now
+```
+
+---
+
+#### Provider 成功
+
+流程：
+
+```text
+ProviderSearchResult
+       ↓
+Normalizer
+       ↓
+Extractor
+       ↓
+NormalizedInterviewExperience[]
+       ↓
+Aggregator
+       ↓
+CompanyInterviewProfile
+       ↓
+写 Cache
+       ↓
+返回 FRESH / PARTIAL
+```
+
+---
+
+#### Provider 失败
+
+可降级错误，见 3.3.1 ProviderError类：
+
+```text
+TIMEOUT：超时
+UNAVAILABLE：provider整体不可用
+TOOL_NOT_FOUND：MCP Server 没有预期 Tool
+CONTRACT_MISMATCH：：接口契约和代码不一致
+INVALID_RESPONSE：返回数据不合法
+RATE_LIMITED：被限流
+NO_USABLE_DATA：没有可用数据
+```
+
+处理：
+```text
+有 stale cache
+    → STALE_FALLBACK
+
+无 stale cache
+    → DEGRADED
+    → profile = None
+```
+均不阻止后续 Plan。
+
+---
+
+### 3.3.9 与 3.2 Preparation Workflow 集成
+
+`COMPANY_INTELLIGENCE` stage 改为：
+```text
+JOB_PROFILE_GENERATION
+        ↓
+COMPANY_INTELLIGENCE
+        ↓
+PLAN_GENERATION
+```
+
+流程：
+```text
+1. company 不存在
+   → status = SKIPPED
+   → profile = None
+   → 继续 PLAN_GENERATION
+
+2. feature flag disabled
+   → status = DISABLED
+   → profile = None
+   → 继续 PLAN_GENERATION
+
+3. feature flag enabled
+   → IntelligenceService.get_company_profile()
+
+4. 获得 IntelligenceEnrichmentResult
+
+5. stage_results.company_intelligence
+   保存完整 enrichment metadata
+
+6. 如果：
+   PARTIAL / STALE_FALLBACK / DEGRADED
+   → workflow.degraded = true
+   → degradation_reasons 追加原因
+
+7. PLAN_GENERATION
+   输入：
+   CandidateProfile
+   + JobProfile
+   + CompanyInterviewProfile | None
+```
+
+---
+
+#### Planner 输入原则
+
+基础路径：
+```text
+CandidateProfile
++
+JobProfile
++
+QuestionBank
+        ↓
+InterviewPlan
+```
+
+增强路径：
+```text
+CandidateProfile
++
+JobProfile
++
+QuestionBank
++
+CompanyInterviewProfile
+        ↓
+InterviewPlan
+```
+
+CompanyInterviewProfile 只能用于：
+```text
+调整 topic 权重
+调整题目优先级
+选择 representative questions
+调整不同轮次重点
+辅助追问策略
+```
+
+不能：
+```text
+覆盖 CandidateProfile
+覆盖 JobProfile
+让面经中未验证的信息成为硬性事实
+```
+
+---
+
+#### Plan 审计元数据
+
+建议给 `InterviewPlan` 增加字段：
+```text
+intelligence_status:IntelligenceStatus | None = None
+```
+
+全部带默认值，保持旧 Plan 兼容。
+完整 `CompanyInterviewProfile` 不必再次复制进入 Plan；
+统一保存在 Preparation stage metadata 中。后续如出现独立审计/重放需求再扩展
+
+---
+
+### 3.3.10 安全、隐私与外部数据边界
+
+#### 不可信数据隔离
+
+数据链必须是：
+```text
+Nowcoder Post
+    ↓
+RawInterviewExperience
+    ↓
+Sanitize / Extract
+    ↓
+NormalizedInterviewExperience
+    ↓
+Aggregator
+    ↓
+CompanyInterviewProfile
+    ↓
+Planner
+```
+
+禁止：
+```text
+Nowcoder raw content
+        ↓
+InterviewPlanner
+```
+
+---
+
+#### Prompt Injection
+
+帖子中的：
+
+```text
+命令
+System Prompt
+“忽略之前要求”
+链接
+代码
+工具调用指令
+```
+全部作为待分析文本。
+
+任何第三方正文都不能改变：
+```text
+System Prompt
+Tool 权限
+MCP 配置
+Planner 控制逻辑
+```
+
+---
+
+#### PII
+不主动保留：
+```text
+用户名
+联系方式
+手机号
+邮箱
+个人主页
+其他无关身份信息
+```
+
+CompanyInterviewProfile 只保存：
+```text
+公司
+岗位
+轮次
+技术主题
+问题
+统计信息
+source evidence reference
+```
+
+---
+
+#### MCP 执行安全
+
+固定：
+```text
+stdio
+固定 module
+固定 Tool
+固定参数 schema
+```
+
+禁止：
+```text
+用户传 command
+用户传 script path
+用户传 MCP URL
+用户传 tool name
+用户传任意 transport
+```
+---
+
+#### 日志安全
+
+日志允许：
+```text
+query fingerprint
+provider
+status
+cache hit/miss
+latency
+discovered_count
+collected_count
+failed_count
+snapshot_hash
+ProviderErrorCode
+```
+
+日志禁止：
+```text
+帖子全文
+Authorization
+Cookie
+Secret
+大量个人信息
+```
+
+---
+
+#### 爬虫约束
+* 仅用于个人学习和面试训练用途；
+* 设置 `max_results` / `max_pages`；
+* 设置请求间隔；
+* 使用缓存减少重复抓取；
+* 不进行高频并发爬取；
+* 遵守目标平台规则和第三方项目许可证。
+
+---
+
+### 3.3.11 Settings
+
+在 `liverag/config/settings.py` 新增：
+```text
+InterviewIntelligenceSettings
+```
+
+建议字段：
+```text
+enabled = false
+
+provider = "community_nowcoder_spider"
+
+max_results = 10
+max_pages = 1
+
+provider_timeout_seconds = 30
+request_timeout_seconds = 10
+request_delay_seconds = 0.8
+
+cache_fresh_seconds = 86400
+cache_stale_seconds = 604800
+
+schema_version = 1
+adapter_version = 1
+```
+
+`.env.example` 增加对应配置说明。
+
+不配置：
+```text
+MCP_SERVER_URL
+MCP_TRANSPORT
+MCP_TOOL_NAME
+```
+
+因为 V1 都是代码层固定值。
+
+---
+
+### 3.3.12 测试
+
+#### Spider 单元测试
+
+测试：
+
+```text
+search response 解析
+Feed 类型解析
+Discuss 类型解析
+HTML → text
+source_id 保留
+max_results 提前停止
+帖子详情部分失败
+content 为空
+```
+
+所有测试使用 mock HTTP，不访问真实牛客。
+
+---
+
+#### MCP Server 契约测试
+
+验证：
+
+```text
+search_nowcoder_experiences Tool 存在
+input schema 正确
+structured output schema 正确
+返回 NowcoderSearchResult
+不会依赖 output JSON 文件
+```
+
+---
+
+#### MCP Client 测试
+
+测试：
+
+```text
+正常 stdio 调用
+Tool 不存在
+Tool schema 不匹配
+structuredContent 非法
+subprocess 启动失败
+provider timeout
+```
+
+---
+
+#### Provider 测试
+
+测试：
+
+```text
+InterviewIntelligenceQuery
+    ↓
+deterministic search queries
+
+NowcoderSearchResult
+    ↓
+RawInterviewExperience
+
+source_id
+source_type
+content_hash
+retrieved_at
+partial
+```
+
+---
+
+#### Normalizer / Extractor 测试
+
+测试：
+
+```text
+公司别名
+岗位别名
+轮次识别
+空内容
+恶意 prompt injection 文本
+questions extraction
+topics extraction
+Pydantic validation failure
+单篇失败不影响其他面经
+```
+
+---
+
+#### Aggregator 测试
+
+测试：
+
+```text
+source_id 去重
+content_hash 去重
+topic frequency
+representative questions
+round pattern
+sample_count
+partial data
+snapshot_hash 稳定性
+```
+
+相同输入必须生成相同 snapshot hash。
+
+---
+
+#### Cache 测试
+
+使用 fakeredis：
+
+```text
+fresh cache hit
+fresh expired → provider
+provider success → refresh
+provider failure + stale → stale fallback
+provider failure + no stale → degraded
+cache key fingerprint
+schema version 改变 → 不命中旧 cache
+```
+
+---
+
+#### Intelligence Service 测试
+
+覆盖：
+
+```text
+feature disabled
+company missing
+fresh success
+partial success
+cache hit
+stale fallback
+provider timeout
+invalid response
+no usable data
+```
+
+所有预期 Provider 故障都不得抛到 Preparation Workflow 阻断 Plan。
+
+---
+
+#### Preparation Integration Test
+
+验证：
+
+```text
+CandidateProfile ✅
+JobProfile ✅
+MCP ❌
+      ↓
+CompanyInterviewProfile = None
+      ↓
+InterviewPlan 仍生成
+      ↓
+Interview.state = READY
+```
+
+以及：
+
+```text
+MCP ✅
+↓
+CompanyInterviewProfile
+↓
+Planner
+↓
+InterviewPlan
+↓
+intelligence_snapshot_hash 已记录
+```
+
+---
+
+#### 实时链路回归测试
+
+验证：
+
+```text
+LiveKit Session
+Question Selection
+Answer Evaluation
+Follow-up
+TTS/STT
+```
+
+调用日志中：
+
+```text
+0 次 MCP / Nowcoder Spider 调用
+```
+
+---
+
+#### 新增文件对应的职责：
+
+```text
+provider.py
+    → domain contract / Protocol / ProviderError
+
+nowcoder_spider.py
+    → 牛客 HTTP 搜索和帖子抓取
+
+mcp/server.py
+    → stdio MCP Server + structured Tool
+
+mcp_client.py
+    → 安全受控 MCP stdio Client
+
+nowcoder_provider.py
+    → Query ↔ MCP ↔ RawExperience Adapter
+
+normalizer.py
+    → deterministic normalization
+
+extractor.py
+    → untrusted raw text → structured experience
+
+aggregator.py
+    → experience[] → CompanyInterviewProfile
+
+cache.py
+    → Redis fresh/stale cache
+
+service.py
+    → 完整编排 + degradation
+```
+
+---
+
+#### 修改
+
+```text
+pyproject.toml
+    → MCP SDK 依赖
+
+liverag/config/settings.py
+    → InterviewIntelligenceSettings
+
+.env.example
+    → Intelligence 配置
+
+liverag/interview/schemas.py
+    → CompanyInterviewProfile / Intelligence metadata
+       （如果 provider.py 不统一定义 schema）
+
+liverag/interview/jobs/tasks.py
+    → COMPANY_INTELLIGENCE stage 调 IntelligenceService
+
+liverag/interview/application/profile/planner 相关代码
+    → Planner 接收 CompanyInterviewProfile | None
+
+InterviewPlan schema
+    → 可选 intelligence_status /
+       intelligence_provider /
+       intelligence_snapshot_hash
+```
+不新增数据库表。
+
+---
+
+### 3.3.14 实施顺序
+
+```text
+3.3-A  Domain Contract
+       provider.py
+       Raw / Normalized models
+       ProviderSearchResult
+       ProviderError
+       CompanyInterviewProfile
+          ↓
+
+3.3-B  Nowcoder Spider
+       search / feed / discuss
+       source_id
+       max_results
+       partial result
+          ↓
+
+3.3-C  Structured MCP Server
+       search_nowcoder_experiences
+       stdio
+       structured output
+          ↓
+
+3.3-D  MCP Client
+       subprocess
+       tool contract
+       structured result validation
+       timeout
+          ↓
+
+3.3-E  Nowcoder Provider
+       domain query → search query
+       MCP output → raw experience
+          ↓
+
+3.3-F  Normalizer + Extractor
+       raw → normalized experience
+          ↓
+
+3.3-G  Aggregator
+       dedup
+       topic stats
+       questions
+       CompanyInterviewProfile
+          ↓
+
+3.3-H  Redis Cache + IntelligenceService
+       fresh
+       provider
+       stale fallback
+       degraded
+          ↓
+
+3.3-I  Preparation Integration
+       COMPANY_INTELLIGENCE
+       → PLAN_GENERATION
+          ↓
+
+3.3-J  Tests + Regression
+```
+
+阶段之间从 A → J 顺序完成。
+
+---
+
+### 3.3.15 验收标准
+
+完成 3.3 必须满足：
+
+```text
+1. 牛客数据只能在 PREPARING 阶段访问。
+
+2. Interview Coach 不依赖第三方 Spider 的 output JSON 文件。
+
+3. MCP Tool 返回结构化数据并通过 Pydantic 校验。
+
+4. Provider 可正确保留牛客 source_id 和 content_hash。
+
+5. 单篇帖子抓取失败不会导致整批失败。
+
+6. Provider 超时不会阻止 Interview Plan 生成。
+
+7. Provider 完全不可用时：
+   CandidateProfile + JobProfile + QuestionBank
+   仍可生成有效 Plan。
+
+8. Redis fresh cache 命中时不调用 Spider。
+
+9. Provider 失败且存在 stale cache 时能够继续使用旧 Profile。
+
+10. 外部帖子全文不会直接进入 InterviewPlanner。
+
+11. LLM 无权决定 MCP executable、transport 或 tool。
+
+12. MCP/Spider 不出现在 LiveKit 实时链路日志中。
+
+13. 相同 CompanyInterviewProfile 输入生成稳定 snapshot_hash。
+
+14. Preparation 最终可记录：
+    intelligence_status
+    provider
+    snapshot_hash
+    degradation reason
+
+15. Redis 缓存丢失不会破坏 PostgreSQL 中已有 Interview / Plan 数据。
+```
+
+---
+
+### 3.3 最终链路
+
+```text
+POST /interviews/{id}/prepare?async=true
+                 ↓
+       interview_preparation
+                 ↓
+       RESUME_PARSING
+                 ↓
+     CANDIDATE_PROFILE
+                 ↓
+        JOB_PROFILE
+                 ↓
+      COMPANY_INTELLIGENCE
+                 │
+                 ▼
+       IntelligenceService
+                 │
+          ┌──────┴──────┐
+          │             │
+      Fresh Cache      Miss
+          │             │
+          │             ▼
+          │    NowcoderSpiderProvider
+          │             │
+          │             ▼
+          │       MCP stdio Client
+          │             │
+          │             ▼
+          │      Nowcoder MCP Server
+          │             │
+          │             ▼
+          │       Nowcoder Spider
+          │             │
+          │             ▼
+          │          Nowcoder
+          │             │
+          │             ▼
+          │    RawInterviewExperience[]
+          │             │
+          │             ▼
+          │      Normalizer / Extractor
+          │             │
+          │             ▼
+          │ NormalizedInterviewExperience[]
+          │             │
+          │             ▼
+          │        Aggregator
+          │             │
+          └─────────────┤
+                        ▼
+             CompanyInterviewProfile
+                        │
+                        ▼
+                PLAN_GENERATION
+                        │
+        ┌───────────────┼────────────────┐
+        ▼               ▼                ▼
+CandidateProfile    JobProfile    CompanyInterviewProfile?
+        └───────────────┼────────────────┘
+                        ▼
+               InterviewPlanner
+                        ↓
+                 InterviewPlan
+                        ↓
+                      READY
+```
+
+**核心降级保证：**
+```text
+Nowcoder / Spider / MCP / Cache
+任何一个外部增强环节失败
+
+                ↓
+
+CompanyInterviewProfile = None
+
+                ↓
+
+CandidateProfile
++
+JobProfile
++
+QuestionBank
+
+                ↓
+
+InterviewPlan 正常生成
+```
+
+---
+
 
 ## 实施顺序
 
