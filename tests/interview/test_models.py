@@ -3,7 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
 from sqlalchemy import inspect, select
+from sqlalchemy.exc import IntegrityError
 
 from liverag.interview.persistence.db import (
     create_session_factory,
@@ -13,18 +16,21 @@ from liverag.interview.persistence.db import (
 from liverag.interview.persistence.models import (
     AnswerEvaluationModel,
     Base,
+    CandidateProfileModel,
     InterviewAnswerModel,
     InterviewAttemptModel,
     InterviewEventModel,
     InterviewModel,
     InterviewReportModel,
     InterviewSessionModel,
+    SkillProgressModel,
 )
 from liverag.interview.records import AnswerState, AttemptState, ReportState
-from liverag.interview.schemas import InterviewState
+from liverag.interview.schemas import InterviewState, SkillProgress
 
 EXPECTED_TABLES = {
     "answer_evaluations",
+    "candidate_profiles",
     "interview_answers",
     "interview_attempts",
     "interview_background_jobs",
@@ -32,7 +38,65 @@ EXPECTED_TABLES = {
     "interview_reports",
     "interview_sessions",
     "interviews",
+    "skill_progress",
+    "skill_progress_evidence",
 }
+
+NOW = datetime(2026, 8, 9, tzinfo=timezone.utc)
+
+
+def test_skill_progress_requires_traceable_sources() -> None:
+    progress = SkillProgress(
+        candidate_profile_id="candidate_profile_abc",
+        skill_key="skill_python",
+        taxonomy_version=1,
+        attempts=2,
+        average_score=70,
+        current_score=75,
+        latest_score=80,
+        confidence=0.55,
+        weak_points=[],
+        source_evaluation_ids=["evaluation_1", "evaluation_2"],
+        first_evaluated_at=NOW,
+        last_evaluated_at=NOW,
+        updated_at=NOW,
+    )
+
+    assert progress.attempts == len(progress.source_evaluation_ids)
+
+    with pytest.raises(ValidationError, match="评价来源"):
+        SkillProgress(
+            candidate_profile_id="candidate_profile_abc",
+            skill_key="skill_python",
+            taxonomy_version=1,
+            attempts=2,
+            average_score=70,
+            current_score=75,
+            latest_score=80,
+            confidence=0.55,
+            weak_points=[],
+            source_evaluation_ids=["evaluation_1", "evaluation_1"],
+            first_evaluated_at=NOW,
+            last_evaluated_at=NOW,
+            updated_at=NOW,
+        )
+
+    with pytest.raises(ValidationError, match="attempts"):
+        SkillProgress(
+            candidate_profile_id="candidate_profile_abc",
+            skill_key="skill_python",
+            taxonomy_version=1,
+            attempts=2,
+            average_score=70,
+            current_score=75,
+            latest_score=80,
+            confidence=0.55,
+            weak_points=[],
+            source_evaluation_ids=["evaluation_1"],
+            first_evaluated_at=NOW,
+            last_evaluated_at=NOW,
+            updated_at=NOW,
+        )
 
 
 def test_metadata_creates_complete_interview_schema(tmp_path: Path) -> None:
@@ -49,6 +113,39 @@ def test_metadata_creates_complete_interview_schema(tmp_path: Path) -> None:
         assert {index["name"] for index in database.get_indexes("interview_events")} == {
             "idx_interview_events_session_id"
         }
+        assert {
+            index["name"] for index in database.get_indexes("interviews")
+        } == {"ix_interviews_candidate_profile_id"}
+
+        interview_candidate_fk = next(
+            foreign_key
+            for foreign_key in database.get_foreign_keys("interviews")
+            if foreign_key["referred_table"] == "candidate_profiles"
+        )
+        assert interview_candidate_fk["options"].get("ondelete") == "RESTRICT"
+        assert next(
+            column
+            for column in database.get_columns("interviews")
+            if column["name"] == "candidate_profile_id"
+        )["nullable"] is False
+
+        assert {constraint["name"] for constraint in database.get_unique_constraints(
+            "skill_progress"
+        )} == {"uq_skill_progress_candidate_skill"}
+        assert {constraint["name"] for constraint in database.get_unique_constraints(
+            "skill_progress_evidence"
+        )} == {"uq_skill_progress_evidence_candidate_skill_evaluation"}
+        progress_checks = {
+            constraint["name"]
+            for constraint in database.get_check_constraints("skill_progress")
+        }
+        assert {
+            "ck_skill_progress_attempts",
+            "ck_skill_progress_average_score",
+            "ck_skill_progress_current_score",
+            "ck_skill_progress_latest_score",
+            "ck_skill_progress_confidence",
+        } <= progress_checks
 
         answer_foreign_keys = {
             foreign_key["referred_table"]: foreign_key["options"].get("ondelete")
@@ -74,6 +171,10 @@ def test_models_persist_domain_graph_with_defaults(tmp_path: Path) -> None:
         title="后端工程师模拟面试",
         state=InterviewState.READY,
         config_json="{}",
+        candidate_profile=CandidateProfileModel(
+            id="candidate_profile_default",
+            kb_id="default",
+        ),
     )
     interview_session = InterviewSessionModel(
         id="session_1",
@@ -133,5 +234,47 @@ def test_models_persist_domain_graph_with_defaults(tmp_path: Path) -> None:
             assert stored_answer.evaluation.rubric_version == 1
             assert stored_session.report is not None
             assert stored_session.report.state is ReportState.PENDING
+    finally:
+        engine.dispose()
+
+
+def test_long_term_skill_models_enforce_database_constraints(tmp_path: Path) -> None:
+    engine = create_sqlite_engine(tmp_path / "constraints.db")
+    Base.metadata.create_all(engine)
+    factory = create_session_factory(engine)
+
+    try:
+        with session_scope(factory) as database_session:
+            candidate = CandidateProfileModel(
+                id="candidate_profile_abc",
+                kb_id="default",
+            )
+            database_session.add(candidate)
+
+        with pytest.raises(IntegrityError), session_scope(factory) as database_session:
+            database_session.add(
+                CandidateProfileModel(
+                    id="candidate_profile_duplicate",
+                    kb_id="default",
+                )
+            )
+
+        with pytest.raises(IntegrityError), session_scope(factory) as database_session:
+            database_session.add(
+                SkillProgressModel(
+                    candidate_profile_id="candidate_profile_abc",
+                    skill_key="skill_python",
+                    taxonomy_version=1,
+                    attempts=0,
+                    average_score=70,
+                    current_score=70,
+                    latest_score=70,
+                    confidence=0.5,
+                    weak_points_json="[]",
+                    source_evaluation_ids_json='["evaluation_1"]',
+                    first_evaluated_at=NOW,
+                    last_evaluated_at=NOW,
+                )
+            )
     finally:
         engine.dispose()

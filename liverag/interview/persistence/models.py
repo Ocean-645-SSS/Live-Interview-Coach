@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -27,6 +29,31 @@ def _utc_now() -> datetime:
 
 class Base(DeclarativeBase):
     """Interview ORM metadata 的统一基类。"""
+
+
+class CandidateProfileModel(Base):
+    """以个人资料库 ID 为稳定键的长期训练候选人主体。"""
+
+    __tablename__ = "candidate_profiles"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    kb_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    latest_profile_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+    interviews: Mapped[list[InterviewModel]] = relationship(
+        back_populates="candidate_profile",
+        passive_deletes=True,
+    )
+    skill_progress: Mapped[list[SkillProgressModel]] = relationship(
+        back_populates="candidate_profile",
+        passive_deletes=True,
+    )
 
 
 class InterviewModel(Base):
@@ -51,6 +78,11 @@ class InterviewModel(Base):
         nullable=False,
     )
     config_json: Mapped[str] = mapped_column(Text, nullable=False)
+    candidate_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("candidate_profiles.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
     plan_json: Mapped[str | None] = mapped_column(Text)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -60,6 +92,9 @@ class InterviewModel(Base):
         DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
     )
 
+    candidate_profile: Mapped[CandidateProfileModel] = relationship(
+        back_populates="interviews"
+    )
     sessions: Mapped[list[InterviewSessionModel]] = relationship(
         back_populates="interview",
         passive_deletes=True,
@@ -156,6 +191,10 @@ class InterviewSessionModel(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         uselist=False,
+    )
+    skill_evidence: Mapped[list[SkillProgressEvidenceModel]] = relationship(
+        back_populates="session",
+        passive_deletes=True,
     )
 
 
@@ -352,6 +391,138 @@ class AnswerEvaluationModel(Base):
     )
 
     answer: Mapped[InterviewAnswerModel] = relationship(back_populates="evaluation")
+    skill_evidence: Mapped[list[SkillProgressEvidenceModel]] = relationship(
+        back_populates="evaluation",
+        passive_deletes=True,
+    )
+
+
+class SkillProgressModel(Base):
+    """由全部评价证据重算得到的候选人技能快照。"""
+
+    __tablename__ = "skill_progress"
+    __table_args__ = (
+        CheckConstraint("taxonomy_version >= 1", name="ck_skill_progress_taxonomy"),
+        CheckConstraint("attempts >= 1", name="ck_skill_progress_attempts"),
+        CheckConstraint(
+            "average_score >= 0 AND average_score <= 100",
+            name="ck_skill_progress_average_score",
+        ),
+        CheckConstraint(
+            "current_score >= 0 AND current_score <= 100",
+            name="ck_skill_progress_current_score",
+        ),
+        CheckConstraint(
+            "latest_score >= 0 AND latest_score <= 100",
+            name="ck_skill_progress_latest_score",
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1",
+            name="ck_skill_progress_confidence",
+        ),
+        UniqueConstraint(
+            "candidate_profile_id",
+            "skill_key",
+            name="uq_skill_progress_candidate_skill",
+        ),
+    )
+
+    candidate_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("candidate_profiles.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    skill_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    taxonomy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    average_score: Mapped[float] = mapped_column(Float, nullable=False)
+    current_score: Mapped[float] = mapped_column(Float, nullable=False)
+    latest_score: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    weak_points_json: Mapped[str] = mapped_column(Text, nullable=False)
+    source_evaluation_ids_json: Mapped[str] = mapped_column(Text, nullable=False)
+    first_evaluated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_evaluated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+    candidate_profile: Mapped[CandidateProfileModel] = relationship(
+        back_populates="skill_progress"
+    )
+    evidence: Mapped[list[SkillProgressEvidenceModel]] = relationship(
+        back_populates="skill_progress",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class SkillProgressEvidenceModel(Base):
+    """一条回答评价映射到一个稳定技能后的不可变证据。"""
+
+    __tablename__ = "skill_progress_evidence"
+    __table_args__ = (
+        CheckConstraint(
+            "taxonomy_version >= 1", name="ck_skill_progress_evidence_taxonomy"
+        ),
+        CheckConstraint(
+            "rubric_version >= 1", name="ck_skill_progress_evidence_rubric"
+        ),
+        CheckConstraint(
+            "score >= 0 AND score <= 100",
+            name="ck_skill_progress_evidence_score",
+        ),
+        ForeignKeyConstraint(
+            ["candidate_profile_id", "skill_key"],
+            ["skill_progress.candidate_profile_id", "skill_progress.skill_key"],
+            ondelete="CASCADE",
+            name="fk_skill_progress_evidence_progress",
+        ),
+        UniqueConstraint(
+            "candidate_profile_id",
+            "skill_key",
+            "evaluation_id",
+            name="uq_skill_progress_evidence_candidate_skill_evaluation",
+        ),
+        Index(
+            "idx_skill_progress_evidence_candidate_skill_time",
+            "candidate_profile_id",
+            "skill_key",
+            "evaluated_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    candidate_profile_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    skill_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    evaluation_id: Mapped[str] = mapped_column(
+        ForeignKey("answer_evaluations.id", ondelete="RESTRICT"), nullable=False
+    )
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("interview_sessions.id", ondelete="RESTRICT"), nullable=False
+    )
+    question_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    taxonomy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    rubric_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    weak_points_json: Mapped[str] = mapped_column(Text, nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+
+    skill_progress: Mapped[SkillProgressModel] = relationship(
+        back_populates="evidence"
+    )
+    evaluation: Mapped[AnswerEvaluationModel] = relationship(
+        back_populates="skill_evidence"
+    )
+    session: Mapped[InterviewSessionModel] = relationship(
+        back_populates="skill_evidence"
+    )
 
 
 class InterviewReportModel(Base):
@@ -450,10 +621,13 @@ __all__ = [
     "AnswerEvaluationModel",
     "BackgroundJobModel",
     "Base",
+    "CandidateProfileModel",
     "InterviewAnswerModel",
     "InterviewAttemptModel",
     "InterviewEventModel",
     "InterviewModel",
     "InterviewReportModel",
     "InterviewSessionModel",
+    "SkillProgressEvidenceModel",
+    "SkillProgressModel",
 ]

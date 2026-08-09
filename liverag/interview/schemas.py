@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from typing import Annotated
 
@@ -105,17 +105,6 @@ class StrictModel(BaseModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-
-class CandidateProfile(StrictModel):
-    """从个人资料库中提取、用于本次选题的候选人快照。"""
-
-    kb_id: NonEmptyText = "default"   #固定的个人简历知识库 ID
-    summary: str = ""   #个人简介
-    skills: list[NonEmptyText] = Field(default_factory=list)    #个人技能
-    projects: list[NonEmptyText] = Field(default_factory=list)  #项目经历
-    experience_level: str = ""      # 匹配 schemas.py 中的InterviewDifficulty字段
-    evidence_refs: list[NonEmptyText] = Field(default_factory=list)  #画像信息对应的原始资料列表
-
 # ====================== Resume Facts Extraction ======================
 class WorkExperienceFact(StrictModel):
     """工作经历事实"""
@@ -150,6 +139,16 @@ class CandidateFacts(StrictModel):
     skills: list[str] = Field(default_factory=list)  #技术技能
     raw_evidence_refs: list[str] = Field(default_factory=list)   #原始文档来源
 
+class CandidateProfile(StrictModel):
+    """从个人资料库中提取、用于本次选题的候选人快照。"""
+
+    kb_id: NonEmptyText = "default"   #固定的个人简历知识库 ID
+    summary: str = ""   #个人简介
+    skills: list[NonEmptyText] = Field(default_factory=list)    #个人技能
+    projects: list[NonEmptyText] = Field(default_factory=list)  #项目经历
+    experience_level: str = ""      # 匹配 schemas.py 中的InterviewDifficulty字段
+    evidence_refs: list[NonEmptyText] = Field(default_factory=list)  #画像信息对应的原始资料列表
+
 
 class JobProfile(StrictModel):
     """从用户选中的公司岗位资料库中提取的岗位快照。"""
@@ -160,6 +159,81 @@ class JobProfile(StrictModel):
     summary: str = ""   #JD
     required_skills: list[NonEmptyText] = Field(default_factory=list)   #需要的技能
     evidence_refs: list[NonEmptyText] = Field(default_factory=list)  #参考资料
+
+
+class WeakPointAggregate(StrictModel):
+    """同一技能下可追溯到具体评价的薄弱点聚合。"""
+
+    text: NonEmptyText
+    count: PositiveInt
+    latest_at: datetime
+    source_evaluation_ids: list[NonEmptyText] = Field(min_length=1)
+
+
+class SkillProgressEvidence(StrictModel):
+    """从一条持久化回答评价映射出的不可变技能证据。"""
+
+    id: NonEmptyText
+    candidate_profile_id: NonEmptyText
+    skill_key: NonEmptyText
+    evaluation_id: NonEmptyText  #最关键的追溯字段
+    session_id: NonEmptyText
+    interview_id: NonEmptyText
+    question_id: NonEmptyText
+    taxonomy_version: PositiveInt
+    rubric_version: PositiveInt
+    score: float = Field(ge=0, le=100)
+    weak_points: list[NonEmptyText] = Field(default_factory=list)
+    evaluated_at: datetime
+    created_at: datetime
+
+
+class SkillProgress(StrictModel):
+    """候选人在一个稳定 taxonomy 技能上的派生能力快照。"""
+
+    candidate_profile_id: NonEmptyText
+    skill_key: NonEmptyText
+    taxonomy_version: PositiveInt
+    attempts: PositiveInt
+    average_score: float = Field(ge=0, le=100)  #历史平均分
+    current_score: float = Field(ge=0, le=100)  #历史平均分做时间加权后的分数，90天半衰期
+    latest_score: float = Field(ge=0, le=100)   #最近一次得分
+    confidence: float = Field(ge=0, le=1)   #固定公式算的可信度
+    weak_points: list[WeakPointAggregate] = Field(max_length=5)
+    source_evaluation_ids: list[NonEmptyText] = Field(min_length=1)
+    first_evaluated_at: datetime
+    last_evaluated_at: datetime
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def validate_traceable_sources(self) -> SkillProgress:
+        """保证每次有效尝试都有且只有一个可追溯评价来源。"""
+
+        if len(self.source_evaluation_ids) != len(set(self.source_evaluation_ids)):
+            raise ValueError("评价来源 ID 不能重复")
+        if len(self.source_evaluation_ids) != self.attempts:
+            raise ValueError("评价来源数量必须等于 attempts")
+        return self
+
+
+class TrainingAdjustmentAudit(StrictModel):
+    """冻结在面试计划中的长期画像选题审计信息，解释为什么这么选题"""
+
+    taxonomy_version: PositiveInt
+    source_progress_updated_at: datetime | None = None  #长期画像最新更新时间
+    weak_retest_skills: list[str] = Field(default_factory=list) #薄弱项
+    evidence_skills: list[str] = Field(default_factory=list)    #证据不足项
+    mastery_audit_skills: list[str] = Field(default_factory=list)   #表现良好项
+    selection_reasons: dict[str, str] = Field(default_factory=dict) #question_id->选择原因
+    job_relevant_by_question: dict[str, bool] = Field(default_factory=dict) #题目是否与岗位相关
+    intent_targets: dict[str, int] = Field(default_factory=dict)    #计划选几题
+    intent_selected: dict[str, int] = Field(default_factory=dict)   #实际选了几题
+    job_core_required: int = Field(ge=0)    #岗位相关提最低要求数量
+    job_core_available: int = Field(ge=0)   #当前候选题中可用的岗位相关题数量
+    job_core_selected: int = Field(ge=0)    #实际选中的岗位相关题数量
+    degraded: bool = False  #是否降级
+    degradation_reasons: list[str] = Field(default_factory=list)
+
 
 
 class RubricPoint(StrictModel):
@@ -305,7 +379,9 @@ class InterviewPlan(StrictModel):
     closing_message: NonEmptyText   #面试结束语
     plan_version: PositiveInt = 1
     candidate_profile: CandidateProfile | None = None   #用户画像
+    candidate_profile_id: str | None = None #一个用户对应一个画像id
     job_profile: JobProfile | None = None   #岗位画像
+    training_adjustment: TrainingAdjustmentAudit | None = None  #选题的审计记录
     intelligence_status: str | None = None  # 公司面经情报状态（审计用）
 
     @model_validator(mode="after")
@@ -422,7 +498,11 @@ __all__ = [
     "QuestionSource",
     "QuestionType",
     "RubricPoint",
+    "SkillProgress",
+    "SkillProgressEvidence",
     "StrictModel",
     "TimeoutAction",
+    "TrainingAdjustmentAudit",
+    "WeakPointAggregate",
     "WorkExperienceFact",
 ]

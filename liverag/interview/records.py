@@ -10,12 +10,13 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from uuid import uuid4
 
-from liverag.interview.schemas import InterviewState
+from liverag.interview.schemas import AnswerEvaluation, InterviewState
 
 
 class AttemptState(str, Enum):
@@ -75,6 +76,39 @@ def generate_id(prefix: str) -> str:
     if not cleaned_prefix.isascii():
         raise ValueError("标识前缀必须使用 ASCII 字符")
     return f"{cleaned_prefix}_{uuid4().hex}"
+
+
+def candidate_profile_id_for_kb(kb_id: str) -> str:
+    """根据稳定知识库 ID 生成跨场复用的候选人聚合根 ID。"""
+
+    normalized = " ".join(kb_id.strip().casefold().split())
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:32]
+    return f"candidate_profile_{digest}"
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateProfileRecord:
+    """候选人跨场聚合根及其最近一次画像快照。"""
+
+    id: str
+    kb_id: str
+    latest_profile_json: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerEvaluationRecord:
+    """带会话、面试和持久化元数据的回答评价记录。"""
+
+    id: str
+    answer_id: str
+    session_id: str
+    interview_id: str
+    question_id: str
+    rubric_version: int
+    evaluation: AnswerEvaluation
+    created_at: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,9 +250,11 @@ class BackgroundJobRecord:
 
 
 __all__ = [
+    "AnswerEvaluationRecord",
     "AnswerState",
     "AttemptState",
     "BackgroundJobRecord",
+    "CandidateProfileRecord",
     "InterviewAnswerRecord",
     "InterviewAttemptRecord",
     "InterviewEventRecord",
@@ -227,6 +263,7 @@ __all__ = [
     "InterviewSessionRecord",
     "JobStatus",
     "ReportState",
+    "candidate_profile_id_for_kb",
     "generate_id",
     "utc_now_iso",
 ]
