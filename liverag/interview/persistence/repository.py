@@ -7,22 +7,26 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from liverag.interview.records import (
+    AnswerEvaluationRecord,
     AnswerState,
     AttemptState,
     BackgroundJobRecord,
+    CandidateProfileRecord,
     InterviewAnswerRecord,
     InterviewAttemptRecord,
     InterviewEventRecord,
     InterviewRecord,
     InterviewReportRecord,
     InterviewSessionRecord,
-    JobStatus,
 )
 from liverag.interview.schemas import (
     AnswerEvaluation,
+    CandidateProfile,
     InterviewConfig,
     InterviewPlan,
     InterviewState,
+    SkillProgress,
+    SkillProgressEvidence,
 )
 
 
@@ -60,6 +64,18 @@ class InterviewRepository(Protocol):
         config: InterviewConfig,
         interview_id: str | None = None,
     ) -> InterviewRecord: ...
+
+    def ensure_candidate_profile(self, *, kb_id: str) -> CandidateProfileRecord: ...
+
+    def update_candidate_profile_snapshot(
+        self, *, candidate_profile_id: str, profile: CandidateProfile
+    ) -> CandidateProfileRecord: ...
+
+    def get_candidate_profile(
+        self, candidate_profile_id: str
+    ) -> CandidateProfileRecord: ...
+
+    def get_candidate_profile_by_kb(self, kb_id: str) -> CandidateProfileRecord: ...
 
     def get_interview(self, interview_id: str) -> InterviewRecord: ...
 
@@ -240,6 +256,30 @@ class InterviewRepository(Protocol):
     def get_evaluation(self, answer_id: str) -> AnswerEvaluation: ...
 
     def list_evaluations(self, session_id: str) -> list[AnswerEvaluation]: ...
+
+    def get_evaluation_record(self, answer_id: str) -> AnswerEvaluationRecord: ...
+
+    def list_evaluation_records_for_candidate(
+        self, candidate_profile_id: str
+    ) -> list[AnswerEvaluationRecord]: ...
+
+    def apply_skill_evidence(
+        self, evidence: SkillProgressEvidence
+    ) -> SkillProgress: ...
+
+    def replace_skill_progress(
+        self,
+        *,
+        candidate_profile_id: str,
+        progress: list[SkillProgress],
+        evidence: list[SkillProgressEvidence],
+    ) -> list[SkillProgress]: ...
+
+    def list_skill_progress(self, candidate_profile_id: str) -> list[SkillProgress]: ...
+
+    def list_skill_evidence(
+        self, *, candidate_profile_id: str, skill_key: str
+    ) -> list[SkillProgressEvidence]: ...
 
     #=====================Interview Report 记录======================
     def create_report(

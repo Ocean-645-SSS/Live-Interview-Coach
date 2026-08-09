@@ -11,13 +11,6 @@ from sqlalchemy.exc import IntegrityError
 
 from liverag.interview.persistence.db import create_session_factory, create_sqlite_engine
 from liverag.interview.persistence.models import Base
-from liverag.interview.records import (
-    AnswerState,
-    AttemptState,
-    InterviewAttemptRecord,
-    InterviewSessionRecord,
-    ReportState,
-)
 from liverag.interview.persistence.repository import (
     AnswerTransitionResult,
     ConcurrentUpdateError,
@@ -25,8 +18,19 @@ from liverag.interview.persistence.repository import (
     InterviewRepository,
     RecordNotFoundError,
 )
+from liverag.interview.persistence.sqlalchemy_repository import (
+    SQLAlchemyInterviewRepository,
+)
+from liverag.interview.records import (
+    AnswerState,
+    AttemptState,
+    InterviewAttemptRecord,
+    InterviewSessionRecord,
+    ReportState,
+)
 from liverag.interview.schemas import (
     AnswerEvaluation,
+    CandidateProfile,
     DimensionScores,
     FollowUpAction,
     InterviewConfig,
@@ -38,8 +42,8 @@ from liverag.interview.schemas import (
     QuestionSource,
     QuestionType,
     RubricPoint,
+    SkillProgressEvidence,
 )
-from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
 
 
 def _plan(config: InterviewConfig) -> InterviewPlan:
@@ -482,3 +486,111 @@ def test_answer_constraint_failure_rolls_back_session_event_and_answer(
     assert [answer.id for answer in repository.list_answers(session_id=session.id)] == [
         "answer-existing"
     ]
+
+
+def test_candidate_profile_and_evaluation_metadata_are_traceable(
+    repository: InterviewRepository,
+) -> None:
+    session, attempt = _listening_session_with_attempt(repository)
+    result = _record_final_answer(
+        repository,
+        event_id="event-metadata",
+        session=session,
+        attempt=attempt,
+        expected_version=session.version,
+        answer_id="answer-metadata",
+    )
+    evaluation = AnswerEvaluation(
+        answer_id=result.answer.id,
+        question_id=result.answer.question_id,
+        scores=DimensionScores(
+            technical_accuracy=3,
+            completeness=3,
+            clarity_and_structure=4,
+            job_relevance=4,
+        ),
+        weighted_score=70,
+        missing_points=["重排序"],
+        summary="缺少重排序说明。",
+        next_action=FollowUpAction.NEXT_QUESTION,
+    )
+    repository.save_evaluation(
+        evaluation_id="evaluation-metadata",
+        evaluation=evaluation,
+        rubric_version=2,
+    )
+
+    interview = repository.get_interview("interview-atomic")
+    candidate = repository.get_candidate_profile(interview.candidate_profile_id)
+    assert candidate == repository.get_candidate_profile_by_kb("default")
+    updated = repository.update_candidate_profile_snapshot(
+        candidate_profile_id=candidate.id,
+        profile=CandidateProfile(kb_id="default", summary="后端候选人"),
+    )
+    assert updated.latest_profile_json is not None
+
+    record = repository.get_evaluation_record(result.answer.id)
+    assert record.id == "evaluation-metadata"
+    assert record.rubric_version == 2
+    assert record.evaluation == evaluation
+    assert record.session_id == session.id
+    assert record.interview_id == interview.id
+    assert repository.list_evaluation_records_for_candidate(candidate.id) == [record]
+
+
+def test_duplicate_evidence_is_idempotent(repository: InterviewRepository) -> None:
+    session, attempt = _listening_session_with_attempt(repository)
+    result = _record_final_answer(
+        repository,
+        event_id="event-evidence",
+        session=session,
+        attempt=attempt,
+        expected_version=session.version,
+        answer_id="answer-evidence",
+    )
+    evaluation = AnswerEvaluation(
+        answer_id=result.answer.id,
+        question_id=result.answer.question_id,
+        scores=DimensionScores(
+            technical_accuracy=2,
+            completeness=3,
+            clarity_and_structure=3,
+            job_relevance=3,
+        ),
+        weighted_score=55,
+        missing_points=["  重排序。  "],
+        summary="需要补充。",
+        next_action=FollowUpAction.NEXT_QUESTION,
+    )
+    repository.save_evaluation(evaluation_id="evaluation-evidence", evaluation=evaluation)
+    candidate_id = repository.get_interview("interview-atomic").candidate_profile_id
+    evaluated_at = datetime.now(timezone.utc)
+    evidence = SkillProgressEvidence(
+        id="evidence-1",
+        candidate_profile_id=candidate_id,
+        skill_key="skill-rag-retrieval",
+        evaluation_id="evaluation-evidence",
+        session_id=session.id,
+        interview_id="interview-atomic",
+        question_id="question-1",
+        taxonomy_version=1,
+        rubric_version=1,
+        score=55,
+        weak_points=["  重排序。  "],
+        evaluated_at=evaluated_at,
+        created_at=evaluated_at,
+    )
+
+    first = repository.apply_skill_evidence(evidence)
+    second = repository.apply_skill_evidence(evidence)
+
+    assert second == first
+    assert second.attempts == 1
+    assert second.source_evaluation_ids == [evidence.evaluation_id]
+    assert second.weak_points[0].text == "重排序"
+    persisted = repository.list_skill_evidence(
+        candidate_profile_id=candidate_id,
+        skill_key=evidence.skill_key,
+    )
+    assert len(persisted) == 1
+    assert persisted[0].evaluation_id == evidence.evaluation_id

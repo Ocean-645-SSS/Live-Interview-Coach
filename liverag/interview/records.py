@@ -120,6 +120,7 @@ class InterviewRecord:
     """
 
     id: str
+    candidate_profile_id: str
     title: str  #面试标题
     state: InterviewState   #当前阶段
     config_json: str    #`InterviewConfig` 序列化后的 JSON

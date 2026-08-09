@@ -9,11 +9,13 @@ with session_scope(self._session_factory)：涉及写数据库使用，与事务
 from __future__ import annotations
 
 import json
+import statistics
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel as PydanticModel
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -22,24 +24,15 @@ from liverag.interview.persistence.db import session_scope
 from liverag.interview.persistence.models import (
     AnswerEvaluationModel,
     Base,
+    CandidateProfileModel,
     InterviewAnswerModel,
     InterviewAttemptModel,
     InterviewEventModel,
     InterviewModel,
     InterviewReportModel,
     InterviewSessionModel,
-)
-from liverag.interview.records import (
-    AnswerState,
-    AttemptState,
-    InterviewAnswerRecord,
-    InterviewAttemptRecord,
-    InterviewEventRecord,
-    InterviewRecord,
-    InterviewReportRecord,
-    InterviewSessionRecord,
-    ReportState,
-    generate_id,
+    SkillProgressEvidenceModel,
+    SkillProgressModel,
 )
 from liverag.interview.persistence.repository import (
     AnswerTransitionResult,
@@ -47,11 +40,30 @@ from liverag.interview.persistence.repository import (
     DuplicateEventError,
     RecordNotFoundError,
 )
+from liverag.interview.records import (
+    AnswerEvaluationRecord,
+    AnswerState,
+    AttemptState,
+    CandidateProfileRecord,
+    InterviewAnswerRecord,
+    InterviewAttemptRecord,
+    InterviewEventRecord,
+    InterviewRecord,
+    InterviewReportRecord,
+    InterviewSessionRecord,
+    ReportState,
+    candidate_profile_id_for_kb,
+    generate_id,
+)
 from liverag.interview.schemas import (
     AnswerEvaluation,
+    CandidateProfile,
     InterviewConfig,
     InterviewPlan,
     InterviewState,
+    SkillProgress,
+    SkillProgressEvidence,
+    WeakPointAggregate,
 )
 
 ModelT = TypeVar("ModelT", bound=Base)
@@ -83,6 +95,12 @@ def _required_iso(value: datetime) -> str:
     if result is None:  # pragma: no cover - 非空 ORM 字段的类型保护
         raise TypeError("必填时间字段不能为 None")
     return result
+
+
+def _required_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _model_to_json(model: PydanticModel) -> str:
@@ -120,6 +138,7 @@ def _require_model(
 def _interview_record(model: InterviewModel) -> InterviewRecord:
     return InterviewRecord(
         id=model.id,
+        candidate_profile_id=model.candidate_profile_id,
         title=model.title,
         state=model.state,
         config_json=model.config_json,
@@ -127,6 +146,136 @@ def _interview_record(model: InterviewModel) -> InterviewRecord:
         version=model.version,
         created_at=_required_iso(model.created_at),
         updated_at=_required_iso(model.updated_at),
+    )
+
+
+def _candidate_profile_record(model: CandidateProfileModel) -> CandidateProfileRecord:
+    """CandidateProfileModel -> CandidateProfileRecord"""
+
+    return CandidateProfileRecord(
+        id=model.id,
+        kb_id=model.kb_id,
+        latest_profile_json=model.latest_profile_json,
+        created_at=_required_iso(model.created_at),
+        updated_at=_required_iso(model.updated_at),
+    )
+
+
+def _evaluation_record(
+    evaluation: AnswerEvaluationModel,
+    answer: InterviewAnswerModel,
+    interview_id: str,
+) -> AnswerEvaluationRecord:
+    return AnswerEvaluationRecord(
+        id=evaluation.id,
+        answer_id=answer.id,
+        session_id=answer.session_id,
+        interview_id=interview_id,
+        question_id=answer.question_id,
+        rubric_version=evaluation.rubric_version,
+        evaluation=AnswerEvaluation.model_validate_json(evaluation.evaluation_json),
+        created_at=_required_iso(evaluation.created_at),
+    )
+
+
+def _evidence_record(model: SkillProgressEvidenceModel, interview_id: str) -> SkillProgressEvidence:
+    return SkillProgressEvidence(
+        id=model.id,
+        candidate_profile_id=model.candidate_profile_id,
+        skill_key=model.skill_key,
+        evaluation_id=model.evaluation_id,
+        session_id=model.session_id,
+        interview_id=interview_id,
+        question_id=model.question_id,
+        taxonomy_version=model.taxonomy_version,
+        rubric_version=model.rubric_version,
+        score=model.score,
+        weak_points=json.loads(model.weak_points_json),
+        evaluated_at=_required_datetime(model.evaluated_at),
+        created_at=_required_datetime(model.created_at),
+    )
+
+
+def _progress_record(model: SkillProgressModel) -> SkillProgress:
+    return SkillProgress(
+        candidate_profile_id=model.candidate_profile_id,
+        skill_key=model.skill_key,
+        taxonomy_version=model.taxonomy_version,
+        attempts=model.attempts,
+        average_score=model.average_score,
+        current_score=model.current_score,
+        latest_score=model.latest_score,
+        confidence=model.confidence,
+        weak_points=json.loads(model.weak_points_json),
+        source_evaluation_ids=json.loads(model.source_evaluation_ids_json),
+        first_evaluated_at=_required_datetime(model.first_evaluated_at),
+        last_evaluated_at=_required_datetime(model.last_evaluated_at),
+        updated_at=_required_datetime(model.updated_at),
+    )
+
+
+def _calculate_progress(evidence: list[SkillProgressEvidence]) -> SkillProgress:
+    """把全部历史评价证据SkillProgressEvidence，转化为一份新的长期能力画像SkillProgress
+
+    1. 按时间排序
+    2. 计算历史分数
+    3. 计算时间衰减权重
+    4. 计算置信度所需指标
+    5. 聚合薄弱点
+    6. 计算 average/current/latest
+    7. 生成 SkillProgress"""
+
+    #按照时间排序
+    ordered = sorted(evidence, key=lambda item: (item.evaluated_at, item.evaluation_id))
+    #最近一次时间
+    latest_at = ordered[-1].evaluated_at
+
+    #计算历史分数
+    scores = [item.score for item in ordered]
+    #计算时间衰减权重：90天一个半衰期
+    weights = [
+        0.5 ** ((latest_at - item.evaluated_at).total_seconds() / 86400 / 90)
+        for item in ordered
+    ]
+
+    #计算置信度所需指标
+    #1.总共评价次数
+    attempts = len(ordered)
+    #2.来自几场面试
+    sessions = len({item.session_id for item in ordered})
+    #3.横跨时间
+    span_days = (latest_at - ordered[0].evaluated_at).total_seconds() / 86400
+    #4.稳定性
+    consistency = 0.5 if attempts == 1 else max(0.0, 1.0 - statistics.pstdev(scores) / 25)
+    #5.聚合薄弱点
+    weak: dict[str, dict[str, Any]] = {}
+    for item in ordered:
+        for value in item.weak_points:
+            display = " ".join(unicodedata.normalize("NFKC", value).strip().rstrip("，。；;,. ").split())
+            key = display.casefold()
+            aggregate = weak.setdefault(key, {"text": display, "count": 0, "latest_at": item.evaluated_at, "ids": []})
+            aggregate["count"] += 1
+            aggregate["latest_at"] = max(aggregate["latest_at"], item.evaluated_at)
+            aggregate["ids"].append(item.evaluation_id)
+    weak_points = [
+        WeakPointAggregate(text=value["text"], count=value["count"], latest_at=value["latest_at"], source_evaluation_ids=value["ids"])
+        for _, value in sorted(weak.items(), key=lambda pair: (-pair[1]["count"], -pair[1]["latest_at"].timestamp(), pair[0]))[:5]
+    ]
+
+    return SkillProgress(
+        candidate_profile_id=ordered[0].candidate_profile_id,
+        skill_key=ordered[0].skill_key,
+        taxonomy_version=ordered[-1].taxonomy_version,
+        attempts=attempts,
+        average_score=round(sum(scores) / attempts, 2),
+        current_score=round(sum(item.score * weight for item, weight in zip(ordered, weights, strict=True)) / sum(weights), 2),
+        latest_score=ordered[-1].score,
+        confidence=round(0.35 * min(1.0, attempts / 5) + 0.25 * min(1.0, sessions / 3) + 0.15 * min(1.0, span_days / 90) + 0.25 * consistency, 4),
+        weak_points=weak_points,
+        source_evaluation_ids=[item.evaluation_id for item in ordered],
+        first_evaluated_at=ordered[0].evaluated_at,
+        last_evaluated_at=latest_at,
+        updated_at=_utc_now(),
     )
 
 
@@ -282,6 +431,71 @@ class SQLAlchemyInterviewRepository:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._session_factory = session_factory
 
+    # =========================== Candidate Profile ==============================
+    @staticmethod
+    def _ensure_candidate_profile_model(
+        database_session: Session, kb_id: str
+    ) -> CandidateProfileModel:
+        """确保CandidateProfileModel存在，有就复用；没有就create"""
+
+        candidate_id = candidate_profile_id_for_kb(kb_id)
+        model = database_session.get(CandidateProfileModel, candidate_id)
+        if model is not None:
+            return model
+        
+        try:
+            with database_session.begin_nested():
+                database_session.add(
+                    CandidateProfileModel(id=candidate_id, kb_id=kb_id)
+                )
+                database_session.flush()
+        except IntegrityError:
+            pass
+        return _require_model(
+            database_session,
+            CandidateProfileModel,
+            candidate_id,
+            f"候选人画像不存在：{candidate_id}",
+        )
+
+    def ensure_candidate_profile(self, *, kb_id: str) -> CandidateProfileRecord:
+        """根据kb_id获取CandidateProfile"""
+
+        with session_scope(self._session_factory) as database_session:
+            model = self._ensure_candidate_profile_model(database_session, kb_id)
+            return _candidate_profile_record(model)
+
+    def update_candidate_profile_snapshot(
+        self, *, candidate_profile_id: str, profile: CandidateProfile
+    ) -> CandidateProfileRecord:
+        """更新CandidateProfile快照"""
+
+        with session_scope(self._session_factory) as database_session:
+            #查找到旧model
+            model = _require_model(database_session, CandidateProfileModel, candidate_profile_id, f"候选人画像不存在：{candidate_profile_id}")
+            #更新字段：填入旧model
+            model.latest_profile_json = _model_to_json(profile)
+            #更新字段：更新时间
+            model.updated_at = _utc_now()
+
+            database_session.flush()
+            return _candidate_profile_record(model)
+
+    def get_candidate_profile(self, candidate_profile_id: str) -> CandidateProfileRecord:
+        """根据candidate_profile_id查询CandidateProfileModel ->  CandidateProfileRecord"""
+
+        with self._session_factory() as database_session:
+            return _candidate_profile_record(_require_model(database_session, CandidateProfileModel, candidate_profile_id, f"候选人画像不存在：{candidate_profile_id}"))
+
+    def get_candidate_profile_by_kb(self, kb_id: str) -> CandidateProfileRecord:
+        """根据个人资料库kb_id查询CandidateProfileModel ->  CandidateProfileRecord"""
+
+        with self._session_factory() as database_session:
+            model = database_session.scalar(select(CandidateProfileModel).where(CandidateProfileModel.kb_id == kb_id))
+            if model is None:
+                raise RecordNotFoundError(f"候选人画像不存在：{kb_id}")
+            return _candidate_profile_record(model)
+
     #================================== Interview =====================================
     def create_interview(
         self,
@@ -296,13 +510,17 @@ class SQLAlchemyInterviewRepository:
         if not clean_title:
             raise ValueError("面试标题不能为空")
 
-        model = InterviewModel(
-            id=interview_id or generate_id("interview"),
-            title=clean_title,
-            state=InterviewState.CREATED,
-            config_json=_model_to_json(config),
-        )
         with session_scope(self._session_factory) as database_session:
+            candidate = self._ensure_candidate_profile_model(
+                database_session, config.candidate_kb_id
+            )
+            model = InterviewModel(
+                id=interview_id or generate_id("interview"),
+                title=clean_title,
+                state=InterviewState.CREATED,
+                config_json=_model_to_json(config),
+                candidate_profile_id=candidate.id,
+            )
             database_session.add(model)
             database_session.flush()  #把待执行的SQL提交到数据库，但不提交事务
             return _interview_record(model)
@@ -1149,6 +1367,232 @@ class SQLAlchemyInterviewRepository:
             )
             values = database_session.scalars(statement).all()
         return [AnswerEvaluation.model_validate_json(value) for value in values]
+
+    def get_evaluation_record(self, answer_id: str) -> AnswerEvaluationRecord:
+        """根据answer_id获取AnswerEvaluationRecord"""
+
+        with self._session_factory() as database_session:
+            row = database_session.execute(
+                select(AnswerEvaluationModel, InterviewAnswerModel, InterviewSessionModel.interview_id)
+                .join(InterviewAnswerModel, InterviewAnswerModel.id == AnswerEvaluationModel.answer_id)
+                .join(InterviewSessionModel, InterviewSessionModel.id == InterviewAnswerModel.session_id)
+                .where(AnswerEvaluationModel.answer_id == answer_id)
+            ).one_or_none()
+            if row is None:
+                raise RecordNotFoundError(f"回答评价不存在：{answer_id}")
+            
+            return _evaluation_record(row[0], row[1], row[2])
+
+    def list_evaluation_records_for_candidate(self, candidate_profile_id: str) -> list[AnswerEvaluationRecord]:
+        """根据candidate_profile_id获取所有AnswerEvaluationRecord"""
+
+        with self._session_factory() as database_session:
+            statement = (
+                select(AnswerEvaluationModel, InterviewAnswerModel, InterviewSessionModel.interview_id)
+                .join(InterviewAnswerModel, InterviewAnswerModel.id == AnswerEvaluationModel.answer_id)
+                .join(InterviewSessionModel, InterviewSessionModel.id == InterviewAnswerModel.session_id)
+                .join(InterviewModel, InterviewModel.id == InterviewSessionModel.interview_id)
+                .where(InterviewModel.candidate_profile_id == candidate_profile_id)
+                .order_by(AnswerEvaluationModel.created_at, AnswerEvaluationModel.id)
+            )
+
+            return [_evaluation_record(row[0], row[1], row[2]) for row in database_session.execute(statement).all()]
+
+    def list_skill_evidence(self, *, candidate_profile_id: str, skill_key: str) -> list[SkillProgressEvidence]:
+        """查询某个候选人在某项技能下的所有 Evidence 明细"""
+
+        with self._session_factory() as database_session:
+            statement = (
+                select(SkillProgressEvidenceModel, InterviewSessionModel.interview_id)
+                .join(InterviewSessionModel, InterviewSessionModel.id == SkillProgressEvidenceModel.session_id)
+                .where(SkillProgressEvidenceModel.candidate_profile_id == candidate_profile_id, SkillProgressEvidenceModel.skill_key == skill_key)
+                .order_by(SkillProgressEvidenceModel.evaluated_at, SkillProgressEvidenceModel.evaluation_id)
+            )
+
+            return [_evidence_record(row[0], row[1]) for row in database_session.execute(statement).all()]
+
+    def list_skill_progress(self, candidate_profile_id: str) -> list[SkillProgress]:
+        """查询某个候选人的所有技能画像汇总结果"""
+
+        with self._session_factory() as database_session:
+            models = database_session.scalars(select(SkillProgressModel).where(SkillProgressModel.candidate_profile_id == candidate_profile_id).order_by(SkillProgressModel.skill_key)).all()
+
+            return [_progress_record(model) for model in models]
+
+    @staticmethod
+    def _write_progress(model: SkillProgressModel, progress: SkillProgress) -> None:
+        """把计算好的 SkillProgress 写进 SkillProgressModel"""
+
+        model.taxonomy_version = progress.taxonomy_version
+        model.attempts = progress.attempts
+        model.average_score = progress.average_score
+        model.current_score = progress.current_score
+        model.latest_score = progress.latest_score
+        model.confidence = progress.confidence
+        model.weak_points_json = json.dumps([item.model_dump(mode="json") for item in progress.weak_points], ensure_ascii=False)
+        model.source_evaluation_ids_json = json.dumps(progress.source_evaluation_ids, ensure_ascii=False)
+        model.first_evaluated_at = progress.first_evaluated_at
+        model.last_evaluated_at = progress.last_evaluated_at
+        model.updated_at = progress.updated_at
+
+    def apply_skill_evidence(self, evidence: SkillProgressEvidence) -> SkillProgress:
+        """新来一条 Evidence 时，增量更新长期画像
+        
+        1. 找/创建 SkillProgress 行
+        2. 检查 Evidence 是否重复
+        3. 保存新 Evidence
+        4. 查询全部历史 Evidence
+        5. _calculate_progress() 重算并更新 SkillProgress"""
+
+        with session_scope(self._session_factory) as database_session:
+            #查询skills聚集行
+            aggregate = database_session.get(
+                SkillProgressModel,
+                (evidence.candidate_profile_id, evidence.skill_key),
+            )
+            if aggregate is None:
+                #把evidence转化为skillprogress
+                seed = _calculate_progress([evidence])
+                try:
+                    #开启一个savepoint
+                    with database_session.begin_nested():
+                        #创建skillprogressmodel
+                        candidate = SkillProgressModel(
+                            candidate_profile_id=evidence.candidate_profile_id,
+                            skill_key=evidence.skill_key,
+                        )
+                        #把skillprogress(seed) -> skillprogress_model
+                        self._write_progress(candidate, seed)
+                        #model加入数据库
+                        database_session.add(candidate)
+                        #刷新
+                        database_session.flush()
+                except IntegrityError:
+                    pass
+
+            #修改长期画像前，锁住这个候选人的这个技能记录
+            #重新根据candidate_profile_id + skill_key 查询SkillProgress，并加锁
+            aggregate = database_session.execute(
+                select(SkillProgressModel)
+                .where(
+                    SkillProgressModel.candidate_profile_id
+                    == evidence.candidate_profile_id,
+                    SkillProgressModel.skill_key == evidence.skill_key,
+                )
+                .with_for_update()  #接下来要修改这行，先锁住它
+            ).scalar_one()
+
+            #幂等：检查evidence是否已经存在
+            existing = database_session.scalar(
+                select(SkillProgressEvidenceModel.id).where(
+                    SkillProgressEvidenceModel.candidate_profile_id
+                    == evidence.candidate_profile_id,
+                    SkillProgressEvidenceModel.skill_key == evidence.skill_key,
+                    SkillProgressEvidenceModel.evaluation_id == evidence.evaluation_id,
+                )
+            )
+            if existing is not None:
+                #1.已经存在，直接返回skillprogress
+                return _progress_record(aggregate)
+            #2.不存在，再插入evidence
+            try:
+                with database_session.begin_nested():
+                    database_session.add(
+                        SkillProgressEvidenceModel(
+                            id=evidence.id,
+                            candidate_profile_id=evidence.candidate_profile_id,
+                            skill_key=evidence.skill_key,
+                            evaluation_id=evidence.evaluation_id,
+                            session_id=evidence.session_id,
+                            question_id=evidence.question_id,
+                            taxonomy_version=evidence.taxonomy_version,
+                            rubric_version=evidence.rubric_version,
+                            score=evidence.score,
+                            weak_points_json=json.dumps(
+                                evidence.weak_points, ensure_ascii=False
+                            ),
+                            evaluated_at=evidence.evaluated_at,
+                            created_at=evidence.created_at,
+                        )
+                    )
+                    database_session.flush()
+            except IntegrityError:
+                #数据库唯一约束做二重保险
+                return _progress_record(aggregate)
+
+            #查出某候选人某技能的全部历史 Evidence
+            all_evidence = self._list_skill_evidence_in_session(
+                database_session,
+                evidence.candidate_profile_id,
+                evidence.skill_key,
+            )
+            #SkillProgressEvidence转化为一份新的长期能力画像SkillProgress
+            result = _calculate_progress(all_evidence)
+            #写入model
+            self._write_progress(aggregate, result)
+            #刷新数据库
+            database_session.flush()
+
+            return _progress_record(aggregate)
+
+    @staticmethod
+    def _list_skill_evidence_in_session(database_session: Session, candidate_profile_id: str, skill_key: str) -> list[SkillProgressEvidence]:
+        """查出某候选人某技能的全部历史 Evidence"""
+
+        statement = (
+            select(SkillProgressEvidenceModel, InterviewSessionModel.interview_id)
+            .join(InterviewSessionModel, InterviewSessionModel.id == SkillProgressEvidenceModel.session_id)
+            .where(SkillProgressEvidenceModel.candidate_profile_id == candidate_profile_id, 
+                   SkillProgressEvidenceModel.skill_key == skill_key)
+        )
+        return [_evidence_record(row[0], row[1]) for row in database_session.execute(statement).all()]
+
+    def replace_skill_progress(self, *, candidate_profile_id: str, progress: list[SkillProgress], evidence: list[SkillProgressEvidence]) -> list[SkillProgress]:
+        """全量重建某个候选人的长期画像"""
+
+        with session_scope(self._session_factory) as database_session:
+            #根据candidate_profile_id删除SkillProgressEvidence
+            database_session.execute(
+                delete(SkillProgressEvidenceModel)
+                .where(SkillProgressEvidenceModel.candidate_profile_id == candidate_profile_id)
+            )
+            #根据candidate_profile_id删除SkillProgress
+            database_session.execute(
+                delete(SkillProgressModel)
+                .where(SkillProgressModel.candidate_profile_id == candidate_profile_id)
+            )
+
+            models: list[SkillProgressModel] = []
+            for item in progress:
+                #最新model
+                model = SkillProgressModel(candidate_profile_id=item.candidate_profile_id, skill_key=item.skill_key)
+                #skillprogress -> skillprogress_model
+                self._write_progress(model, item)
+                #添加新model
+                database_session.add(model)
+                #追加到model列表
+                models.append(model)
+            database_session.flush()
+
+            for item in evidence:
+                #添加新evidence model
+                database_session.add(
+                    SkillProgressEvidenceModel(
+                        id=item.id, 
+                        candidate_profile_id=item.candidate_profile_id, 
+                        skill_key=item.skill_key, evaluation_id=item.evaluation_id, 
+                        session_id=item.session_id, 
+                        question_id=item.question_id, 
+                        taxonomy_version=item.taxonomy_version, 
+                        rubric_version=item.rubric_version, 
+                        score=item.score, 
+                        weak_points_json=json.dumps(item.weak_points, ensure_ascii=False),
+                          evaluated_at=item.evaluated_at, created_at=item.created_at
+                    )
+                )
+            database_session.flush()
+
+            return [_progress_record(model) for model in models]
 
     #============================== Interview Report ==============================
     def create_report(
