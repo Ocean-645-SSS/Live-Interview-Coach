@@ -129,7 +129,7 @@ GET /api/interviews/jobs/{job_id}
 
 ## 3.2 Background Business Workflows（修订版）
 
-> **状态：** ⏳ 待开始
+> **状态：** ⏳ 已完成
 >
 > **修订说明（2026-08-07）：** 原 3.2 设计存在三个核心问题需要调整：
 > 1. `resume_parse` 与 `profile_generation` 职责重叠（都生成 `CandidateProfile`）
@@ -799,7 +799,7 @@ API: 创建 Job 前
 
 ## 3.3 MCP Client + Nowcoder Spider Adapter + 降级策略
 
-> **状态：** ⏳ 待开始
+> **状态：** ⏳ 已完成
 >
 > **定位：** 在 `interview_preparation` 的 `COMPANY_INTELLIGENCE` stage 中，通过本地 stdio MCP Server 接入牛客公开面经数据，为 `InterviewPlanner` 提供可选的公司面试情报增强。
 >
@@ -2675,18 +2675,6 @@ InterviewPlan 正常生成
 
 ---
 
-
-## 整体实施顺序
-
-```
-3.1（必须先做）→ 证明异步系统跑通
-  ↓
-3.2 → 迁移耗时流程到后台
-  ↓
-3.3 → MCP 面经增强（依赖 3.2 的 plan_generation 任务）
-```
-
-**阶段门槛：** 3.1 全部测试通过后才能开始 3.2；3.2 的 `plan_generation` 任务稳定后才能开始 3.3。
 
 **验收标准：**
 - FastAPI 重启后 Job 状态仍在 PostgreSQL

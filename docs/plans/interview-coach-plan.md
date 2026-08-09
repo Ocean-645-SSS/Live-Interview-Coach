@@ -569,85 +569,116 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 
 **阶段门槛：** 本阶段完成前不得开始 Alembic/PostgreSQL 接入。
 
-### 第二步：Alembic + PostgreSQL
+### 第二步：Alembic + PostgreSQL ✅
 
 **目标：** 在第一步 SQLAlchemy 模型和 repository 稳定后，建立正式迁移体系，并让同一业务代码在 PostgreSQL 上等价运行。
 
-- [√] 以第一步 SQLAlchemy metadata 建立 Alembic baseline；不得从原生建表 SQL 维护第二套模型。
-- [√] 配置 SQLite 开发 URL 和 PostgreSQL 集成/部署 URL，repository 不按数据库类型分叉业务逻辑。
-- [√] 在 PostgreSQL 上运行 `alembic upgrade head`，验证空库初始化和连续升级。
-- [ ] 验证事件 + Session + Answer 原子事务、唯一幂等、外键、UTC 时间和 `version` 条件更新。
-- [] 为现有 SQLite 数据提供一次性导出/导入路径，或明确标记可重建的开发数据。
-- [√] Compose 增加 PostgreSQL 健康检查和持久化卷；FastAPI/Agent 只等待 ready，不管理数据库进程。
+**状态：** 已完成。
 
-V2 已完成：
-- PostgreSQL 持久化
-- Alembic 数据库迁移
-- SQLite/PostgreSQL 可切换
-- SQLAlchemy Repository 支持生产数据库
+- [x] 以第一步 SQLAlchemy metadata 建立 Alembic baseline；不得从原生建表 SQL 维护第二套模型。
+- [x] 配置 SQLite 开发 URL 和 PostgreSQL 集成/部署 URL，repository 不按数据库类型分叉业务逻辑。
+- [x] 在 PostgreSQL 上运行 `alembic upgrade head`，验证空库初始化和连续升级。
+- [x] 验证事件 + Session + Answer 原子事务、唯一幂等、外键、UTC 时间和 `version` 条件更新（`sqlalchemy_repository.py` 使用 `UPDATE ... WHERE version = expected_version` + 受影响行数检查）。
+- [x] 为现有 SQLite 数据提供一次性导出/导入路径，或明确标记可重建的开发数据（选择后者：开发数据标记为可重建，生产通过 Alembic 初始化）。
+- [x] Compose 增加 PostgreSQL 健康检查和持久化卷；FastAPI/Agent 只等待 ready，不管理数据库进程。
 
-开发环境：
-- SQLite 作为默认本地数据库
-- 数据可通过 Alembic 重建
-- 不保证旧开发数据迁移
+**数据库策略：**
 
-生产/部署环境：
-- PostgreSQL
-- 通过 Alembic upgrade head 初始化
-
-## Database Strategy
-
-Development:
-- SQLite
-- 数据可通过 Alembic 重建
-- 不保证历史开发数据迁移
-
-Production:
-- PostgreSQL
-- 使用 Alembic upgrade head 初始化
+| 环境 | 数据库 | 说明 |
+|------|--------|------|
+| 开发 | SQLite | 默认本地数据库，数据可通过 Alembic 重建，不保证历史开发数据迁移 |
+| 生产 | PostgreSQL | 使用 Alembic `upgrade head` 初始化，持久化卷 `liverag-postgres-data` |
 
 **验收标准：** 同一业务测试契约在 SQLite 和 PostgreSQL 通过；部署配置使用 PostgreSQL，本地仍可使用 SQLite。
 
 **阶段门槛：** 本阶段不引入 Redis、Background Worker 或 MCP；完成后才能进入第三步。
 
-### 第三步：Redis + Background Worker + MCP
+### 第三步：Redis + Background Worker + MCP ✅
 
 **目标：** 在 PostgreSQL 成为可靠业务数据库后，引入 Redis 和一套 Background Worker，把耗时准备与报告任务移出 FastAPI 请求和实时 LiveKit 主链路，并在后台准备任务中接入可降级的牛客 MCP 面经增强。
 
-**修改文件：** `pyproject.toml`、settings、Compose、FastAPI lifespan、Interview Application Service、任务状态 API 和计划/报告前端轮询。
+**状态：** 已完成。
 
-**新增文件：** `liverag/interview/jobs/{models,repository,queue,tasks,worker}.py`、`artifact_reader.py`、`profile_service.py`、`planner.py`、`intelligence/{provider,mcp_client,nowcoder_mcp,normalizer,aggregator,service}.py`、对应 migrations、fixtures 和测试。
+**修改文件：** `pyproject.toml`、`liverag/config/settings.py`（新增 `RedisSettings`、`WorkerSettings`、`InterviewIntelligenceSettings`）、`docker-compose.yml`（新增 `liverag-interview-worker` + `redis` 服务）、FastAPI lifespan、`liverag/api/interview_routes.py`（新增 `/jobs/`、async preparation、async report 端点）、`liverag/interview/application/service.py`、`liverag/interview/persistence/models.py`（新增 `interview_background_jobs` 表，共 8 张 ORM 表）、`liverag/interview/persistence/sqlalchemy_repository.py`。
 
-- [ ] PostgreSQL 增加持久化 Job 记录，保存类型、状态、幂等键、输入业务 ID、尝试次数、错误和时间；Redis 只保存队列与可重建协调状态。
-- [ ] 固定一套 Background Worker 实现，定义有限重试、任务超时、失败状态和安全关闭语义。
-- [ ] 将简历/JD 结构化、Candidate/Job Profile、Interview Plan 和最终报告生成迁移到后台任务。
-- [ ] 通过 RagGateway 获取候选人证据，不绕过现有 LightRAG。
-- [ ] 实现 provider-neutral MCP client；牛客 adapter 只在 capability discovery 和契约测试通过后启用，并始终在准备任务中运行。
-- [ ] 使用 Redis 短期锁减少相同 preparation/report job 的重复执行；最终幂等由 PostgreSQL 唯一约束保证。
-- [ ] FastAPI 创建任务后返回 `job_id`；前端查询 PostgreSQL 中的持久化状态。
-- [ ] 实时 LiveKit 链路继续同步处理提问、final transcript 和状态迁移，不把逐轮语音事件放入 Redis 队列。
+**新增文件：**
 
-**测试：** Redis/Worker 集成、重复投递、Worker 重启、超时、有限重试、MCP mock/contract、provider 降级、报告幂等，以及实时链路无 Redis round-trip 的回归测试。
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| `jobs/` | `repository.py` | `JobRepository` — PostgreSQL BackgroundJob CRUD、状态流转（PENDING→QUEUED→RUNNING→COMPLETED/FAILED）、幂等键查询、有限重试 |
+| | `queue.py` | `RedisQueue` — Redis List FIFO 队列（RPUSH/BLPOP）+ 分布式锁（SETNX + Lua 原子释放，token-based owner 验证防止误删） |
+| | `tasks.py` | `@register` 注册表 + 5 个 handler：`demo`、`resume_parse`、`profile_generation`、`interview_preparation`、`report_generation` |
+| | `worker.py` | `BackgroundWorker` — 异步主循环（兜底扫描→BLPOP→执行→写回），SIGINT/SIGTERM 优雅关闭 |
+| | `worker_main.py` | 独立 Worker 进程入口 |
+| `intelligence/` | `provider.py` | `InterviewIntelligenceProvider` Protocol + `ProviderError` + 契约模型 |
+| | `service.py` | `IntelligenceService` — 缓存检查→Provider调用→规范化→提取→聚合→写缓存，完整降级编排 |
+| | `cache.py` | Redis fresh/stale 双层缓存（fresh TTL 1h，stale TTL 24h） |
+| | `nowcoder_provider.py` | `NowcoderSpiderProvider` — Query→搜索词→MCP Tool→RawExperience |
+| | `normalizer.py` | 确定性规范化（公司别名/岗位别名统一、轮次识别） |
+| | `extractor.py` | LLM 从帖子正文提取 questions/topics/interview_round |
+| | `aggregator.py` | 去重→主题频率→代表性题目→轮次模式→`CompanyInterviewProfile` |
+| | `mcp/` | MCP stdio Client + Nowcoder MCP Server |
+| `application/` | `profile_service.py` | `InterviewProfileService` — 通过 RAG 检索生成 CandidateProfile / JobProfile |
+| | `planner.py` | `InterviewPlanner` — 从题库 + 画像生成面试计划 |
+| | `resume_parser.py` | `ResumeParser` — 简历事实抽取 |
+
+- [x] PostgreSQL 增加持久化 Job 记录（`interview_background_jobs` 表），保存类型、状态、幂等键、业务资源 ID、尝试次数、错误和时间；Redis 只保存队列与可重建协调状态。
+- [x] 固定一套 Background Worker 实现，定义有限重试（默认 3 次）、任务超时（默认 300s）、失败状态和安全关闭语义（SIGINT/SIGTERM → 等待当前任务完成）。
+- [x] 将简历/JD 结构化、Candidate/Job Profile、Interview Plan 和最终报告生成迁移到后台任务（5 种 job_type，通过 `@register` 装饰器注册）。
+- [x] 通过 RagGateway 获取候选人证据，不绕过现有 LightRAG（`KnowledgeContextSource` 注入到 handler）。
+- [x] 实现 provider-neutral MCP client（`intelligence/mcp/`）；牛客 adapter 只在 capability discovery 和契约测试通过后启用，并始终在准备任务中运行（5 阶段 preparation workflow：`RESUME_PARSING → CANDIDATE_PROFILE → JOB_PROFILE → COMPANY_INTELLIGENCE → PLAN_GENERATION`，任意阶段失败自动降级）。
+- [x] 使用 Redis 短期锁减少相同 preparation/report job 的重复执行（三层幂等：pre-check → Redis SETNX token 锁 → PostgreSQL 唯一约束）；报告生成锁使用 Lua 脚本原子比较 token 后释放，防止"旧任务误删新锁"。
+- [x] FastAPI 创建任务后返回 `job_id`；前端通过 `GET /api/interviews/{id}/preparation` 和 `GET /api/interviews/jobs/{job_id}` 轮询 PostgreSQL 中的持久化状态。
+- [x] 实时 LiveKit 链路继续同步处理提问、final transcript 和状态迁移，不把逐轮语音事件放入 Redis 队列。
+
+**测试：** Redis/Worker 集成、重复投递、Worker 重启、超时、有限重试、MCP mock/contract、provider 降级、报告幂等（`tests/interview/test_background_jobs.py`），以及实时链路无 Redis round-trip 的回归测试。
 
 **验收标准：** FastAPI 重启后 Job 状态仍在 PostgreSQL；Redis 重启不会丢失已完成业务结果；MCP 不出现在实时调用日志；Worker 故障不破坏基础实时面试。
 
 **阶段门槛：** Redis/Worker 重启、MCP 降级和 PostgreSQL 持久化任务状态全部通过后，才能进入第四步。
 
+
 ### 第四步：长期能力画像
 
-**目标：** 跨面试积累可解释 SkillProgress，建立评价校准、趋势分析和训练闭环。
+**目标：** 基于跨场面试的持久化评价结果，构建可解释、可追溯的长期 `SkillProgress`，形成“历史评价 → 能力状态 → 下一次面试调整”的训练闭环。
 
-- [ ] 定义技能 taxonomy、证据衰减和置信度更新规则。
-- [ ] `SkillProgress` 以 `candidate_profile_id` 关联当前候选人画像，至少保存 `skill`、`attempts`、`average_score`、`latest_score`、`weak_points`、`confidence`、`source_evaluation_ids` 和 `updated_at`。
-- [ ] SkillProgress 只由已持久化 AnswerEvaluation 更新，并能通过 `source_evaluation_ids` 回溯来源。
-- [ ] Planner 读取历史 SkillProgress，为下一次面试调整题目权重、难度、薄弱点复测和已掌握知识点抽查。
-- [ ] 建立专家标注样本和 prompt/model 回归门槛。
-- [ ] 展示趋势、置信度和推荐训练题。
-- [ ] 增加成本、延迟、评价失败和分布漂移监控。
+* [ ] 定义稳定的两级技能 taxonomy，并为题库题目和评价结果建立统一的 skill 映射规则；定义时间衰减、弱点聚合和置信度更新规则，避免由 LLM 直接生成最终能力分或主观置信度。
+* [ ] `SkillProgress` 以 `candidate_profile_id + skill` 作为能力聚合边界，至少保存：
+  * `skill`
+  * `attempts`
+  * `average_score`：该技能所有历史有效评价的平均分，用于反映长期总体表现
+  * `current_score`：考虑时间衰减后的当前能力估计，使近期评价对当前状态具有更高权重
+  * `latest_score`：最近一次有效评价分数
+  * `weak_points`：归一化、去重后的主要薄弱点，并限制保留数量，避免历史问题无限累积
+  * `confidence`：根据有效评价数量、时间分布和评价一致性等确定性规则计算的可信度
+  * `source_evaluation_ids`
+  * `updated_at`
+* [ ] `SkillProgress` 只能由已持久化的 `AnswerEvaluation` 更新，不直接依据 transcript、InterviewReport 或 LLM 自由总结修改；每次聚合必须保留 `source_evaluation_ids`，能够回溯到具体题目、回答、rubric 和评价结果。
+* [ ] 新增独立的 `SkillProgressService`，负责将 `AnswerEvaluation` 映射到对应 skill，并统一完成 `attempts`、历史平均分、时间衰减分、最新分、薄弱点和置信度的增量更新；Evaluator 只负责单题评价，不负责长期能力状态计算。
+* [ ] Planner 在生成下一次 `InterviewPlan` 时读取历史 `SkillProgress`，但不能完全由历史弱项驱动选题；应同时综合 `JobProfile`、Question Bank 和历史能力状态，在岗位核心能力、薄弱点复测和已掌握知识点抽查之间保持合理比例。
+* [ ] Planner 可根据 `current_score` 和 `confidence` 调整题目权重与难度：低分且高置信度的技能优先复测；低置信度技能优先补充证据；高分技能仍保留少量抽查，避免能力画像长期失真。
+* [ ] 增加长期能力进度页面，展示各技能的历史趋势、`average_score`、`current_score`、`latest_score`、置信度、主要薄弱点及其评价来源，并基于当前薄弱项推荐对应训练题。
 
-**测试：** 覆盖多场 Interview 聚合、不同 CandidateProfile 边界、报告幂等、时间衰减、评价一致性、版本对比，以及 Planner 调整策略与进度页 E2E。
+**测试：**
 
-**验收标准：** 同一 CandidateProfile 的历史评价可形成可追溯能力趋势，并能实际影响下一次计划；不同 CandidateProfile 的材料和能力记录不混合；分数变化有评价来源和版本解释。
+* 覆盖同一 CandidateProfile 多场 Interview 的 SkillProgress 聚合。
+* 验证不同 `candidate_profile_id` 的能力记录严格隔离。
+* 验证重复 AnswerEvaluation 或重复报告生成不会导致 SkillProgress 重复累计。
+* 验证历史平均分、时间衰减后的 `current_score`、`latest_score` 和 confidence 更新结果符合预期。
+* 验证 weak_points 的归一化、去重、淘汰和来源追溯规则。
+* 验证 Planner 在存在和不存在历史 SkillProgress 时都能正常生成计划，并确实根据历史能力调整选题权重、难度和复测策略。
+* 覆盖评价版本变化后的聚合一致性、历史来源追溯，以及进度页 E2E。
+
+**验收标准：**
+
+同一 `CandidateProfile` 的多场面试评价能够形成稳定、可解释且可追溯的长期技能状态；任一 `SkillProgress` 分数、薄弱点和置信度均能够追溯到具体 `AnswerEvaluation`；不同 CandidateProfile 的材料和能力记录不得混合。
+
+历史能力状态必须实际影响下一次 `InterviewPlan`，系统能够根据岗位核心要求、历史薄弱点和已掌握技能动态调整题目权重、难度和复测策略，同时避免单一弱项长期主导整个面试计划。长期能力画像应形成完整的：
+
+`AnswerEvaluation → SkillProgress → InterviewPlanner → 下一次 InterviewPlan → 新 AnswerEvaluation`
+
+反馈闭环。
+
 
 ### 可选增强：PI Agent / GitHub 项目分析
 

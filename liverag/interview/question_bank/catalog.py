@@ -220,6 +220,12 @@ class QuestionBank:
 
         return len(self._document.questions)
 
+    @property
+    def questions(self) -> tuple[InterviewQuestion, ...]:
+        """按题库顺序返回不可变的问题视图。"""
+
+        return tuple(self._document.questions)
+
     def get_question(self, question_id: str) -> InterviewQuestion:
         """按稳定 ID 返回题目，不存在时抛出明确异常。"""
 
