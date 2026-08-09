@@ -17,6 +17,7 @@ from openai import AsyncOpenAI
 
 from liverag.interview.intelligence.provider import InterviewIntelligenceQuery
 from liverag.interview.intelligence.service import IntelligenceService
+from liverag.interview.jobs.queue import RedisQueue
 from liverag.interview.jobs.repository import BackgroundJobRecord
 from liverag.interview.application.profile_service import KnowledgeContextSource
 from liverag.interview.jobs.repository import JobRepository
@@ -654,6 +655,7 @@ async def report_generation_task(
     job: BackgroundJobRecord,
     *,
     interview_repo: InterviewRepository,
+    redis_queue: RedisQueue | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """报告生成任务：加载 Session 的所有评价 → 聚合生成报告 → 持久化。
@@ -668,6 +670,11 @@ async def report_generation_task(
     1. 加载 InterviewPlan + Answers + Evaluations
     2. InterviewReportBuilder 聚合生成报告
     3. DB 状态转换：PENDING/GENERATING → COMPLETED
+
+    并发保护（lock:interview_report:{session_id}）：
+    - Redis 锁确保同一 session 的报告只生成一次
+    - 获取锁失败 → 等待已有生成完成 → 返回 COMPLETED 结果
+    - 锁 TTL 300s，Worker 崩溃后自动释放
     """
 
     payload = json.loads(job.payload_json) if job.payload_json else {}
@@ -690,6 +697,50 @@ async def report_generation_task(
             "state": "COMPLETED",
         }
 
+    # ── Redis 锁：防止多个 Worker/API 同时生成同一份报告 ──
+    _LOCK_TTL = 300  # 5 分钟，足够报告生成完成
+    lock_token: str | None = None
+    if redis_queue is not None:
+        lock_token = await redis_queue.acquire_lock(
+            job_type="report_generation",
+            resource_id=session_id,
+            ttl=_LOCK_TTL,
+        )
+        if lock_token is None:
+            # 另一进程正在生成 → 轮询等待其结果
+            logger.info(
+                "报告生成锁已被占用，等待另一进程完成",
+                extra={"job_id": job.id, "session_id": session_id},
+            )
+            for _ in range(60):  # 最多等 60 秒
+                await asyncio.sleep(1.0)
+                existing = interview_repo.get_report_by_session(session_id)
+                if existing is not None and existing.state is ReportState.COMPLETED:
+                    logger.info(
+                        "另一进程已完成报告生成",
+                        extra={"job_id": job.id, "session_id": session_id, "report_id": existing.id},
+                    )
+                    return {
+                        "report_id": existing.id,
+                        "session_id": session_id,
+                        "state": "COMPLETED",
+                    }
+            # 超时仍未完成 → 判定上一进程已崩溃，强制接管
+            logger.warning(
+                "等待报告生成超时（60s），强制接管",
+                extra={"job_id": job.id, "session_id": session_id},
+            )
+            # 旧锁已过 TTL 的 60/300，重新尝试获取
+            lock_token = await redis_queue.acquire_lock(
+                job_type="report_generation",
+                resource_id=session_id,
+                ttl=_LOCK_TTL,
+            )
+            if lock_token is None:
+                raise RuntimeError(
+                    f"无法获取报告生成锁：session {session_id} 的报告可能正在由另一进程生成"
+                )
+
     # ── 创建或复用报告记录 ──
     if existing is None:
         report = interview_repo.create_report(session_id=session_id)
@@ -697,7 +748,19 @@ async def report_generation_task(
         report = existing
 
     # ── 标记开始生成 ──
-    interview_repo.start_report_generation(report.id)
+    try:
+        interview_repo.start_report_generation(report.id)
+    except ValueError:
+        # 条件更新失败：另一进程已抢先标记为 GENERATING
+        # 检查是否已有 COMPLETED 结果
+        refreshed = interview_repo.get_report_by_session(session_id)
+        if refreshed is not None and refreshed.state is ReportState.COMPLETED:
+            return {
+                "report_id": refreshed.id,
+                "session_id": session_id,
+                "state": "COMPLETED",
+            }
+        raise
 
     try:
         # ── 聚合生成 ──
@@ -729,6 +792,20 @@ async def report_generation_task(
             extra={"job_id": job.id, "session_id": session_id, "error": error_msg},
         )
         raise
+    finally:
+        # ── 释放锁 ──
+        if lock_token is not None and redis_queue is not None:
+            try:
+                await redis_queue.release_lock(
+                    job_type="report_generation",
+                    resource_id=session_id,
+                    lock_token=lock_token,
+                )
+            except Exception:
+                logger.warning(
+                    "释放报告生成锁失败（锁可能已过期）",
+                    extra={"job_id": job.id, "session_id": session_id},
+                )
 
 
 __all__ = ["get_handler", "register", "registered_types"]

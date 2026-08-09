@@ -141,12 +141,12 @@ class BackgroundWorker:
             #遍历jobs
             for job in pending:
                 # 通过幂等锁避免重复入队
-                #获取幂等锁
-                if await self._queue.acquire_lock(
+                lock_token = await self._queue.acquire_lock(
                     job_type=job.job_type,
                     resource_id=job.business_resource_id,
                     ttl=60,
-                ):
+                )
+                if lock_token is not None:
                     #入队
                     await self._queue.enqueue(
                         job_type=job.job_type, job_id=job.id
@@ -155,7 +155,9 @@ class BackgroundWorker:
                     self._repo.mark_queued(job.id)
                     #释放锁
                     await self._queue.release_lock(
-                        job_type=job.job_type, resource_id=job.business_resource_id
+                        job_type=job.job_type,
+                        resource_id=job.business_resource_id,
+                        lock_token=lock_token,
                     )
 
     async def _execute_job(self, job_id: str) -> None:

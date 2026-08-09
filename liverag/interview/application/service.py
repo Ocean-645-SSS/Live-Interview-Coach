@@ -414,7 +414,13 @@ class InterviewService:
         )
 
     def generate_report(self, session_id: str) -> InterviewReportRecord:
-        """生成面试报告"""
+        """生成面试报告。
+
+        并发保护：
+        - DB 层：start_report_generation() 条件更新（仅 PENDING/FAILED → GENERATING）
+        - Redis 层：由调用方（API / Worker）在调用前获取 lock:report_generation:{session_id}
+        - 本方法同时处理 DB 条件更新失败的情况（另一进程已抢先开始生成）
+        """
 
         #获取当前session对应的报告
         report = self.repository.get_report_by_session(session_id)
@@ -426,8 +432,20 @@ class InterviewService:
         elif report.state is ReportState.COMPLETED:
             return report
 
-        #标记开始生成报告->GENERATING
-        self.repository.start_report_generation(report.id)
+        #标记开始生成报告->GENERATING（防止并发生成）
+        try:
+            self.repository.start_report_generation(report.id)
+        except ValueError:
+            # 另一进程已抢先开始生成 → 等待其结果
+            import time
+            for _ in range(30):  # 最多等 30 秒
+                time.sleep(1.0)
+                refreshed = self.repository.get_report_by_session(session_id)
+                if refreshed is not None and refreshed.state is ReportState.COMPLETED:
+                    return refreshed
+            raise RuntimeError(
+                f"等待报告生成超时：session {session_id} 的报告可能卡在 GENERATING 状态"
+            )
 
         try:
             #生成的报告内容

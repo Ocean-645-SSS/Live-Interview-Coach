@@ -510,11 +510,142 @@ Next.js 的 `/api/connection-details` 接收 `sessionId`，调用 Attempt API �
 
 #### POST /api/interviews/sessions/{session_id}/report
 
-主动生成面试报告。
+生成面试报告。支持同步和异步两种模式。
+
+**查询参数：**
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `async` | `false` | `true` 时创建后台 Job 异步生成，立即返回 `{job_id, status}` |
+
+```json
+// async=false（默认）— 同步返回报告：
+{
+  "report_id": "report_xxx",
+  "session_id": "session_xxx",
+  "state": "COMPLETED",
+  "content": { ... }
+}
+
+// async=true — 异步返回 Job 引用：
+{
+  "job_id": "job_abc123",
+  "status": "PENDING"
+}
+```
+
+Worker 后台执行流程：加载 InterviewPlan + Answers + Evaluations → `InterviewReportBuilder` 聚合生成 → 持久化 `InterviewReportModel.state = COMPLETED`。
+
+**幂等键：** `report:{session_id}` — 同一 session 重复调用不会产生重复报告。
 
 #### GET /api/interviews/sessions/{session_id}/report
 
 读取已生成的报告；尚未生成时返回 `null`。
+
+### 12.8 异步 Job 管理
+
+#### POST /api/interviews/jobs/demo
+
+创建 Demo 后台任务，验证异步链路。
+
+```json
+// Request:
+{"delay_seconds": 3.0}
+
+// Response:
+{"job_id": "job_xxx", "status": "PENDING"}
+```
+
+执行流程：`asyncio.sleep(delay)` → 返回 `{"message": "hello async", "job_id": "...", "slept_seconds": ...}`。
+
+#### GET /api/interviews/jobs/{job_id}
+
+查询任意后台任务的完整状态。
+
+```json
+{
+  "job_id": "job_xxx",
+  "job_type": "demo",
+  "status": "COMPLETED",
+  "attempt": 1,
+  "max_attempts": 3,
+  "result": {"message": "hello async", "job_id": "job_xxx", "slept_seconds": 3.0},
+  "error": null,
+  "created_at": "2026-08-05T10:00:00+00:00",
+  "started_at": "2026-08-05T10:00:01+00:00",
+  "completed_at": "2026-08-05T10:00:04+00:00"
+}
+```
+
+`status` 取值：`PENDING` / `QUEUED` / `RUNNING` / `COMPLETED` / `FAILED`。
+
+### 12.9 异步面试准备
+
+#### POST /api/interviews/{interview_id}/prepare?async=true
+
+触发面试异步准备 Workflow，创建 `interview_preparation` Job 并入队，立即返回 Job 引用。
+
+**前置条件：** Interview 已创建（含 `config`）。
+
+**查询参数：**
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `async` | `false` | 必须传 `true`（`async=false` 暂未实现，请使用 `POST /api/interviews/prepared`） |
+
+```json
+// Response:
+{"job_id": "job_abc123", "status": "PENDING"}
+```
+
+**幂等机制：**
+1. 按 `idempotency_key = "interview_preparation:{interview_id}"` 查询已有 Job
+2. 已有 COMPLETED → 直接返回已有 `job_id`
+3. 已有 PENDING/QUEUED/RUNNING → 直接返回已有 `job_id`
+4. Redis 锁（TTL 60s）→ 短暂重复投递保护
+5. PostgreSQL 唯一约束 → 最终幂等保证
+
+**状态联动：** Job 创建成功后，`Interview.state` 从 `CREATED` 转为 `PREPARING`。
+
+**Worker 内部执行 5 个 stage（顺序不可跳过）：**
+
+| Stage | 内部步骤名 | 职责 | 可降级 |
+|-------|-----------|------|--------|
+| `RESUME_PARSING` | `RESUME_PARSE` | RAG 检索 → LLM 抽取 `CandidateFacts` | ❌ |
+| `CANDIDATE_PROFILE_GENERATION` | `CANDIDATE_PROFILE` | `CandidateFacts` → `InterviewProfileService` → `CandidateProfile` | ❌ |
+| `JOB_PROFILE_GENERATION` | `JOB_PROFILE` | JD KB evidence → `InterviewProfileService` → `JobProfile` | ❌ |
+| `COMPANY_INTELLIGENCE` | `COMPANY_INTELLIGENCE` | 调用 `IntelligenceService` → `CompanyInterviewProfile`（牛客 MCP 面经） | ✅ |
+| `PLAN_GENERATION` | `PLAN_GENERATION` | `CandidateProfile` + `JobProfile` + `CompanyInterviewProfile?` → `InterviewPlanner` → 持久化 `InterviewPlan` → `Interview.state = READY` | ❌ |
+
+**降级说明：**
+- 未提供 `target_company` → `COMPANY_INTELLIGENCE` 跳过（不算降级）
+- `IntelligenceService` 未注入或调用失败 → `degraded=true`，继续 `PLAN_GENERATION`
+- 牛客 MCP / Spider / Cache 任意环节失败 → `CompanyInterviewProfile = None`，Plan 仍基于 CandidateProfile + JobProfile 正常生成
+
+#### GET /api/interviews/{interview_id}/preparation
+
+查询面试准备的当前进度，前端通过此端点轮询。
+
+```json
+{
+  "job_id": "job_abc123",
+  "status": "RUNNING",
+  "stage": "PLAN_GENERATION",
+  "completed_steps": [
+    "RESUME_PARSE",
+    "CANDIDATE_PROFILE",
+    "JOB_PROFILE",
+    "COMPANY_INTELLIGENCE"
+  ],
+  "degraded": true,
+  "degradation_reasons": ["COMPANY_INTELLIGENCE: NOWCODER_MCP_UNAVAILABLE"],
+  "started_at": "2026-08-07T10:00:00+00:00",
+  "updated_at": "2026-08-07T10:02:30+00:00",
+  "error": null
+}
+```
+
+此端点通过 `JobRepository.get_job_by_resource(job_type="interview_preparation", business_resource_id=interview_id)` 查询最新 Preparation Job，将其 payload 中的 stage 元数据反序列化返回。
 
 ---
 

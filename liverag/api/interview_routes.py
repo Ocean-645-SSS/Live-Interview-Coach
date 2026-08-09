@@ -328,14 +328,50 @@ async def generate_report(
     - Worker 在后台异步生成报告
 
     当 async_mode=false（默认）时：
-    - 保持现有同步行为（直接生成并返回报告）
+    - 获取 Redis 锁（lock:report_generation:{session_id}）
+    - 同步生成报告并返回
+    - 锁确保同一 session 只生成一次报告
     """
 
     if async_mode:
         return await _execute_async(
             lambda: _create_report_generation_job(service, job_repo, redis_queue, session_id)
         )
-    return _execute(lambda: service.generate_report(session_id))
+
+    # ── 同步路径：Redis 锁保护，防止与 Worker/Agent 并发生成 ──
+    _LOCK_TTL = 300  # 5 分钟
+    lock_token = await redis_queue.acquire_lock(
+        job_type="report_generation",
+        resource_id=session_id,
+        ttl=_LOCK_TTL,
+    )
+    if lock_token is None:
+        # 另一进程正在生成 → 等待其结果
+        import asyncio as _asyncio
+        for _ in range(30):  # 最多等 30 秒
+            await _asyncio.sleep(1.0)
+            try:
+                existing_report = service.get_report(session_id)
+                if existing_report is not None:
+                    return existing_report
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="报告正在由另一进程生成，请稍后重试",
+        )
+
+    try:
+        return _execute(lambda: service.generate_report(session_id))
+    finally:
+        try:
+            await redis_queue.release_lock(
+                job_type="report_generation",
+                resource_id=session_id,
+                lock_token=lock_token,
+            )
+        except Exception:
+            pass
 
 
 @router.get("/sessions/{session_id}/report")
@@ -378,23 +414,35 @@ async def _create_and_enqueue_demo(
     resource_id = uuid.uuid4().hex[:12]
 
     # 步骤 2：Redis 锁 — 短暂重复投递保护（demo 使用随机 resource_id，天然不冲突）
-    await redis_queue.acquire_lock(
+    lock_token = await redis_queue.acquire_lock(
         job_type="demo",
         resource_id=resource_id,
         ttl=60,
     )
 
-    #创建后台任务
-    job = job_repo.create_job(
-        job_type="demo",    #测试
-        idempotency_key=f"demo_{resource_id}_{uuid.uuid4().hex[:8]}",   #幂等键
-        business_resource_id=resource_id,   #业务资源id
-        payload={"delay_seconds": delay_seconds},
-    )
-    #后台任务入队
-    await redis_queue.enqueue(job_type="demo", job_id=job.id)
+    try:
+        #创建后台任务
+        job = job_repo.create_job(
+            job_type="demo",    #测试
+            idempotency_key=f"demo_{resource_id}_{uuid.uuid4().hex[:8]}",   #幂等键
+            business_resource_id=resource_id,   #业务资源id
+            payload={"delay_seconds": delay_seconds},
+        )
+        #后台任务入队
+        await redis_queue.enqueue(job_type="demo", job_id=job.id)
 
-    return {"job_id": job.id, "status": job.status.value}
+        return {"job_id": job.id, "status": job.status.value}
+    finally:
+        # 释放创建锁
+        if lock_token is not None:
+            try:
+                await redis_queue.release_lock(
+                    job_type="demo",
+                    resource_id=resource_id,
+                    lock_token=lock_token,
+                )
+            except Exception:
+                pass
 
 
 @router.get("/jobs/{job_id}")
@@ -506,12 +554,12 @@ async def _create_preparation_job(
             return {"job_id": existing.id, "status": existing.status.value}
 
     # 步骤 2：Redis 锁 — 短暂重复投递保护（3.2.8）
-    lock_acquired = await redis_queue.acquire_lock(
+    lock_token = await redis_queue.acquire_lock(
         job_type="interview_preparation",
         resource_id=interview_id,
         ttl=60,
     )
-    if not lock_acquired:
+    if lock_token is None:
         # 另一并发请求正在创建 → 重新查询获取 job_id
         import asyncio as _asyncio
         await _asyncio.sleep(0.1)
@@ -527,41 +575,52 @@ async def _create_preparation_job(
             detail="面试准备任务正在创建中，请稍后重试",
         )
 
-    #构建 payload
-    payload = {
-        "interview_id": interview_id,
-        "config_json": interview.config_json,
-        "target_kb_id": config.target_kb_id,
-        "target_company": config.target_company,
-        "target_role": config.target_role,
-        "candidate_kb_id": config.candidate_kb_id,
-        "current_stage": PreparationStage.PENDING.value,
-        "completed_steps": [],
-        "degraded": False,
-        "degradation_reasons": [],
-        "stage_results": {},
-    }
+    try:
+        #构建 payload
+        payload = {
+            "interview_id": interview_id,
+            "config_json": interview.config_json,
+            "target_kb_id": config.target_kb_id,
+            "target_company": config.target_company,
+            "target_role": config.target_role,
+            "candidate_kb_id": config.candidate_kb_id,
+            "current_stage": PreparationStage.PENDING.value,
+            "completed_steps": [],
+            "degraded": False,
+            "degradation_reasons": [],
+            "stage_results": {},
+        }
 
-    #创建 Job
-    job = job_repo.create_job(
-        job_type="interview_preparation",
-        idempotency_key=idempotency_key,
-        business_resource_id=interview_id,
-        payload=payload,
-        max_attempts=3,
-    )
+        #创建 Job
+        job = job_repo.create_job(
+            job_type="interview_preparation",
+            idempotency_key=idempotency_key,
+            business_resource_id=interview_id,
+            payload=payload,
+            max_attempts=3,
+        )
 
-    #入队 Redis
-    await redis_queue.enqueue(job_type="interview_preparation", job_id=job.id)
+        #入队 Redis
+        await redis_queue.enqueue(job_type="interview_preparation", job_id=job.id)
 
-    #更新 Interview.state: CREATED → PREPARING
-    service.update_interview_state(
-        interview_id=interview_id,
-        state=InterviewState.PREPARING,
-        expected_version=interview.version,
-    )
+        #更新 Interview.state: CREATED → PREPARING
+        service.update_interview_state(
+            interview_id=interview_id,
+            state=InterviewState.PREPARING,
+            expected_version=interview.version,
+        )
 
-    return {"job_id": job.id, "status": job.status.value}
+        return {"job_id": job.id, "status": job.status.value}
+    finally:
+        # 释放创建锁
+        try:
+            await redis_queue.release_lock(
+                job_type="interview_preparation",
+                resource_id=interview_id,
+                lock_token=lock_token,
+            )
+        except Exception:
+            pass
 
 
 @router.get("/{interview_id}/preparation")
@@ -635,13 +694,16 @@ async def _create_report_generation_job(
         if existing.status in (JobStatus.PENDING, JobStatus.QUEUED, JobStatus.RUNNING):
             return {"job_id": existing.id, "status": existing.status.value}
 
-    # 步骤 2：Redis 锁 — 短暂重复投递保护
-    lock_acquired = await redis_queue.acquire_lock(
-        job_type="report_generation",
+    # 步骤 2：Redis 锁 — 短暂重复投递保护（与执行锁使用不同 key 避免冲突）
+    #   Job 创建锁 key: interview:lock:report_generation_job:{session_id}
+    #   执行锁 key:     interview:lock:report_generation:{session_id}
+    _CREATE_LOCK_TTL = 10
+    lock_token = await redis_queue.acquire_lock(
+        job_type="report_generation_job",
         resource_id=session_id,
-        ttl=60,
+        ttl=_CREATE_LOCK_TTL,
     )
-    if not lock_acquired:
+    if lock_token is None:
         import asyncio as _asyncio
         await _asyncio.sleep(0.1)
         retry_existing = job_repo.find_by_idempotency(
@@ -655,24 +717,35 @@ async def _create_report_generation_job(
             detail="报告生成任务正在创建中，请稍后重试",
         )
 
-    # 构建 payload
-    payload = {
-        "session_id": session_id,
-    }
+    try:
+        # 构建 payload
+        payload = {
+            "session_id": session_id,
+        }
 
-    # 创建 Job
-    job = job_repo.create_job(
-        job_type="report_generation",
-        idempotency_key=idempotency_key,
-        business_resource_id=session_id,
-        payload=payload,
-        max_attempts=3,
-    )
+        # 创建 Job（PG 唯一约束最终防重）
+        job = job_repo.create_job(
+            job_type="report_generation",
+            idempotency_key=idempotency_key,
+            business_resource_id=session_id,
+            payload=payload,
+            max_attempts=3,
+        )
 
-    # 入队 Redis
-    await redis_queue.enqueue(job_type="report_generation", job_id=job.id)
+        # 入队 Redis
+        await redis_queue.enqueue(job_type="report_generation", job_id=job.id)
 
-    return {"job_id": job.id, "status": job.status.value}
+        return {"job_id": job.id, "status": job.status.value}
+    finally:
+        # Job 创建完成，释放创建锁，Worker 可以获取执行锁
+        try:
+            await redis_queue.release_lock(
+                job_type="report_generation_job",
+                resource_id=session_id,
+                lock_token=lock_token,
+            )
+        except Exception:
+            pass
 
 
 __all__ = [

@@ -15,6 +15,7 @@ liverag/
   rag/                    # LightRAG Core Service，按 knowledge_base 物理隔离
   api/                    # 前端管理 API，唯一对外后端入口
   interview/              # Interview Coach 完整业务域
+    jobs/                 # 后台异步任务系统
   config/                 # 全局配置和运行时模型配置
   logging/                # 全局事件日志
   runtime/                # ~/.LiveRAG 路径和运行状态
@@ -63,7 +64,7 @@ FastAPI 应用（端口 9821），前端唯一后端入口：
 ```text
 liverag/interview/
   schemas.py               # Pydantic 数据契约
-  records.py               # 不可变 dataclass 记录
+  records.py               # 不可变 dataclass 记录（含 JobStatus 枚举、BackgroundJobRecord）
   state_machine.py         # InterviewStateMachine（纯计算）
   follow_up.py             # FollowUpPolicy 规则化决策
   application/             # 应用层 —— 用例编排
@@ -74,11 +75,18 @@ liverag/interview/
     planner.py             # InterviewPlanner
     profile_service.py     # InterviewProfileService
     report.py              # InterviewReportBuilder
+    resume_parser.py       # ResumeParser（简历事实抽取）
   persistence/             # 持久化层 —— 数据库访问
-    models.py              # SQLAlchemy ORM 模型（7 张表）
-    repository.py          # InterviewRepository Protocol
+    models.py              # SQLAlchemy ORM 模型（8 张表，含 interview_background_jobs）
+    repository.py          # InterviewRepository + JobRepository Protocol
     sqlalchemy_repository.py # SQLAlchemy 实现
     db.py                  # Engine/Session 工厂
+  jobs/                    # 后台异步任务系统（第三步新增）
+    repository.py          # JobRepository — PostgreSQL CRUD
+    queue.py               # RedisQueue — Redis 队列与幂等锁
+    tasks.py               # 任务注册表 + 全部 handler（demo / resume_parse / profile_generation / interview_preparation / report_generation）
+    worker.py              # BackgroundWorker — 异步主循环
+    worker_main.py         # 独立 Worker 进程入口
   question_bank/           # 题库子系统
     catalog.py             # 题库目录与选题
     builder.py             # 题库组装
@@ -88,6 +96,15 @@ liverag/interview/
     data/                  # question_bank.v2.reviewed.json
   prompts/                 # Prompt 模板
     evaluation_prompts.py  # 回答评价 LLM system prompt
+  intelligence/            # 公司面经情报
+    provider.py            # 领域契约 Protocol + ProviderError
+    service.py             # IntelligenceService — 编排 + 降级
+    cache.py               # Redis fresh/stale cache
+    nowcoder_provider.py   # NowcoderSpiderProvider — Query↔MCP↔RawExperience
+    normalizer.py          # 确定性规范化（公司名/岗位别名统一）
+    extractor.py           # LLM 从帖子正文提取问题/主题
+    aggregator.py          # 聚合为 CompanyInterviewProfile
+    mcp/                   # MCP Client/Server
 ```
 
 **领域层（`interview/` 根目录，纯数据与规则）：**
@@ -136,6 +153,29 @@ liverag/interview/
 | 文件 | 职责 |
 |------|------|
 | `evaluation_prompts.py` | 回答评价的 LLM system prompt |
+
+**后台任务系统（`jobs/`）：**
+
+| 文件 | 职责 |
+|------|------|
+| `repository.py` | `JobRepository`：PostgreSQL 中 BackgroundJob 的 CRUD、状态流转（PENDING→QUEUED→RUNNING→COMPLETED/FAILED）|
+| `queue.py` | `RedisQueue`：基于 Redis List 的 FIFO 队列（RPUSH/BLPOP）+ SETNX 幂等锁 |
+| `tasks.py` | 任务注册表（`@register` 装饰器）+ 5 个 handler：`demo`、`resume_parse`、`profile_generation`、`interview_preparation`、`report_generation` |
+| `worker.py` | `BackgroundWorker`：主循环（兜底扫描→BLPOP→执行→写回），SIGINT/SIGTERM 优雅关闭 |
+| `worker_main.py` | 独立 Worker 进程入口：加载配置→建立 PG/Redis 连接→组装依赖→启动循环 |
+
+**公司情报子系统（`intelligence/`）：**
+
+| 文件 | 职责 |
+|------|------|
+| `provider.py` | `InterviewIntelligenceProvider` Protocol、`ProviderError`、`RawInterviewExperience` 等契约模型 |
+| `service.py` | `IntelligenceService`：缓存检查→Provider调用→规范化→提取→聚合→写缓存，完整降级编排 |
+| `cache.py` | Redis fresh/stale 双层缓存：fresh TTL 默认 1h，stale TTL 默认 24h |
+| `nowcoder_provider.py` | `NowcoderSpiderProvider`：领域 Query→搜索词→MCP Tool→`RawInterviewExperience[]` |
+| `normalizer.py` | 确定性规范化：公司别名统一、岗位别名统一、轮次识别、空白清洗 |
+| `extractor.py` | LLM 从不可信帖子正文提取 questions/topics/interview_round，输出 `NormalizedInterviewExperience` |
+| `aggregator.py` | 去重→主题频率→代表性题目→轮次模式→`CompanyInterviewProfile` |
+| `mcp/` | MCP stdio Client + Nowcoder MCP Server（暴露 `search_nowcoder_experiences` Tool）|
 
 ### 2.4 liverag/rag/ — RAG 核心层
 
@@ -239,10 +279,13 @@ LiveKit job 创建
 
 核心要点：
 
-- 面试通过 `POST /api/interviews/prepared` 创建，自动生成 InterviewPlan + Session
+- 面试通过 `POST /api/interviews/prepared`（同步）或 `POST /api/interviews/{id}/prepare?async=true`（异步）创建
+- 异步模式下，后台 Worker 按 stage 执行：简历解析→候选人画像→岗位画像→公司情报→计划生成
 - 实时语音由独立 `liverag-interview-agent` Worker 处理
 - 状态机控制全流程：ASKING→LISTENING→EVALUATING→(FOLLOW_UP|NEXT_QUESTION|FINISH)
 - 所有数据通过 SQLAlchemy Repository 持久化，SQLite 开发 / PostgreSQL 生产
+- 后台任务通过 `interview_preparation` Job + Redis 队列异步执行，前端通过 `GET /api/interviews/{id}/preparation` 轮询进度
+- 公司面经情报通过 stdio MCP 接入牛客 Spider，仅在 PREPARING 阶段调用，失败自动降级
 - 断线只结束 Attempt，Session 可恢复
 
 ---
@@ -255,11 +298,13 @@ liverag-rag (:9721)           ← LightRAG 核心，healthcheck 后其他服务�
 liverag-api (:9821)           ← FastAPI 管理面，依赖 rag healthy
 liverag-agent                 ← 通用语音 Worker，依赖 livekit + rag
 liverag-interview-agent       ← 面试 Worker，依赖 livekit + rag
+liverag-interview-worker      ← 后台任务 Worker，依赖 postgres + redis + rag（第三步新增）
 liverag-frontend (:3001→3000) ← Next.js，依赖 livekit + api
 postgres (:5432)              ← PostgreSQL 16，面试生产数据库
+redis (:6379)                 ← Redis 7，任务队列 + 分布式锁（第三步新增）
 ```
 
-所有后端服务共享 `liverag-data` 卷（`/data`），PostgreSQL 使用独立 `liverag-postgres-data` 卷。
+所有后端服务共享 `liverag-data` 卷（`/data`），PostgreSQL 使用独立 `liverag-postgres-data` 卷，Redis 使用独立 `liverag-redis-data` 卷。
 
 ---
 
@@ -270,4 +315,6 @@ postgres (:5432)              ← PostgreSQL 16，面试生产数据库
 - `liverag/rag/` 负责知识库 CRUD、文档原文件、LightRAG workspace、检索和索引。Interview Coach 通过 RagGateway 复用此层来构建 CandidateProfile/JobProfile。
 - `liverag/api/` 是前端唯一后端入口，负责模型配置、session、SOUL、knowledge_overview、RAG 包装接口和 Interview 路由。不暴露系统提示词模板和 history。
 - `liverag/interview/` 是 Interview Coach 完整业务域，不修改通用 LiveRAG 的核心逻辑。
-- `liverag/config/` 负责环境变量和运行时配置文件读取，同时承载 Interview 和通用 LiveRAG 的配置。
+- `liverag/interview/jobs/` 是后台异步任务系统，负责 Job 持久化（PostgreSQL）、任务队列（Redis）、Worker 主循环和任务注册表。Worker handler 保持薄层——只解析 payload → 调用 Application Service → 更新 Job 状态。
+- `liverag/interview/intelligence/` 是公司面经情报子系统，通过 stdio MCP 接入牛客 Spider，经过规范化→提取→聚合后产出 `CompanyInterviewProfile`。仅在 PREPARING 阶段调用，不进入实时 LiveKit 主链路。任何环节失败均降级跳过，不阻止 Plan 生成。
+- `liverag/config/` 负责环境变量和运行时配置文件读取，同时承载 Interview 和通用 LiveRAG 的配置（含 `RedisSettings`、`WorkerSettings`、`InterviewIntelligenceSettings`）。

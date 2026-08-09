@@ -5,13 +5,28 @@ Redis 重启后：
 - 队列中的 job_id 可能丢失 → Worker 兜底扫描 PostgreSQL 的 PENDING Job
 - 锁自动过期（TTL） → 不会有死锁
 - 已完成任务不受影响（结果在 PostgreSQL）
+
+分布式锁安全机制：
+- acquire_lock() 使用 SET NX EX 原子获取，value 为随机 UUID token
+- release_lock() 使用 Lua 脚本原子比较 value 后删除，防止误删其他进程的锁
+- 仅在 token 匹配时删除，避免"旧任务误删新锁"的并发问题
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 
 logger = logging.getLogger("liverag.interview.jobs.queue")
+
+# 原子释放锁的 Lua 脚本：仅当 value 匹配时才删除
+_RELEASE_LOCK_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+else
+    return 0
+end
+"""
 
 
 class RedisQueue:
@@ -83,23 +98,65 @@ class RedisQueue:
         job_type: str,
         resource_id: str,
         ttl: int | None = None
-    ) -> bool:
-        """获取幂等锁：SET NX PX，返回是否获取成功。"""
+    ) -> str | None:
+        """获取幂等锁：SET NX PX，value 为随机 UUID token。
 
-        #相当于：set key value NX PX 300000 
+        返回：
+        - 获取成功 → 返回 lock_token（UUID 字符串），调用方需保存用于释放
+        - 锁已被占用 → 返回 None
+
+        调用方释放时必须传入同一个 lock_token，由 Lua 脚本原子验证后删除，
+        防止旧任务在锁过期后误删其他进程新获取的锁。
+        """
+
+        lock_token = uuid.uuid4().hex
         acquired = await self._redis.set(
-            self._lock_key(job_type, resource_id),  #锁的key
-            "1",    #锁的value（只是占位）
-            nx=True,    #key不存在才写（not exist），确保原子性、互斥
-            px=(ttl or self._lock_ttl) * 1000,  #5分钟后销毁，作为兜底
+            self._lock_key(job_type, resource_id),
+            lock_token,
+            nx=True,    # key不存在才写（not exist），确保原子性、互斥
+            px=(ttl or self._lock_ttl) * 1000,  # 毫秒，兜底过期
         )
-        #写成功了没
-        return bool(acquired)
+        if acquired:
+            logger.debug(
+                "获取锁",
+                extra={
+                    "lock_key": self._lock_key(job_type, resource_id),
+                    "ttl": ttl or self._lock_ttl,
+                },
+            )
+            return lock_token
+        return None
 
-    async def release_lock(self, *, job_type: str, resource_id: str) -> None:
-        """主动释放锁。"""
+    async def release_lock(
+        self,
+        *,
+        job_type: str,
+        resource_id: str,
+        lock_token: str,
+    ) -> None:
+        """原子释放锁：仅当 Redis 中当前 token 与传入 token 一致时才删除。
 
-        await self._redis.delete(self._lock_key(job_type, resource_id))
+        使用 Lua 脚本保证"比较 + 删除"的原子性：
+        - token 匹配 → DEL 成功，返回 1
+        - token 不匹配（锁已过期被其他进程占用）→ 跳过删除，返回 0
+        """
+
+        result = await self._redis.eval(
+            _RELEASE_LOCK_SCRIPT,
+            1,
+            self._lock_key(job_type, resource_id),
+            lock_token,
+        )
+        if result == 1:
+            logger.debug(
+                "释放锁",
+                extra={"lock_key": self._lock_key(job_type, resource_id)},
+            )
+        else:
+            logger.debug(
+                "释放锁跳过（token 不匹配，锁可能已过期被其他进程占用）",
+                extra={"lock_key": self._lock_key(job_type, resource_id)},
+            )
 
     async def lock_exists(self, *, job_type: str, resource_id: str) -> bool:
         """检查锁是否存在。"""

@@ -213,9 +213,13 @@ FastAPI 创建 Job 并入队
 - Kubernetes、跨区域容灾和自动伸缩平台。
 - LangGraph、AutoGen、CrewAI、CAMEL 等通用 Agent 编排框架。
 - 为追求形式上的“微服务”拆分可在单个 FastAPI/Worker 进程中清晰维护的业务模块。
-# V1 当前落地状态（2026-08-04）
+# V1 当前落地状态（2026-08-09）
 
-第一步单机闭环已经落地：FastAPI、SQLAlchemy/SQLite、版本化题库、状态机、逐题评价、追问、报告、独立 LiveKit Interview Worker 和三个 Next.js 页面已经接通。
+## 已完成步骤
+
+### 第一步：单机闭环 ✅
+
+FastAPI、SQLAlchemy/SQLite、版本化题库、状态机、逐题评价、追问、报告、独立 LiveKit Interview Worker 和三个 Next.js 页面已经接通。
 
 实时调用链如下：
 
@@ -232,4 +236,79 @@ Next.js 创建页
   -> AnswerEvaluation / Follow-up / Report
 ```
 
-断线只结束 Attempt，不删除或重建 Session。重新连接时 Worker 根据 Session 状态恢复当前题目或最近一次追问。实时 final transcript 不进入后台队列；Redis 和 Background Worker 仍严格留到第三步。
+断线只结束 Attempt，不删除或重建 Session。重新连接时 Worker 根据 Session 状态恢复当前题目或最近一次追问。
+
+### 第二步：PostgreSQL + Alembic ✅
+
+SQLAlchemy 重构完成，Alembic 管理迁移。SQLite（开发）/ PostgreSQL 16（生产）双数据库支持。7 张 ORM 表含完整约束和索引。
+
+### 第三步：异步任务系统 ✅
+
+Redis + Background Worker + MCP 面经增强全面落地。核心交付：
+
+**3.1 异步基础设施：**
+- `BackgroundJobModel` ORM（`interview_background_jobs` 表）— PG 权威 Job 状态存储
+- `JobRepository` — 完整的 CRUD + 状态流转（PENDING→QUEUED→RUNNING→COMPLETED/FAILED）+ 自动重试
+- `RedisQueue` — Redis List 队列（RPUSH/BLPOP）+ SETNX 幂等锁（TTL 300s）
+- `BackgroundWorker` — 主循环（兜底扫描 PENDING → BLPOP → 执行 → 写回），SIGINT/SIGTERM 优雅关闭
+- 任务注册表 — `@register(job_type)` 装饰器模式
+- 独立 Worker 进程入口 — `python -m liverag.interview.jobs.worker_main`
+- Docker Compose: `redis`（7-alpine）+ `liverag-interview-worker` 服务
+- 配置：`RedisSettings`、`WorkerSettings`、`InterviewIntelligenceSettings`
+- 5 种已注册 Job 类型：`demo`、`resume_parse`、`profile_generation`、`interview_preparation`、`report_generation`
+- 19 个测试（5 类：ORM 模型、状态流转、Redis 队列、Worker 端到端、任务注册表）
+
+**3.2 业务 Workflow：**
+- `interview_preparation` Job — 5 个 stage 顺序执行：简历解析→候选人画像→岗位画像→公司情报→计划生成
+- Stage 级幂等恢复 — Worker 重启后已完成 stage 自动跳过
+- `resume_parse` Job — 独立简历事实抽取，产出 `CandidateFacts`（纯事实，无推理）
+- `profile_generation` Job — 候选人画像/岗位画像双模式（`profile_type` 分流）
+- `report_generation` Job — 异步报告生成，幂等键 `report:{session_id}`
+- 共享 Application Service 架构 — Worker handler 保持薄层，复用 `InterviewProfileService`、`InterviewPlanner`、`InterviewReportBuilder`
+- `?async=true` / `?async=false` 双路径支持
+
+**3.3 MCP 面经增强：**
+- `IntelligenceService` — Fresh→Provider→Stale Fallback 缓存策略 + 完整降级编排
+- `NowcoderSpiderProvider` — 领域 Query→搜索词→MCP Tool→`RawInterviewExperience[]`
+- MCP stdio Client + Nowcoder MCP Server — 暴露 `search_nowcoder_experiences` 结构化 Tool
+- Normalizer → Extractor → Aggregator 管线 — 帖子正文→结构化→聚合→`CompanyInterviewProfile`
+- 只在 PREPARING 阶段调用 MCP，实时 LiveKit 链路零 MCP 调用
+- Feature flag `INTERVIEW_INTELLIGENCE_ENABLED` 默认关闭
+
+**异步任务全链路：**
+
+```text
+API 请求 (POST /api/interviews/{id}/prepare?async=true)
+  → JobRepository.find_by_idempotency() [幂等检查]
+  → RedisQueue.acquire_lock() [并发互斥]
+  → JobRepository.create_job() [PG: PENDING]
+  → RedisQueue.enqueue() [Redis: RPUSH]
+  → Interview.state → PREPARING
+  → 返回 {job_id, status: "PENDING"}
+
+BackgroundWorker 消费:
+  → _backfill_pending_jobs() [PG 兜底扫描，Redis 重启恢复]
+  → BLPOP 获取 job_id
+  → _execute_job()
+    → 幂等检查（COMPLETED/FAILED 跳过）
+    → mark_running() [PG: RUNNING]
+    → handler(job, **deps)
+      → interview_preparation_task:
+        RESUME_PARSING → CANDIDATE_PROFILE → JOB_PROFILE
+        → COMPANY_INTELLIGENCE (可降级)
+        → PLAN_GENERATION → 持久化 InterviewPlan
+    → mark_completed() [PG: COMPLETED]
+    → 失败 → mark_failed() → retry_job() [自动重试]
+
+前端轮询:
+  → GET /api/interviews/{id}/preparation
+  → {stage, completed_steps, degraded, degradation_reasons}
+```
+
+**降级保证：**
+```text
+牛客 / Spider / MCP / Cache 任意环节失败
+  → CompanyInterviewProfile = None
+  → CandidateProfile + JobProfile + QuestionBank
+  → InterviewPlan 正常生成
+```

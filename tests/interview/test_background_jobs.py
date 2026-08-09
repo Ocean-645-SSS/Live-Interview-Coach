@@ -263,31 +263,34 @@ class TestRedisQueue:
 
     @pytest.mark.asyncio
     async def test_acquire_release_lock(self, redis_queue: RedisQueue):
-        acquired = await redis_queue.acquire_lock(
+        lock_token = await redis_queue.acquire_lock(
             job_type="demo", resource_id="res_1", ttl=10
         )
-        assert acquired is True
+        assert isinstance(lock_token, str)
 
         # 同一资源不能重复加锁
-        acquired_again = await redis_queue.acquire_lock(
+        acquire_again = await redis_queue.acquire_lock(
             job_type="demo", resource_id="res_1", ttl=10
         )
-        assert acquired_again is False
+        assert acquire_again is None
 
         # 不同资源可以加锁
-        acquired_other = await redis_queue.acquire_lock(
+        other_token = await redis_queue.acquire_lock(
             job_type="demo", resource_id="res_2", ttl=10
         )
-        assert acquired_other is True
+        assert isinstance(other_token, str)
 
-        # 释放后可以重新加锁
-        await redis_queue.release_lock(job_type="demo", resource_id="res_1")
+        # 用正确的 token 释放
+        await redis_queue.release_lock(
+            job_type="demo", resource_id="res_1", lock_token=lock_token,
+        )
         assert await redis_queue.lock_exists(job_type="demo", resource_id="res_1") is False
 
+        # 释放后可以重新加锁
         acquired_after_release = await redis_queue.acquire_lock(
             job_type="demo", resource_id="res_1", ttl=10
         )
-        assert acquired_after_release is True
+        assert isinstance(acquired_after_release, str)
 
 
 # ── Worker 端到端测试 ────────────────────────────────────
