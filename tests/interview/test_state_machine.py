@@ -8,8 +8,9 @@ import pytest
 
 from liverag.interview.persistence.db import create_session_factory, create_sqlite_engine
 from liverag.interview.persistence.models import Base
-from liverag.interview.records import InterviewEventRecord, InterviewSessionRecord
 from liverag.interview.persistence.repository import DuplicateEventError, InterviewRepository
+from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
+from liverag.interview.records import InterviewEventRecord, InterviewSessionRecord
 from liverag.interview.schemas import (
     InterviewConfig,
     InterviewDifficulty,
@@ -21,7 +22,6 @@ from liverag.interview.schemas import (
     QuestionType,
     RubricPoint,
 )
-from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
 from liverag.interview.state_machine import (
     InterviewEventType,
     InterviewStateMachine,

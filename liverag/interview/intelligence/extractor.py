@@ -626,13 +626,13 @@ __all__ = [
     "ExperienceExtractor",
     "ExtractorLLMConfig",
     "LlmExtractionResult",
-    # 降级通道
-    "extract_batch",
-    "extract_one",
     # 内部函数（测试用）
     "_detect_round_from_content",
     "_extract_questions_rule",
     "_extract_topics_rule",
     "_is_likely_question",
     "_normalize_question",
+    # 降级通道
+    "extract_batch",
+    "extract_one",
 ]

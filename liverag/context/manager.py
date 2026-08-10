@@ -51,7 +51,7 @@ class ContextManager:
             "讲详细点",
             "说详细点",
         }
-    
+
 
     def __init__(
         self,
@@ -82,7 +82,7 @@ class ContextManager:
 
     def record_user_message(self,*,content:str,turn_index:int)->None:
         """当LiveKit确认用户这一轮的最终语音转写后，保存原始用户消息、维护追问上下文，并更新当前session的运行状态
-        
+
         调用链：
         VoiceAssistant.llm_node()
         → _ensure_user_turns_recorded()
@@ -134,7 +134,7 @@ class ContextManager:
 
         if self.rag_tool_mode == "never":
             raise RuntimeError("本次会话已禁用知识库检索")
-        
+
         #补充完善短追问，如果不是追问直接返回原问题
         last_query=self._last_rag_query or None
         rag_query=self._build_rag_query(query)

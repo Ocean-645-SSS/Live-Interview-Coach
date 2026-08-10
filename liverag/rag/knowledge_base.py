@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import shutil
+from pathlib import Path
 from typing import Any
 
-from liverag.rag.metadata_store import DEFAULT_KB_ID
-from liverag.rag.metadata_store import KnowledgeBaseMeta, MetadataStore
+from liverag.rag.metadata_store import DEFAULT_KB_ID, KnowledgeBaseMeta, MetadataStore
 
 
 class KnowledgeBaseStore:
@@ -60,20 +59,20 @@ class KnowledgeBaseStore:
         """更新知识库元数据。"""
 
         return self.metadata.update_knowledge_base(kb_id, name=name, description=description)
-    
+
     def delete(self, kb_id: str) -> None:
         """删除知识库目录和元数据。"""
 
         if kb_id == DEFAULT_KB_ID:
             raise ValueError("默认知识库不能被删除！")
-        
+
         meta = self.get(kb_id)
         #确保meta.root_dir确实在根目录里
         root = Path(meta.root_dir).resolve()
         kb_root = Path(self.root_dir).resolve()
-        if root.parent != kb_root: 
+        if root.parent != kb_root:
             raise ValueError("知识库目录越过安全边界")
-    
+
         self.metadata.delete_knowledge_base_metadata(kb_id)
         #递归删除该知识库的整个物理目录
         shutil.rmtree(root)

@@ -183,7 +183,7 @@ class FakeHttpRagManager:
 
     @staticmethod
     def _settings_for(meta: object) -> object:
-        return {"kb_id": getattr(meta, "kb_id"), "kb_name": getattr(meta, "name")}
+        return {"kb_id": meta.kb_id, "kb_name": meta.name}
 
 
 @pytest.fixture

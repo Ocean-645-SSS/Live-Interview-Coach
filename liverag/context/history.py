@@ -104,7 +104,7 @@ class HistoryCompactor:
             client=AsyncOpenAI(
                 api_key=self.settings.api_key,
                 base_url=self.settings.base_url,
-                timeout=max(self.settings.timeout_ms, 1000) / 1000.0,                
+                timeout=max(self.settings.timeout_ms, 1000) / 1000.0,
             )
             #调用LLM生成回答
             response=await client.chat.completions.create(
@@ -162,13 +162,13 @@ class HistoryCompactor:
             role=str(msg.get("role") or "?")
             content=str(msg.get("content") or "").strip()
             if content:
-                lines.append(f"{role}: {content}") 
+                lines.append(f"{role}: {content}")
 
         texts="\n".join(lines)
         #文本长度在范围内，直接返回
         if max_chars<=0 or len(texts)<=max_chars:
             return texts,False
-        
+
         #超过长度范围截取返回
         marker = "【前文过长，已保留最近通话消息用于 history 压缩】\n"
         budget = max(max_chars - len(marker), 1)

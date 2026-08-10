@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+
 def test_selecting_knowledge_base_while_idle_configures_next_session(
     api_client: TestClient,
     api_server: ModuleType,

@@ -312,3 +312,20 @@ BackgroundWorker 消费:
   → CandidateProfile + JobProfile + QuestionBank
   → InterviewPlan 正常生成
 ```
+
+### 第四步：长期能力画像 ✅
+
+稳定的 `candidate_profiles` 聚合根由个人资料库 `kb_id` 确定；每场 `InterviewPlan` 仍冻结当时的 Candidate/Job 快照。评价写入后生成不可变 `skill_progress_evidence`，再按 `candidate_profile_id + skill_key` 全量重算 `skill_progress`，数据库唯一约束保证重复评价、报告重试和 rebuild 不会重复累计。
+
+```text
+AnswerEvaluation
+  → taxonomy(category, subcategory) → skill_key
+  → SkillProgressEvidence
+  → average/current/latest/confidence/weak_points
+  → 下一场 InterviewPlanner
+  → WEAK_RETEST / EVIDENCE_GAP / MASTERY_AUDIT
+```
+
+`current_score` 使用相对最近评价的 90 天半衰期；`confidence` 由尝试数、Session 覆盖、时间跨度和一致性确定。Planner 保证岗位核心题的硬配额，训练意图只作为可与岗位相关性重叠的软目标。画像应用与报告后对账都是 best-effort，失败不回滚评价、状态机或已完成报告，可通过 rebuild 恢复。
+
+只读 API 为 `/api/interviews/skill-progress` 和 `/api/interviews/skill-progress/{skill_key}`。Next.js `/progress` 页面展示三个分数、置信度、弱点、评价趋势和训练建议；趋势点可追溯到 evaluation、question、session、interview 与 rubric version。

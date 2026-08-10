@@ -2,7 +2,7 @@
 
 > **关联文档：** [Interview Coach 总体实施计划](./interview-coach-plan.md) 第 13 节第三步
 >
-> **状态：** 3.1 已完成 ✅ | 3.2 待开始 | 3.3 待开始
+> **状态：** 3.1 已完成 ✅ | 3.2 已完成 ✅ | 3.3 已完成 ✅
 
 **目标：** 在 PostgreSQL 成为可靠业务数据库后，引入 Redis 和一套 Background Worker，把耗时准备与报告任务移出 FastAPI 请求和实时 LiveKit 主链路，并在后台准备任务中接入可降级的牛客 MCP 面经增强。
 

@@ -70,9 +70,9 @@ class JobRepository(AbstractJobRepository):
         job_type: str,  #任务类型
         idempotency_key: str,   #幂等键
         business_resource_id: str,  #涉及的业务资源
-        payload: dict[str, Any] | None = None,  
+        payload: dict[str, Any] | None = None,
         max_attempts: int = 3,  #最大重试次数
-        job_id: str | None = None,  
+        job_id: str | None = None,
     ) -> BackgroundJobRecord:
         """创建一条 PENDING 状态的 Job。"""
 
@@ -175,7 +175,7 @@ class JobRepository(AbstractJobRepository):
             model = db.get(BackgroundJobModel, job_id)
             if model is None:
                 raise LookupError(f"Job 不存在：{job_id}")
-            
+
             now = _utc_now()
             #状态更新为RUNNING
             model.status = JobStatus.RUNNING
@@ -214,7 +214,7 @@ class JobRepository(AbstractJobRepository):
             model = db.get(BackgroundJobModel, job_id)
             if model is None:
                 raise LookupError(f"Job 不存在：{job_id}")
-            
+
             now = _utc_now()
             model.status = JobStatus.FAILED
             model.error_message = error[:2000]  # 截断过长错误
@@ -236,11 +236,11 @@ class JobRepository(AbstractJobRepository):
                 raise RuntimeError(
                     f"Job {job_id} 已达最大重试次数 {model.max_attempts}"
                 )
-            
+
             model.status = JobStatus.PENDING
             model.error_message = None
             model.updated_at = _utc_now()
-            
+
             db.flush()
             return _job_record(model)
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
@@ -12,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from liverag.interview.application.evaluator import AnswerEvaluationProviderError
 from liverag.interview.application.orchestrator import AnswerReceivedCommand
+from liverag.interview.application.service import InterviewService
 from liverag.interview.jobs.queue import RedisQueue
 from liverag.interview.jobs.repository import JobRepository
 from liverag.interview.persistence.repository import (
@@ -20,8 +22,12 @@ from liverag.interview.persistence.repository import (
     RecordNotFoundError,
 )
 from liverag.interview.records import JobStatus
-from liverag.interview.schemas import InterviewConfig, InterviewPlan, InterviewState, PreparationStage
-from liverag.interview.application.service import InterviewService
+from liverag.interview.schemas import (
+    InterviewConfig,
+    InterviewPlan,
+    InterviewState,
+    PreparationStage,
+)
 from liverag.interview.state_machine import InterviewEventType, InterviewTransitionError
 
 
@@ -203,6 +209,32 @@ def list_report_history(target_kb_id: str, service: ServiceDependency):
     return _execute(lambda: service.list_report_history(target_kb_id))
 
 
+@router.get("/skill-progress")
+def get_skill_progress_dashboard(
+    candidate_kb_id: Annotated[str, Query(min_length=1)],
+    service: ServiceDependency,
+):
+    """返回候选人的长期能力画像与训练建议。"""
+
+    return _execute(lambda: service.get_skill_progress_dashboard(candidate_kb_id))
+
+
+@router.get("/skill-progress/{skill_key}")
+def get_skill_progress_detail(
+    skill_key: str,
+    candidate_kb_id: Annotated[str, Query(min_length=1)],
+    service: ServiceDependency,
+):
+    """返回单项技能画像及其可追溯评价趋势。"""
+
+    return _execute(
+        lambda: service.get_skill_progress_detail(
+            candidate_kb_id=candidate_kb_id,
+            skill_key=skill_key,
+        )
+    )
+
+
 @router.get("/{interview_id}")
 def get_interview(interview_id: str, service: ServiceDependency):
     return _execute(lambda: service.get_interview(interview_id))
@@ -316,8 +348,8 @@ async def evaluate_answer(
 async def generate_report(
     session_id: str,
     service: ServiceDependency,
-    job_repo: JobRepoDependency = Depends(get_job_repository),
-    redis_queue: RedisQueueDependency = Depends(get_redis_queue),
+    job_repo: JobRepoDependency,
+    redis_queue: RedisQueueDependency,
     async_mode: bool = Query(default=False, alias="async"),
 ):
     """生成面试报告。
@@ -339,11 +371,11 @@ async def generate_report(
         )
 
     # ── 同步路径：Redis 锁保护，防止与 Worker/Agent 并发生成 ──
-    _LOCK_TTL = 300  # 5 分钟
+    lock_ttl = 300  # 5 分钟
     lock_token = await redis_queue.acquire_lock(
         job_type="report_generation",
         resource_id=session_id,
-        ttl=_LOCK_TTL,
+        ttl=lock_ttl,
     )
     if lock_token is None:
         # 另一进程正在生成 → 等待其结果
@@ -364,14 +396,12 @@ async def generate_report(
     try:
         return _execute(lambda: service.generate_report(session_id))
     finally:
-        try:
+        with contextlib.suppress(Exception):
             await redis_queue.release_lock(
                 job_type="report_generation",
                 resource_id=session_id,
                 lock_token=lock_token,
             )
-        except Exception:
-            pass
 
 
 @router.get("/sessions/{session_id}/report")
@@ -435,14 +465,12 @@ async def _create_and_enqueue_demo(
     finally:
         # 释放创建锁
         if lock_token is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await redis_queue.release_lock(
                     job_type="demo",
                     resource_id=resource_id,
                     lock_token=lock_token,
                 )
-            except Exception:
-                pass
 
 
 @router.get("/jobs/{job_id}")
@@ -613,14 +641,12 @@ async def _create_preparation_job(
         return {"job_id": job.id, "status": job.status.value}
     finally:
         # 释放创建锁
-        try:
+        with contextlib.suppress(Exception):
             await redis_queue.release_lock(
                 job_type="interview_preparation",
                 resource_id=interview_id,
                 lock_token=lock_token,
             )
-        except Exception:
-            pass
 
 
 @router.get("/{interview_id}/preparation")
@@ -697,11 +723,11 @@ async def _create_report_generation_job(
     # 步骤 2：Redis 锁 — 短暂重复投递保护（与执行锁使用不同 key 避免冲突）
     #   Job 创建锁 key: interview:lock:report_generation_job:{session_id}
     #   执行锁 key:     interview:lock:report_generation:{session_id}
-    _CREATE_LOCK_TTL = 10
+    create_lock_ttl = 10
     lock_token = await redis_queue.acquire_lock(
         job_type="report_generation_job",
         resource_id=session_id,
-        ttl=_CREATE_LOCK_TTL,
+        ttl=create_lock_ttl,
     )
     if lock_token is None:
         import asyncio as _asyncio
@@ -738,14 +764,12 @@ async def _create_report_generation_job(
         return {"job_id": job.id, "status": job.status.value}
     finally:
         # Job 创建完成，释放创建锁，Worker 可以获取执行锁
-        try:
+        with contextlib.suppress(Exception):
             await redis_queue.release_lock(
                 job_type="report_generation_job",
                 resource_id=session_id,
                 lock_token=lock_token,
             )
-        except Exception:
-            pass
 
 
 __all__ = [

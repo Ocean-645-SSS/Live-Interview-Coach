@@ -23,11 +23,11 @@ import asyncio
 import hashlib
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from liverag.interview.application.evaluator import AnswerEvaluator
-from liverag.interview.follow_up import FollowUpDecision, FollowUpPolicy
 from liverag.interview.application.orchestrator import (
     AnswerReceivedCommand,
     AnswerReceivedResult,
@@ -36,6 +36,12 @@ from liverag.interview.application.orchestrator import (
 )
 from liverag.interview.application.planner import InterviewPlanner
 from liverag.interview.application.profile_service import InterviewProfileService
+from liverag.interview.application.report import InterviewReportBuilder
+from liverag.interview.application.skill_progress_reconciliation import (
+    reconcile_skill_progress,
+)
+from liverag.interview.follow_up import FollowUpDecision, FollowUpPolicy
+from liverag.interview.persistence.repository import InterviewRepository, RecordNotFoundError
 from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.records import (
     InterviewAnswerRecord,
@@ -47,15 +53,19 @@ from liverag.interview.records import (
     ReportState,
     generate_id,
 )
-from liverag.interview.application.report import InterviewReportBuilder
-from liverag.interview.application.skill_progress_reconciliation import (
-    reconcile_skill_progress,
+from liverag.interview.schemas import (
+    AnswerEvaluation,
+    InterviewConfig,
+    InterviewPlan,
+    InterviewState,
+    SkillProgress,
+    StrictModel,
 )
-from liverag.interview.persistence.repository import InterviewRepository, RecordNotFoundError
-from liverag.interview.schemas import AnswerEvaluation, InterviewConfig, InterviewPlan, InterviewState
+from liverag.interview.skill_progress.service import (
+    SkillProgressDashboard,
+    SkillProgressService,
+)
 from liverag.interview.state_machine import InterviewEventType
-from liverag.interview.skill_progress.service import SkillProgressService
-
 
 logger = logging.getLogger("liverag.interview.application.service")
 
@@ -95,6 +105,24 @@ class InterviewReportHistoryItem:
     updated_at: str
 
 
+class SkillTrendPoint(StrictModel):
+    """一条可追溯到持久化 AnswerEvaluation 的技能趋势数据。"""
+
+    evaluation_id: str
+    session_id: str
+    interview_id: str
+    question_id: str
+    score: float
+    rubric_version: int
+    evaluated_at: datetime
+
+
+class SkillProgressDetail(SkillProgress):
+    """单项技能画像及其完整评价趋势。"""
+
+    trend: list[SkillTrendPoint]
+
+
 class InterviewService:
     """提供面试管理、实时状态编排、评价决策和报告生成用例。"""
 
@@ -128,7 +156,10 @@ class InterviewService:
 
         #拿到公共题库
         question_bank = self.question_bank or QuestionBank.from_file(
-            Path(__file__).parent / "question_bank" / "data" / "question_bank.v1.json"
+            Path(__file__).parents[1]
+            / "question_bank"
+            / "data"
+            / "question_bank.v1.json"
         )
 
         #用户画像+岗位画像
@@ -313,6 +344,63 @@ class InterviewService:
                 )
         return sorted(history, key=lambda item: item.updated_at, reverse=True)
 
+    def get_skill_progress_dashboard(
+        self, candidate_kb_id: str
+    ) -> SkillProgressDashboard:
+        """读取资料库对应候选人的长期能力画像总览。"""
+
+        if self.skill_progress_service is None or self.question_bank is None:
+            raise RuntimeError("InterviewService 尚未配置长期能力画像查询")
+
+        return self.skill_progress_service.get_dashboard_for_kb(
+            candidate_kb_id, self.question_bank
+        )
+
+    def get_skill_progress_detail(
+        self, *, candidate_kb_id: str, skill_key: str
+    ) -> SkillProgressDetail:
+        """读取单项技能画像及其 AnswerEvaluation 来源趋势。"""
+
+        if self.skill_progress_service is None:
+            raise RuntimeError("InterviewService 尚未配置长期能力画像查询")
+
+        #获取CandidateProfileRecord
+        candidate = self.repository.ensure_candidate_profile(kb_id=candidate_kb_id)
+        #列出skill progress
+        progress = next(
+            (
+                item
+                for item in self.skill_progress_service.list_progress(candidate.id)
+                if item.skill_key == skill_key
+            ),
+            None,
+        )
+        if progress is None:
+            raise RecordNotFoundError(
+                f"候选人 {candidate.id} 不存在技能画像：{skill_key}"
+            )
+
+        #列出skill evidences
+        evidence = self.repository.list_skill_evidence(
+            candidate_profile_id=candidate.id,
+            skill_key=skill_key,
+        )
+        return SkillProgressDetail(
+            **progress.model_dump(),
+            trend=[
+                SkillTrendPoint(
+                    evaluation_id=item.evaluation_id,
+                    session_id=item.session_id,
+                    interview_id=item.interview_id,
+                    question_id=item.question_id,
+                    score=item.score,
+                    rubric_version=item.rubric_version,
+                    evaluated_at=item.evaluated_at,
+                )
+                for item in evidence
+            ],
+        )
+
     def transition(
         self,
         *,
@@ -491,7 +579,7 @@ class InterviewService:
                     return refreshed
             raise RuntimeError(
                 f"等待报告生成超时：session {session_id} 的报告可能卡在 GENERATING 状态"
-            )
+            ) from None
 
         try:
             #生成的报告内容
@@ -514,4 +602,10 @@ class InterviewService:
         return completed
 
 
-__all__ = ["EvaluationDecisionResult", "InterviewService", "PreparedInterviewResult"]
+__all__ = [
+    "EvaluationDecisionResult",
+    "InterviewService",
+    "PreparedInterviewResult",
+    "SkillProgressDetail",
+    "SkillTrendPoint",
+]

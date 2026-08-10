@@ -1,5 +1,7 @@
 # 第四步：长期能力画像 Implementation Plan
 
+> **状态：** ✅ 已完成（2026-08-10）。Task 1–9 的后端、前端、E2E、迁移与文档验收均已通过。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 基于跨场面试的持久化 `AnswerEvaluation` 构建可解释、可追溯、可幂等重建的长期 `SkillProgress`，并让它确定性地影响下一次 `InterviewPlan`。
@@ -1089,21 +1091,19 @@ def test_missing_job_labels_is_explicitly_degraded(question_bank, taxonomy):
 接口固定为 `select_training_questions(config: InterviewConfig, *, training: TrainingSelectionRequest, taxonomy: SkillTaxonomy, relevance_text: str | None, explicitly_requested_topics: Iterable[str], selection_seed: str) -> TrainingSelectionResult`。岗位相关性的唯一输入是 `training.job_labels`；不再同时传入第二份可能漂移的 required relevance labels。
 
 算法顺序固定为：
-
 ```text
-1. 应用现有可选题类型和 `_specific_terms_are_supported()` 基础过滤，得到不重复候选池；候选数少于 N 时继续抛现有 `QuestionBankError`。
-2. 不把现有 `_matches_required_relevance()` 用作“所有候选题必须岗位相关”的过滤器；改用 `training.job_labels` 计算每题 `job_relevant`，训练意图与该布尔值分开保存。
-3. job_constraint_enabled 且 job_labels 为空：记录 JOB_CORE_LABELS_UNAVAILABLE。
-4. effective_job_core_target = min(minimum_job_core, available_job_core_count)。
-5. non_job_budget = N - effective_job_core_target。
-6. 依次处理 WEAK_RETEST、EVIDENCE_GAP、MASTERY_AUDIT：
-   a. 先选该意图与 job_relevant 的交集；
-   b. 仍未达到软目标时，只在 selected_non_job < non_job_budget 时选非岗位题；
-   c. 达不到软目标时只记录实际数，不挤占岗位保留容量。
-7. 从剩余 job_relevant 候选补齐 effective_job_core_target。
-8. 按现有 topic weight、难度距离和 seed 稳定排序补齐 N。
-9. 如果 available_job_core_count < minimum_job_core，记录 INSUFFICIENT_JOB_CORE_QUESTIONS。
-10. 返回 TrainingSelectionResult；selection_intent 只允许 WEAK_RETEST、EVIDENCE_GAP、MASTERY_AUDIT、BASELINE。
+候选题池
+  ↓
+先算哪些题和岗位相关
+  ↓
+给岗位题预留至少 50% 名额
+  ↓
+在不破坏这个名额的前提下：
+优先选弱项复测 / 证据补充 / 强项抽查
+  ↓
+岗位题还不够 → 补岗位题
+  ↓
+还没到 N 题 → 普通规则补满
 ```
 
 `JOB_CORE` 不再是 `selection_intent`，而是 `job_relevant_by_question[question_id]`。当岗位候选池足够时，步骤 5 的非岗位预算保证任何 N 都不可能因软目标先占位而破坏 50% 硬约束。

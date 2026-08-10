@@ -317,4 +317,7 @@ redis (:6379)                 ← Redis 7，任务队列 + 分布式锁（第三
 - `liverag/interview/` 是 Interview Coach 完整业务域，不修改通用 LiveRAG 的核心逻辑。
 - `liverag/interview/jobs/` 是后台异步任务系统，负责 Job 持久化（PostgreSQL）、任务队列（Redis）、Worker 主循环和任务注册表。Worker handler 保持薄层——只解析 payload → 调用 Application Service → 更新 Job 状态。
 - `liverag/interview/intelligence/` 是公司面经情报子系统，通过 stdio MCP 接入牛客 Spider，经过规范化→提取→聚合后产出 `CompanyInterviewProfile`。仅在 PREPARING 阶段调用，不进入实时 LiveKit 主链路。任何环节失败均降级跳过，不阻止 Plan 生成。
+- `liverag/interview/skill_progress/` 将已持久化 `AnswerEvaluation` 映射到版本化两级 taxonomy，生成可重建的 Evidence 与 `SkillProgress`；90 天半衰期评分、置信度和弱点合并全部由确定性规则完成。
+- Planner 在岗位相关题不少于 50% 的硬约束下，叠加薄弱项复测、证据补充和已掌握技能抽查；同步与异步准备路径读取同一候选人画像。
+- `/api/interviews/skill-progress` 与 `/progress` 提供总览、趋势来源和训练建议，浏览器继续通过 Next.js BFF 访问 FastAPI。
 - `liverag/config/` 负责环境变量和运行时配置文件读取，同时承载 Interview 和通用 LiveRAG 的配置（含 `RedisSettings`、`WorkerSettings`、`InterviewIntelligenceSettings`）。

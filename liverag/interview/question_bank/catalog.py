@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import hashlib
-
 import json
 import re
 from collections.abc import Iterable
@@ -433,7 +432,7 @@ class QuestionBank:
             #随机打乱id，多道题评分相同的时候，决定哪道题优先入选
             if selection_seed:
                 tie_breaker = hashlib.sha256(
-                    f"{selection_seed}:{question.id}".encode("utf-8")
+                    f"{selection_seed}:{question.id}".encode()
                 ).hexdigest()
             return (-topic_score, difficulty_distance, tie_breaker)
 
@@ -471,7 +470,7 @@ class QuestionBank:
             selected = sorted(
                 selected,
                 key=lambda question: hashlib.sha256(
-                    f"order:{selection_seed}:{question.id}".encode("utf-8")
+                    f"order:{selection_seed}:{question.id}".encode()
                 ).hexdigest(),
             )
 
@@ -558,7 +557,7 @@ class QuestionBank:
             ):
                 topic_score += 0.001
             tie_breaker = hashlib.sha256(
-                f"{selection_seed}:{question.id}".encode("utf-8")
+                f"{selection_seed}:{question.id}".encode()
             ).hexdigest()
             return (
                 -topic_score,
@@ -680,7 +679,7 @@ class QuestionBank:
         ordered = sorted(
             selected,
             key=lambda question: hashlib.sha256(
-                f"order:{selection_seed}:{question.id}".encode("utf-8")
+                f"order:{selection_seed}:{question.id}".encode()
             ).hexdigest(),
         )
         ordered = [
@@ -749,18 +748,15 @@ def _has_specific_topic_match(
     # 2. 检查一级分类
     category = _normalize_topic(question.category)
 
-    if category != "agent" and category != "未分类":
-        if normalized_weights.get(category, 0.0) > 0:
-            return True
-
-    # 3. Agent 等宽泛分类，只有用户明确要求时才允许通过
     if (
-        category in explicitly_requested_labels
+        category != "agent"
+        and category != "未分类"
         and normalized_weights.get(category, 0.0) > 0
     ):
         return True
 
-    return False
+    # 3. Agent 等宽泛分类，只有用户明确要求时才允许通过
+    return bool(category in explicitly_requested_labels and normalized_weights.get(category, 0.0) > 0)
 
 
 #以大写英文字母开头，后面至少还有两个合法字符的单词

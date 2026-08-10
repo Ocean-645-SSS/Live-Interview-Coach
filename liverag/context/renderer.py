@@ -40,7 +40,7 @@ class SessionPromptRenderer:
         or history_limit <= 0
         ):
             raise ValueError("history_limit必须是正整数")
-        
+
         self.store=store
         self.history_limit=history_limit
 
@@ -80,7 +80,7 @@ class SessionPromptRenderer:
         ]
         if missing:
             raise ValueError(f"系统提示词模板缺少必要占位符: {missing}")
-        
+
         #替换soul
         prompt=prompt.replace("{{SOUL_MD}}",self.store.read_soul().strip() or "无")
         #替换history

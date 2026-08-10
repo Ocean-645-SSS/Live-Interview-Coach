@@ -8,7 +8,6 @@ from liverag.interview.skill_progress.policy import (
     normalize_weak_point,
 )
 
-
 BASE_TIME = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 

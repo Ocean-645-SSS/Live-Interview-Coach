@@ -640,10 +640,12 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
 
 ### 第四步：长期能力画像
 
+**状态：** ✅ 已完成（2026-08-10）。
+
 **目标：** 基于跨场面试的持久化评价结果，构建可解释、可追溯的长期 `SkillProgress`，形成“历史评价 → 能力状态 → 下一次面试调整”的训练闭环。
 
-* [ ] 定义稳定的两级技能 taxonomy，并为题库题目和评价结果建立统一的 skill 映射规则；定义时间衰减、弱点聚合和置信度更新规则，避免由 LLM 直接生成最终能力分或主观置信度。
-* [ ] `SkillProgress` 以 `candidate_profile_id + skill` 作为能力聚合边界，至少保存：
+* [x] 定义稳定的两级技能 taxonomy，并为题库题目和评价结果建立统一的 skill 映射规则；定义时间衰减、弱点聚合和置信度更新规则，避免由 LLM 直接生成最终能力分或主观置信度。
+* [x] `SkillProgress` 以 `candidate_profile_id + skill` 作为能力聚合边界，至少保存：
   * `skill`
   * `attempts`
   * `average_score`：该技能所有历史有效评价的平均分，用于反映长期总体表现
@@ -653,11 +655,11 @@ Interview Agent 是实时入口，但不是所有业务能力的容器：
   * `confidence`：根据有效评价数量、时间分布和评价一致性等确定性规则计算的可信度
   * `source_evaluation_ids`
   * `updated_at`
-* [ ] `SkillProgress` 只能由已持久化的 `AnswerEvaluation` 更新，不直接依据 transcript、InterviewReport 或 LLM 自由总结修改；每次聚合必须保留 `source_evaluation_ids`，能够回溯到具体题目、回答、rubric 和评价结果。
-* [ ] 新增独立的 `SkillProgressService`，负责将 `AnswerEvaluation` 映射到对应 skill，并统一完成 `attempts`、历史平均分、时间衰减分、最新分、薄弱点和置信度的增量更新；Evaluator 只负责单题评价，不负责长期能力状态计算。
-* [ ] Planner 在生成下一次 `InterviewPlan` 时读取历史 `SkillProgress`，但不能完全由历史弱项驱动选题；应同时综合 `JobProfile`、Question Bank 和历史能力状态，在岗位核心能力、薄弱点复测和已掌握知识点抽查之间保持合理比例。
-* [ ] Planner 可根据 `current_score` 和 `confidence` 调整题目权重与难度：低分且高置信度的技能优先复测；低置信度技能优先补充证据；高分技能仍保留少量抽查，避免能力画像长期失真。
-* [ ] 增加长期能力进度页面，展示各技能的历史趋势、`average_score`、`current_score`、`latest_score`、置信度、主要薄弱点及其评价来源，并基于当前薄弱项推荐对应训练题。
+* [x] `SkillProgress` 只能由已持久化的 `AnswerEvaluation` 更新，不直接依据 transcript、InterviewReport 或 LLM 自由总结修改；每次聚合必须保留 `source_evaluation_ids`，能够回溯到具体题目、回答、rubric 和评价结果。
+* [x] 新增独立的 `SkillProgressService`，负责将 `AnswerEvaluation` 映射到对应 skill，并统一完成 `attempts`、历史平均分、时间衰减分、最新分、薄弱点和置信度的增量更新；Evaluator 只负责单题评价，不负责长期能力状态计算。
+* [x] Planner 在生成下一次 `InterviewPlan` 时读取历史 `SkillProgress`，但不能完全由历史弱项驱动选题；应同时综合 `JobProfile`、Question Bank 和历史能力状态，在岗位核心能力、薄弱点复测和已掌握知识点抽查之间保持合理比例。
+* [x] Planner 可根据 `current_score` 和 `confidence` 调整题目权重与难度：低分且高置信度的技能优先复测；低置信度技能优先补充证据；高分技能仍保留少量抽查，避免能力画像长期失真。
+* [x] 增加长期能力进度页面，展示各技能的历史趋势、`average_score`、`current_score`、`latest_score`、置信度、主要薄弱点及其评价来源，并基于当前薄弱项推荐对应训练题。
 
 **测试：**
 

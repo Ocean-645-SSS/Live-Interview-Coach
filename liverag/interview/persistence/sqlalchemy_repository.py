@@ -382,7 +382,7 @@ class SQLAlchemyInterviewRepository:
         model = database_session.get(CandidateProfileModel, candidate_id)
         if model is not None:
             return model
-        
+
         try:
             with database_session.begin_nested():
                 database_session.add(
@@ -1324,7 +1324,7 @@ class SQLAlchemyInterviewRepository:
             ).one_or_none()
             if row is None:
                 raise RecordNotFoundError(f"回答评价不存在：{answer_id}")
-            
+
             return _evaluation_record(row[0], row[1], row[2])
 
     def list_evaluation_records_for_candidate(self, candidate_profile_id: str) -> list[AnswerEvaluationRecord]:
@@ -1381,7 +1381,7 @@ class SQLAlchemyInterviewRepository:
 
     def apply_skill_evidence(self, evidence: SkillProgressEvidence) -> SkillProgress:
         """新来一条 Evidence 时，增量更新长期画像
-        
+
         1. 找/创建 SkillProgress 行
         2. 检查 Evidence 是否重复
         3. 保存新 Evidence
@@ -1486,7 +1486,7 @@ class SQLAlchemyInterviewRepository:
         statement = (
             select(SkillProgressEvidenceModel, InterviewSessionModel.interview_id)
             .join(InterviewSessionModel, InterviewSessionModel.id == SkillProgressEvidenceModel.session_id)
-            .where(SkillProgressEvidenceModel.candidate_profile_id == candidate_profile_id, 
+            .where(SkillProgressEvidenceModel.candidate_profile_id == candidate_profile_id,
                    SkillProgressEvidenceModel.skill_key == skill_key)
         )
         return [_evidence_record(row[0], row[1]) for row in database_session.execute(statement).all()]
@@ -1522,14 +1522,14 @@ class SQLAlchemyInterviewRepository:
                 #添加新evidence model
                 database_session.add(
                     SkillProgressEvidenceModel(
-                        id=item.id, 
-                        candidate_profile_id=item.candidate_profile_id, 
-                        skill_key=item.skill_key, evaluation_id=item.evaluation_id, 
-                        session_id=item.session_id, 
-                        question_id=item.question_id, 
-                        taxonomy_version=item.taxonomy_version, 
-                        rubric_version=item.rubric_version, 
-                        score=item.score, 
+                        id=item.id,
+                        candidate_profile_id=item.candidate_profile_id,
+                        skill_key=item.skill_key, evaluation_id=item.evaluation_id,
+                        session_id=item.session_id,
+                        question_id=item.question_id,
+                        taxonomy_version=item.taxonomy_version,
+                        rubric_version=item.rubric_version,
+                        score=item.score,
                         weak_points_json=json.dumps(item.weak_points, ensure_ascii=False),
                           evaluated_at=item.evaluated_at, created_at=item.created_at
                     )

@@ -67,13 +67,13 @@ class RedisQueue:
         2.队列空 + <=timeout -> worker挂起等着，新任务一来就返回
         3.队列空 + >timeout -> redis不等了，返回空
         """
-        
+
         result = await self._redis.blpop(
             self._queue_key(job_type), timeout=timeout
         )
         if result is None:
             return None
-        
+
         # BLPOP 返回 (key, value) 元组
         _, job_id = result
         job_id_str = job_id.decode("utf-8") if isinstance(job_id, bytes) else str(job_id)
@@ -160,7 +160,7 @@ class RedisQueue:
 
     async def lock_exists(self, *, job_type: str, resource_id: str) -> bool:
         """检查锁是否存在。"""
-        
+
         return bool(await self._redis.exists(self._lock_key(job_type, resource_id)))
 
 

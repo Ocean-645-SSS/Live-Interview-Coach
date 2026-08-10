@@ -73,7 +73,7 @@ class RagEngineManager:
         #删除KB
         self.kb_store.delete(kb_id)
 
-    
+
     async def get_engine(self,kb_id:str)->RagEngine:
         """获取或创建单个KB的engine
 
@@ -84,7 +84,7 @@ class RagEngineManager:
         不同 KB 可以并行初始化；
         初始化失败的 Engine 不会进入缓存；
         每个 KB 使用独立的 working_dir 和 workspace
-        
+
         需要的情况：
         涉及 storage、向量、图谱、检索或 LLM
         不需要的情况：
@@ -94,7 +94,7 @@ class RagEngineManager:
         #如果缓存中有engine，直接返回
         if kb_id in self._engines:
             return self._engines[kb_id]
-        
+
         #缓存中没有engine，获取kb_id专属的异步锁
         lock=self._locks.setdefault(kb_id,asyncio.Lock())
         async with lock:

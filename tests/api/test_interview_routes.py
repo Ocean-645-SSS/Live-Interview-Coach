@@ -7,8 +7,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from liverag.api.interview_routes import get_interview_service, router
+from liverag.interview.application.service import InterviewService
 from liverag.interview.persistence.db import create_session_factory, create_sqlite_engine
 from liverag.interview.persistence.models import Base
+from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
 from liverag.interview.schemas import (
     InterviewConfig,
     InterviewDifficulty,
@@ -19,8 +21,6 @@ from liverag.interview.schemas import (
     QuestionType,
     RubricPoint,
 )
-from liverag.interview.application.service import InterviewService
-from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
 
 
 class _EvaluationServiceStub:

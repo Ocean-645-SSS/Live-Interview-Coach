@@ -13,21 +13,19 @@ Worker 不直接访问业务模型，只通过 JobRepository 和任务处理器�
 from __future__ import annotations
 
 import asyncio
-import json
+import contextlib
 import logging
-import signal
-from typing import Any
 
 from openai import AsyncOpenAI
 
+from liverag.agent.tool.rag_client import RagClient
 from liverag.interview.application.profile_service import KnowledgeContextSource
 from liverag.interview.jobs.queue import RedisQueue
-from liverag.interview.jobs.repository import BackgroundJobRecord, JobRepository
+from liverag.interview.jobs.repository import JobRepository
 from liverag.interview.jobs.tasks import get_handler, registered_types
 from liverag.interview.persistence.repository import InterviewRepository
-from liverag.interview.records import JobStatus
 from liverag.interview.question_bank.catalog import QuestionBank
-from liverag.agent.tool.rag_client import RagClient
+from liverag.interview.records import JobStatus
 from liverag.interview.skill_progress.service import SkillProgressService
 
 logger = logging.getLogger("liverag.interview.jobs.worker")
@@ -121,16 +119,14 @@ class BackgroundWorker:
                 acquired = True
                 await self._execute_job(job_id)
                 # 一次只处理一个，回到循环顶部重新扫描
-                break  
+                break
 
         # 所有队列为空，短暂等待后重试（防止忙轮询）
         if not acquired:
-            try:
+            with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(
                     self._shutdown_event.wait(), timeout=1.0
                 )
-            except asyncio.TimeoutError:
-                pass
 
     async def _backfill_pending_jobs(self) -> None:
         """扫描所有已注册 job_type 的 PENDING Job，补入 Redis 队列。

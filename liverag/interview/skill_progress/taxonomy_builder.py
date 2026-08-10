@@ -83,7 +83,7 @@ def write_taxonomy(input_paths: Sequence[Path], output_path: Path) -> tuple[int,
 
 def main(argv: Sequence[str] | None = None) -> int:
     """命令行入口"""
-    
+
     parser = argparse.ArgumentParser(description="从题库生成版本化技能 taxonomy")
     parser.add_argument("--input", action="append", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)

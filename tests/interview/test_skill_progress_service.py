@@ -2,12 +2,10 @@
 
 from pathlib import Path
 
-from tests.interview.test_skill_progress_policy import item
-
 from liverag.interview.skill_progress.policy import calculate_skill_progress
 from liverag.interview.skill_progress.service import SkillProgressService
 from liverag.interview.skill_progress.taxonomy import SkillTaxonomy
-
+from tests.interview.test_skill_progress_policy import item
 
 TAXONOMY_PATH = Path("liverag/interview/skill_progress/data/skill_taxonomy.v1.json")
 

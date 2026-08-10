@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 
 from liverag.interview.intelligence.mcp.mcp_client import McpNowcoderClient
 from liverag.interview.intelligence.provider import (
-    InterviewIntelligenceProvider,
     InterviewIntelligenceQuery,
     InterviewRound,
     ProviderSearchResult,
@@ -30,11 +29,11 @@ _ROUND_LABEL: dict[InterviewRound, str] = {
     InterviewRound.HR: "HR面",
 }
 
-def _round_cn(round: InterviewRound | None) -> str | None:
+def _round_cn(interview_round: InterviewRound | None) -> str | None:
     """将枚举轮次转中文标签，None 返回 None。"""
-    if round is None:
+    if interview_round is None:
         return None
-    return _ROUND_LABEL.get(round)
+    return _ROUND_LABEL.get(interview_round)
 
 
 # ====================== 确定性搜索关键词构造 ======================

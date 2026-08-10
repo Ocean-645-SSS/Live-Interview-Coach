@@ -433,6 +433,18 @@ Interview API 使用 `/api/interviews` 前缀。第一步使用 SQLite，第二�
 
 按目标岗位资料库列出历史面试报告。
 
+#### GET /api/interviews/skill-progress?candidate_kb_id=default
+
+返回个人资料库对应候选人的长期能力画像总览与训练建议。合法但尚无历史面试或有效评价的资料库返回空的 `skills` 和 `recommendations`；`candidate_kb_id` 缺失或为空返回 `422`。
+
+每项技能的 `average_score` 是全部有效评价的算术平均分，`latest_score` 是最近一次评价分，`current_score` 是以最近评价时间为相对原点、采用 90 天半衰期计算的加权分。`confidence` 是由评价数量、Session 覆盖、时间跨度和分数一致性确定的规则指标，并非概率。
+
+#### GET /api/interviews/skill-progress/{skill_key}?candidate_kb_id=default
+
+返回指定技能的画像字段和按评价时间排序的 `trend`。每个趋势点包含 `evaluation_id`、`question_id`、`session_id`、`interview_id`、评分规则版本和评价时间；趋势与 `source_evaluation_ids` 只来自已持久化的 `AnswerEvaluation`，不使用 transcript、报告总结或 LLM 自由总结作为来源。
+
+资料库尚未形成该 `skill_key` 的长期画像，或技能键不存在时返回 `404`；请求中的资料库 ID 缺失或为空返回 `422`。
+
 ### 12.3 面试计划
 
 #### PUT /api/interviews/{interview_id}/plan

@@ -20,8 +20,8 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 import requests
 
@@ -167,7 +167,7 @@ class NowcoderSpider:
         collected: list[RawNowcoderPost] = []
         failed = 0
 
-        for key, hit in all_hits.items():
+        for _key, hit in all_hits.items():
             #获取单篇帖子
             post = self._fetch_one(hit)
 
@@ -300,10 +300,7 @@ class NowcoderSpider:
 
         #fetch discuss/feed类型，对应不同函数
         fetch_func: Callable[[str], RawNowcoderPost | None]
-        if source_type == "feed":
-            fetch_func = self._fetch_feed
-        else:
-            fetch_func = self._fetch_discuss
+        fetch_func = self._fetch_feed if source_type == "feed" else self._fetch_discuss
 
         # 第一次尝试
         try:

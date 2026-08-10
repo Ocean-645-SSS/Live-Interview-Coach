@@ -68,7 +68,7 @@ class SkillTaxonomy:
         for skill in document.skills:
             if skill.key in keys:
                 raise SkillTaxonomyError(f"taxonomy 包含重复 skill key：{skill.key}")
-            
+
             keys.add(skill.key)
             #alias冲突
             labels = [SkillAlias(category=skill.category, subcategory=skill.subcategory)]
@@ -120,7 +120,7 @@ class SkillTaxonomy:
                 ↓
         稳定的 skill_key / parent_key
         """
-        
+
         #规范化输入
         alias = (normalize_label(category), normalize_label(subcategory or "通用"))
 

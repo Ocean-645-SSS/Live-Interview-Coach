@@ -22,9 +22,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from liverag.interview.intelligence.provider import CompanyInterviewProfile
-
 import redis.asyncio as _aredis
+
+from liverag.interview.intelligence.provider import CompanyInterviewProfile
 
 logger = logging.getLogger(__name__)
 

@@ -10,24 +10,27 @@ LightRAG、文档存储、索引与查询"""
 
 
 import asyncio
+import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
-import logging
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel,Field
+from pydantic import BaseModel, Field
 
 from liverag.api.interview_profile_source import RagGatewayProfileSource
 from liverag.api.interview_routes import (
     configure_interview_service,
     configure_job_dependencies,
+)
+from liverag.api.interview_routes import (
     router as interview_router,
 )
-from liverag.api.rag_gateway import RagGateway,GatewayResponse,envelope
+from liverag.api.rag_gateway import GatewayResponse, RagGateway, envelope
 from liverag.config.settings import (
     RagToolMode,
     is_masked_secret,
@@ -36,6 +39,7 @@ from liverag.config.settings import (
     load_environment,
     load_rag_client_settings,
     load_voice_settings,
+    merge_runtime_rag_config,
     public_context_model_config,
     public_model_options,
     public_rag_client_config,
@@ -46,26 +50,25 @@ from liverag.config.settings import (
     voice_config_for_storage,
     write_runtime_context_model_config,
     write_runtime_model_config,
-    merge_runtime_rag_config,
 )
+from liverag.context.overview import KnowledgeOverviewGenerator
 from liverag.context.store import ContextStore
-from liverag.interview.persistence.db import create_database_engine, create_session_factory
 from liverag.interview.application.evaluator import (
     AnswerEvaluator,
     OpenAIAnswerEvaluationProvider,
     OpenAIAnswerEvaluationSettings,
 )
 from liverag.interview.application.profile_service import InterviewProfileService
-from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.application.service import InterviewService
+from liverag.interview.persistence.db import create_database_engine, create_session_factory
 from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
+from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.skill_progress.service import SkillProgressService
 from liverag.interview.skill_progress.taxonomy import SkillTaxonomy
-from liverag.context.overview import KnowledgeOverviewGenerator
-from liverag.runtime.paths import build_runtime_paths
 from liverag.rag.metadata_store import MetadataStore
-from liverag.rag.schemas import QueryRequest,TextDocumentRequest
+from liverag.rag.schemas import QueryRequest, TextDocumentRequest
 from liverag.rag.service import wait_for_rag_ready
+from liverag.runtime.paths import build_runtime_paths
 
 logger = logging.getLogger("liverag.api.server")
 
@@ -186,7 +189,7 @@ try:
         settings.redis.url,
         decode_responses=True,
     )
-    #创建job关联数据库 repository层 
+    #创建job关联数据库 repository层
     _job_repo = JobRepository(create_session_factory(interview_engine))
     #创建redis队列+锁管理
     _redis_queue = RedisQueue(
@@ -300,7 +303,7 @@ async def runtime_state(session_id:str)->dict[str,Any]:
     state=store.read_runtime_state(session_id)
     if not state:
         raise HTTPException(status_code=404,detail=f"session not found: {session_id}",)
-    
+
     #RAG模式
     state.setdefault("rag_tool_mode",load_rag_client_settings(settings.user_data_dir).rag_tool_mode)
 
@@ -553,7 +556,7 @@ async def export_session(session_id:str)->dict[str,Any]:
             status_code=404,
             detail=str(exc)
         )from exc
-    
+
 #============================== /rag/... =========================
 @app.get("/rag/ready")
 async def rag_ready() -> JSONResponse:
@@ -562,10 +565,10 @@ async def rag_ready() -> JSONResponse:
     return _json_response(await rag_gateway.get("/v1/readyz"))
 
 @app.get("/rag/knowledge-bases")
-async def rag_knowledge_bases()->JSONResponse:   
+async def rag_knowledge_bases()->JSONResponse:
     """读取所有知识库"""
 
-    return _json_response(await rag_gateway.get("/v1/knowledge-bases"))    
+    return _json_response(await rag_gateway.get("/v1/knowledge-bases"))
 
 @app.post("/rag/knowledge-bases")
 async def rag_create_knowledge_bases(payload:KnowledgeBasePayload)->JSONResponse:
@@ -808,7 +811,7 @@ async def get_rag_config()->dict[str,Any]:
 
     config=load_rag_client_settings(settings.user_data_dir)
     return envelope(data={"config":public_rag_client_config(config)})
-    
+
 @app.put("/rag/config")
 async def put_rag_config(payload: RagConfigPayload) -> dict[str, Any]:
     """更新语音链路 RAG 配置"""
@@ -891,7 +894,7 @@ def _voice_config_identity(config:dict[str,Any])->dict[str,Any]:
 
 async def _session_knowledge_base_state(session_id:str|None=None)->dict[str,Any]:
     """返回session中知识库配置和锁定状态"""
-    
+
     #管理后台选中的知识库，下一场新通话准备用
     configured=await _configured_knowledge_base()
 
@@ -903,7 +906,7 @@ async def _session_knowledge_base_state(session_id:str|None=None)->dict[str,Any]
             "locked":False,
             "pending_reconnect":False
         }
-    
+
     #当前正在进行的通话已经锁定的知识库
     active=_active_knowledge_base(session_id)
 
@@ -948,7 +951,7 @@ async def _knowledge_base_detail(kb_id:str)->dict[str,Any]:
     if response.body.get("status") != "ok" or not isinstance(response.body.get("data"), dict):
         error = response.body.get("error") or {}
         raise HTTPException(status_code=response.status_code, detail=error.get("message") or "knowledge base unavailable")
-    
+
     return response.body["data"]
 
 def _active_knowledge_base(session_id:str)->dict[str,Any]|None:
@@ -959,7 +962,7 @@ def _active_knowledge_base(session_id:str)->dict[str,Any]|None:
         return None
     if state.get("state")!="active" or state.get("ended_at"):
         return None
-    
+
     active_session=state.get("active_session")
     if isinstance(active_session, dict):
         knowledge_base=active_session.get("knowledge_base")
@@ -981,7 +984,7 @@ def _mark_overview_stale_if_ok(response:GatewayResponse,kb_id:str,*,reason:str)-
 
     if response.body.get("status")=="ok":
         #标记知识库概览过期
-        store.mark_knowledge_overview_stale(kb_id=kb_id,reason=reason) 
+        store.mark_knowledge_overview_stale(kb_id=kb_id,reason=reason)
 
 def _schedule_overview_generation_after_completed_job(
     response:GatewayResponse,
@@ -1093,7 +1096,7 @@ async def _raw_knowledge_overview(kb_id:str)->dict[str,Any]:
 
 def _drop_masked_secret_updates(payload:dict[str,Any])->dict[str,Any]:
     """移除前端原样回传的密钥掩码，避免覆盖真实密钥。"""
-    
+
     cleaned: dict[str, Any] = {}
     for key, value in payload.items():
         if isinstance(value, dict):
@@ -1130,12 +1133,11 @@ def _validate_context_model_updates(updates: dict[str, Any]) -> None:
 
     for key in ("model", "base_url", "api_key"):
         value = updates.get(key)
-        if value is not None:
-            if not isinstance(value, str) or not value.strip():
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"{key} cannot be empty",
-                )
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{key} cannot be empty",
+            )
 
     base_url = updates.get("base_url")
     if base_url is not None and not _is_http_url(base_url):
@@ -1143,7 +1145,7 @@ def _validate_context_model_updates(updates: dict[str, Any]) -> None:
             status_code=422,
             detail="base_url must be an http(s) URL",
         )
-    
+
 def _walk_model_update_values(payload: dict[str, Any], prefix: str = "") -> list[tuple[str, Any]]:
     """展开模型配置更新字段。
     例子：

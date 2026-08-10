@@ -18,6 +18,9 @@ tts-debug.txt
 .pytest_cache
 .pytest-runs/
 .ruff_cache
+.task9-*/
+.test-runtime-*/
+/LiveRAG-Fronted/
 data/
 interview-experience-spider-main/
 liverag.rar

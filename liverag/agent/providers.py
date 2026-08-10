@@ -24,6 +24,8 @@ TTS：DashScope
 回答语音
 """
 
+from pathlib import Path
+
 from livekit.agents import AgentSession
 from livekit.plugins import openai, silero
 
@@ -32,7 +34,6 @@ from liverag.agent.hot_words import load_hot_words
 from liverag.agent.turn_detector import SemanticTurnDetector
 from liverag.agent.volcengine_stt import AuditedBigModelSTT
 from liverag.config.settings import AppSettings
-from pathlib import Path
 
 
 def build_agent_session(settings: AppSettings) -> AgentSession:

@@ -6,12 +6,12 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from liverag.interview.persistence.repository import DuplicateEventError, InterviewRepository
 from liverag.interview.records import (
     InterviewAnswerRecord,
     InterviewEventRecord,
     InterviewSessionRecord,
 )
-from liverag.interview.persistence.repository import DuplicateEventError, InterviewRepository
 from liverag.interview.state_machine import (
     InterviewEventType,
     InterviewStateMachine,

@@ -119,20 +119,21 @@ class McpNowcoderClient:
         try:
             #启动server子进程，建立read+write通信管道
             #与server里的stdio_server对应
-            async with stdio_client(self._server_params) as (read, write):
-                #建立mcp会话
-                async with ClientSession(read, write) as session:
-                    #完成 mcp client与server 握手
-                    await session.initialize()
+            async with (
+                stdio_client(self._server_params) as (read, write),
+                ClientSession(read, write) as session,
+            ):
+                #完成 mcp client与server 握手
+                await session.initialize()
 
-                    #校验 Tool contract：看server里有没有要用到的tool
-                    await self._verify_contract(session)
+                #校验 Tool contract：看server里有没有要用到的tool
+                await self._verify_contract(session)
 
-                    #调用 Tool
-                    result = await session.call_tool(
-                        name=TOOL_NAME,
-                        arguments={"queries": queries, "max_results": max_results},
-                    )
+                #调用 Tool
+                result = await session.call_tool(
+                    name=TOOL_NAME,
+                    arguments={"queries": queries, "max_results": max_results},
+                )
 
         except OSError as exc:
             raise ProviderError(

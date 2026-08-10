@@ -130,7 +130,7 @@ class RAGSettings:
     #查询超时限制（毫秒）
     query_timeout_ms: int = max(15000, _int_env("LIGHTRAG_TIMEOUT_MS", 15000))
 
-    
+
     #====================文档切块配置==============================
     chunk_token_size: int = _int_env("LIGHTRAG_CHUNK_SIZE", _int_env("CHUNK_SIZE", 1200))
     chunk_overlap_token_size: int = _int_env(

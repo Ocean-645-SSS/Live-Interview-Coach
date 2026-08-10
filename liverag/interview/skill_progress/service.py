@@ -103,7 +103,7 @@ class SkillProgressService:
 
     def apply_evaluation(self, answer_id: str) -> SkillProgress:
         """根据最新的answer，更新evidence->skillprogress
-        
+
         answer_id → 查询 AnswerEvaluationRecord → 找到所属 Interview / Session / Question
         → 根据题目的 category + subcategory 映射 skill_key → 转换为 SkillProgressEvidence
         → 写入证据表 → 重新计算对应技能的 SkillProgress"""

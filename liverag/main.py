@@ -29,30 +29,38 @@ History 是派生数据，压缩失败只记录错误，不删除原始 Session�
 """
 
 import asyncio
+import logging
 from contextlib import suppress
 from datetime import datetime, timezone
-import logging
 from typing import Any
 from urllib.parse import quote
 
 import aiohttp
-from livekit.agents import AgentServer, JobContext,cli,room_io
+from livekit.agents import AgentServer, JobContext, cli, room_io
 
 from liverag.agent.assistant import VoiceAssistant, register_session_context_hooks
+from liverag.agent.metrics_hooks import (
+    MetricsState,
+    register_session_metrics_hooks,
+    start_network_probe_task,
+)
 from liverag.agent.providers import build_agent_session
 from liverag.agent.tool.rag_client import RagClient
-from liverag.agent.metrics_hooks import MetricsState,register_session_metrics_hooks,start_network_probe_task
-from liverag.rag.metadata_store import MetadataStore
-from liverag.rag.service import wait_for_rag_ready
-from liverag.config.settings import load_environment,load_app_settings,AppSettings,public_voice_config
-from liverag.context.store import ContextStore
-from liverag.context.renderer import SessionPromptRenderer
+from liverag.config.settings import (
+    AppSettings,
+    load_app_settings,
+    load_environment,
+    public_voice_config,
+)
 from liverag.context.history import HistoryCompactor
 from liverag.context.manager import ContextManager
-from liverag.logging.setup import setup_logging
+from liverag.context.renderer import SessionPromptRenderer
+from liverag.context.store import ContextStore
 from liverag.logging.events import EventLogger
+from liverag.logging.setup import setup_logging
+from liverag.rag.metadata_store import MetadataStore
+from liverag.rag.service import wait_for_rag_ready
 from liverag.runtime.paths import build_runtime_paths
-
 
 load_environment()  #加载环境
 setup_logging() #初始化日志格式
@@ -73,7 +81,7 @@ async def my_agent(ctx:JobContext)->None:   #ctx:本次通话在哪个房间(roo
     paths=build_runtime_paths(settings.user_data_dir)
     store=ContextStore(paths=paths)
     store.initialize()  #创建prompts,history,context,sessions,model,rag,logs对应的目录
-    
+
 
     #等待RAG Core服务，to_thread表示单独放到线程运行，避免阻塞LiveKit异步事件循环
     ready_state=await asyncio.to_thread(wait_for_rag_ready,timeout_ms=settings.api.rag_ready_timeout_ms)

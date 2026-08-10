@@ -17,7 +17,7 @@ def load_environment() -> None:
 
     load_dotenv(".env.local", override=True)
     load_dotenv()
-    
+
 def _str_env(name: str, default: str = "") -> str:
     """读取字符串环境变量。"""
 
@@ -628,7 +628,7 @@ def validate_voice_config_selection(config: dict[str, Any]) -> None:
         if voice_id not in _tts_option_ids(provider, "voices"):
             raise ValueError("voice.tts.voice is not supported by selected provider")
 
-        
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",

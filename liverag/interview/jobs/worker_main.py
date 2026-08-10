@@ -14,27 +14,27 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-
-import redis.asyncio as redis 
-from openai import AsyncOpenAI
 from pathlib import Path
 
+import redis.asyncio as redis
+from openai import AsyncOpenAI
+
+from liverag.api.interview_profile_source import RagGatewayProfileSource
+from liverag.api.rag_gateway import RagGateway
 from liverag.config.settings import (
     AppSettings,
     load_app_settings,
     load_environment,
 )
+from liverag.interview.intelligence.nowcoder_provider import NowcoderSpiderProvider
+from liverag.interview.intelligence.service import IntelligenceService, IntelligenceServiceConfig
 from liverag.interview.jobs.queue import RedisQueue
 from liverag.interview.jobs.repository import JobRepository
 from liverag.interview.jobs.tasks import registered_types
 from liverag.interview.jobs.worker import BackgroundWorker
 from liverag.interview.persistence.db import create_database_engine, create_session_factory
 from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
-from liverag.api.interview_profile_source import RagGatewayProfileSource
-from liverag.api.rag_gateway import RagGateway
 from liverag.interview.question_bank.catalog import QuestionBank, QuestionBankError
-from liverag.interview.intelligence.service import IntelligenceService, IntelligenceServiceConfig
-from liverag.interview.intelligence.nowcoder_provider import NowcoderSpiderProvider
 from liverag.interview.skill_progress.service import SkillProgressService
 from liverag.interview.skill_progress.taxonomy import SkillTaxonomy
 

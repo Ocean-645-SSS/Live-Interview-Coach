@@ -7,13 +7,13 @@
 """
 
 import asyncio
-from collections import Counter
-from math import ceil
 import re
 import time
 from asyncio.log import logger
+from collections import Counter
 from dataclasses import asdict, is_dataclass
 from functools import partial
+from math import ceil
 from pathlib import Path
 from typing import Any
 
@@ -425,7 +425,7 @@ class RagEngine:
         response = await rag.llm_model_func(prompt) #调用LLM：判断证据是否真的能回答问题
         text = str(response).strip().lower()
         return text == "true"
-    
+
 
     async def query_context(
         self, query: str, profile: str, options: QueryOptions, conversation: ConversationOptions
@@ -841,7 +841,7 @@ class RagEngine:
             "result": _to_jsonable(result),
         }, metrics
 
-        
+
     async def documents(self,page:int=1,page_size:int=50)->dict[str,Any]:
         """读取documents状态列侬阿婆"""
 
@@ -865,7 +865,7 @@ class RagEngine:
             "status_counts": counts,
         }
 
-   
+
     async def document_detail(self, document_id: str) -> dict[str, Any]:
         """读取单个文档状态status、原文content和文本块chunks。"""
 
@@ -895,7 +895,7 @@ class RagEngine:
             "chunks": chunks, #rag.text_chunks
             "chunks_count": len(chunks),
         })
-    
+
     async def delete_document(
         self,
         document_id: str,
@@ -912,7 +912,7 @@ class RagEngine:
             )
         return _to_jsonable(result)
 
-    
+
     async def job(self, job_id: str) -> dict[str, Any]:
         """按照track_id(job_id)异步获取入库任务"""
         rag = self.ensure_ready()

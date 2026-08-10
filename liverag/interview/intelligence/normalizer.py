@@ -20,15 +20,15 @@ from __future__ import annotations
 
 import re
 
+from liverag.interview.intelligence.defaults import (
+    _COMPANY_ALIASES,
+    _REGION_ALIASES,
+    _ROLE_ALIASES,
+    _ROUND_KEYWORDS,
+)
 from liverag.interview.intelligence.provider import (
     InterviewRound,
     RawInterviewExperience,
-)
-from liverag.interview.intelligence.defaults import (
-_COMPANY_ALIASES,
-_ROLE_ALIASES,
-_REGION_ALIASES,
-_ROUND_KEYWORDS,
 )
 
 

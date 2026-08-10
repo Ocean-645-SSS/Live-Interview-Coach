@@ -93,8 +93,8 @@ class NormalizedInterviewExperience(StrictModel):
     role: str = ""
     region: str = ""
     interview_round: InterviewRound | None = None
-    topics: list[str] = Field(default_factory=list) 
-    questions: list[str] = Field(default_factory=list)  
+    topics: list[str] = Field(default_factory=list)
+    questions: list[str] = Field(default_factory=list)
     published_at: datetime | None = None
     retrieved_at: datetime | None = None
     content_hash: str = ""

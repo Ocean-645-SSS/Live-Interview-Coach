@@ -473,7 +473,7 @@ class MetadataStore:
 
     def delete_document_metadata(self, kb_id: str, document_id: str) -> dict[str, Any]:
             """删除单个文档元数据。"""
-    
+
             document = self.get_document(kb_id, document_id)
             with self._connect() as conn:
                 conn.execute(
@@ -481,7 +481,7 @@ class MetadataStore:
                     (kb_id, document_id),
                 )
             return document
-    
+
     def list_documents(self, kb_id: str, *, page: int, page_size: int) -> dict[str, Any]:
         """分页读取知识库文档。"""
 
@@ -515,7 +515,7 @@ class MetadataStore:
             "has_next": page < total_pages,
             "has_prev": page > 1 and total_pages > 0,
         }
-    
+
 
 
     def _update_document(self,document_id:str,kb_id:str,**values):

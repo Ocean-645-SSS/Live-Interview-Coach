@@ -13,27 +13,28 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
+
 from openai import AsyncOpenAI
 
-from liverag.interview.intelligence.provider import InterviewIntelligenceQuery
-from liverag.interview.intelligence.service import IntelligenceService
-from liverag.interview.jobs.queue import RedisQueue
-from liverag.interview.jobs.repository import BackgroundJobRecord
-from liverag.interview.application.profile_service import KnowledgeContextSource
-from liverag.interview.jobs.repository import JobRepository
-from liverag.interview.application.resume_parser import ResumeParser
-from liverag.interview.application.profile_service import InterviewProfileService
-from liverag.interview.skill_progress.service import SkillProgressService
 from liverag.interview.application.planner import InterviewPlanner, validate_plan_quality
-from liverag.interview.persistence.repository import ConcurrentUpdateError, InterviewRepository
-from liverag.interview.question_bank.catalog import QuestionBank
+from liverag.interview.application.profile_service import (
+    InterviewProfileService,
+    KnowledgeContextSource,
+)
 from liverag.interview.application.report import InterviewReportBuilder
+from liverag.interview.application.resume_parser import ResumeParser
 from liverag.interview.application.skill_progress_reconciliation import (
     reconcile_skill_progress,
 )
+from liverag.interview.intelligence.provider import InterviewIntelligenceQuery
+from liverag.interview.intelligence.service import IntelligenceService
+from liverag.interview.jobs.queue import RedisQueue
+from liverag.interview.jobs.repository import BackgroundJobRecord, JobRepository
+from liverag.interview.persistence.repository import ConcurrentUpdateError, InterviewRepository
+from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.records import ReportState
 from liverag.interview.schemas import CandidateFacts, InterviewConfig
-
+from liverag.interview.skill_progress.service import SkillProgressService
 
 logger = logging.getLogger("liverag.interview.jobs.tasks")
 
@@ -174,7 +175,7 @@ async def _generate_candidate_profile(
 async def _generate_job_profile(
     *,
     job: BackgroundJobRecord,
-    service: "InterviewProfileService",
+    service: InterviewProfileService,
     kb_id: str,
     company: str | None,
     role: str | None,
@@ -308,7 +309,7 @@ async def interview_preparation_task(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """面试准备 Workflow：直接复用 ResumeParser、ProfileService、Planner 等 Service。
-    
+
     创建面试前准备任务
             ↓
     依次执行：
@@ -678,14 +679,14 @@ async def interview_preparation_task(
                 extra={"job_id": job.id, "stage": stage_name},
             )
 
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             error_msg = f"Stage {stage_name} 超时"
             logger.error(error_msg, extra={"job_id": job.id})
             _persist_stage_error(
                 job_repo, job.id, payload,
                 stage_name, step_name, error_msg, "TimeoutError",
             )
-            raise RuntimeError(error_msg)
+            raise RuntimeError(error_msg) from exc
         except Exception as exc:
             logger.error(
                 f"Stage {stage_name} 失败",
@@ -829,13 +830,13 @@ async def report_generation_task(
         }
 
     # ── Redis 锁：防止多个 Worker/API 同时生成同一份报告 ──
-    _LOCK_TTL = 300  # 5 分钟，足够报告生成完成
+    lock_ttl = 300  # 5 分钟，足够报告生成完成
     lock_token: str | None = None
     if redis_queue is not None:
         lock_token = await redis_queue.acquire_lock(
             job_type="report_generation",
             resource_id=session_id,
-            ttl=_LOCK_TTL,
+            ttl=lock_ttl,
         )
         if lock_token is None:
             # 另一进程正在生成 → 轮询等待其结果
@@ -870,7 +871,7 @@ async def report_generation_task(
             lock_token = await redis_queue.acquire_lock(
                 job_type="report_generation",
                 resource_id=session_id,
-                ttl=_LOCK_TTL,
+                ttl=lock_ttl,
             )
             if lock_token is None:
                 raise RuntimeError(
@@ -878,10 +879,7 @@ async def report_generation_task(
                 )
 
     # ── 创建或复用报告记录 ──
-    if existing is None:
-        report = interview_repo.create_report(session_id=session_id)
-    else:
-        report = existing
+    report = interview_repo.create_report(session_id=session_id) if existing is None else existing
 
     # ── 标记开始生成 ──
     try:

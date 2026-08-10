@@ -161,7 +161,7 @@ class ContextStore:
         runtime=self.read_runtime_state(safe_session_id)
         if not runtime:
             raise ValueError(f"session does not exist: {safe_session_id}")
-        
+
         return {
             "session_id":safe_session_id,
             "exported_at":self._now_iso(),
@@ -171,7 +171,7 @@ class ContextStore:
             "turns": self.read_session_turns(session_id=safe_session_id),
             "session_system_prompt": (self.read_session_system_prompt(safe_session_id))
         }
-    
+
     def delete_session(self, session_id: str) -> None:
         """删除一个指定 session对应的四个文件目录和session目录"""
 
@@ -250,7 +250,7 @@ class ContextStore:
 
     def read_knowledge_overview(self,kb_id:str)->str:
             """读取指定知识库固定概览"""
-    
+
             self.ensure_knowledge_overview_default(kb_id)
 
             #防止文件存在但是内容为空
@@ -258,7 +258,7 @@ class ContextStore:
             if content.strip():
                 return content
             return DEFAULT_KNOWLEDGE_OVERVIEW_FALLBACK.rstrip()+"\n"
-    
+
     def ensure_knowledge_overview_default(self,kb_id:str)->None:
         """确保指定知识库至少有默认概览文件"""
 
@@ -311,7 +311,7 @@ class ContextStore:
         """读取指定知识库的元数据"""
 
         #确保至少有默认知识库
-        self.ensure_knowledge_overview_default(kb_id) 
+        self.ensure_knowledge_overview_default(kb_id)
 
         try:
             data=json.loads(self._overview_meta_file(kb_id).read_text(encoding="utf-8"))
@@ -376,9 +376,9 @@ class ContextStore:
 
     def lock_session_system_prompt(self,session_id:str,content:str)->str:
             """将渲染结果首次写入当前session的SessionSystemPrompt，已锁定时不覆盖"""
-    
+
             safe_session_id=self._safe_session_id(session_id)
-    
+
             #确认session_id已经通过start_session初始化
             self._session_kb_id(safe_session_id)
 
@@ -392,13 +392,13 @@ class ContextStore:
             prompt=content.rstrip() #删除末尾的空格换行
             if not prompt:
                 raise ValueError("session system prompt不能为空！")
-    
+
             locked_prompt=prompt+"\n" #统一加一个换行符
             prompt_file=self._session_paths(safe_session_id).system_prompt_file
             prompt_file.write_text(locked_prompt,encoding="utf-8")
-    
+
             return locked_prompt
-    
+
     def append_message(
         self,
         *,
@@ -605,7 +605,7 @@ class ContextStore:
             directory = self.paths.context_dir / self._safe_kb_id(kb_id)
             directory.mkdir(parents=True, exist_ok=True)
             return directory
-    
+
     def _overview_file(self,kb_id: str) -> Path:
         """返回指定知识库概览文件路径"""
 
@@ -620,7 +620,7 @@ class ContextStore:
             directory = self.paths.history_dir / self._safe_kb_id(kb_id)
             directory.mkdir(parents=True, exist_ok=True)
             return directory
-    
+
     def _history_file(self, kb_id: str) -> Path:
         """返回指定知识库的长期历史文件路径。"""
 
@@ -759,7 +759,7 @@ class ContextStore:
             return {}
         summary=raw_overview.get("summary")
         return summary if isinstance(summary,dict) else {}
-    
+
     @staticmethod
     def _ensure_text_file(path: Path, default: str) -> None:
         """确保指定文本文件存在"""

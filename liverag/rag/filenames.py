@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from urllib.parse import unquote
 
-
 _LEGACY_UTF8_BYTES = re.compile(r"(?:_[0-9A-Fa-f]{2}){2,}")
 
 

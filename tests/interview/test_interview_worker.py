@@ -15,8 +15,8 @@ from liverag.agent.interview_assistant import (
     InterviewAudioReadiness,
     LiveKitInterviewAgent,
 )
-from liverag.interview.schemas import InterviewConfig, InterviewState
 from liverag.interview.application.controller import InterviewSpeech, InterviewSpeechKind
+from liverag.interview.schemas import InterviewConfig, InterviewState
 from liverag.interview_main import (
     InterviewJobMetadata,
     InterviewWorkerDiagnostics,

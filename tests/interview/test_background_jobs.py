@@ -12,8 +12,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -23,8 +25,7 @@ from liverag.interview.jobs.tasks import get_handler, registered_types
 from liverag.interview.jobs.worker import BackgroundWorker
 from liverag.interview.persistence.db import create_session_factory, create_sqlite_engine
 from liverag.interview.persistence.models import Base
-from liverag.interview.records import BackgroundJobRecord, JobStatus, generate_id
-
+from liverag.interview.records import JobStatus, generate_id
 
 # ── Fixtures ─────────────────────────────────────────────
 
@@ -39,10 +40,8 @@ def engine():
         yield eng
     finally:
         eng.dispose()
-        try:
+        with contextlib.suppress(PermissionError):
             db_path.unlink(missing_ok=True)
-        except PermissionError:
-            pass
 
 
 @pytest.fixture(scope="function")
@@ -1399,7 +1398,7 @@ class TestPreparationWorkerEndToEnd:
         # 验证已完成
         completed = job_repo.get_job(job1.id)
         assert completed.status is JobStatus.COMPLETED
-        completed_result = json.loads(completed.result_json)
+        json.loads(completed.result_json)
 
         # 通过唯一约束：同一 idempotency_key 不能创建第二条 Job
         from sqlalchemy.exc import IntegrityError

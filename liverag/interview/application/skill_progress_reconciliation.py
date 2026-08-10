@@ -7,7 +7,6 @@ import logging
 from liverag.interview.persistence.repository import InterviewRepository
 from liverag.interview.skill_progress.service import SkillProgressService
 
-
 logger = logging.getLogger("liverag.interview.skill_progress.reconciliation")
 
 

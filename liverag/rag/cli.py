@@ -28,6 +28,7 @@ import uvicorn
 
 from liverag.rag.rag_settings import RAGSettings
 
+
 def main()->None:
     """启动LightRAG Core Service"""
 
@@ -36,7 +37,7 @@ def main()->None:
         print("用法: uv run liverag-rag-service")
         print("环境变量: KB_SERVICE_HOST=127.0.0.1 KB_SERVICE_PORT=9721")
         return
-    
+
     settings=RAGSettings()
     uvicorn.run(
         "liverag.rag.server:app",  #相当于from liverag.rag.server import app

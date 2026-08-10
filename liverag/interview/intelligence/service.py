@@ -22,16 +22,17 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+import redis.asyncio as _aredis
+
 from liverag.interview.intelligence.aggregator import aggregate
 from liverag.interview.intelligence.cache import (
     IntelligenceCache,
     build_cache_key,
 )
-
-import redis.asyncio as _aredis
-
 from liverag.interview.intelligence.extractor import (
     ExperienceExtractor,
+)
+from liverag.interview.intelligence.extractor import (
     extract_batch as extract_batch_rule,
 )
 from liverag.interview.intelligence.normalizer import (
