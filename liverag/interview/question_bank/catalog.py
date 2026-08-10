@@ -372,6 +372,7 @@ class QuestionBank:
         explicitly_requested_topics: Iterable[str] = (),    #用户明确要求考察的主题
         required_relevance_topics: Iterable[str] = (),  #必须命中的岗位主题
         selection_seed: str | None = None,  #同一场面试可以复现，不同场面试不一定每次按照同样的顺序提问
+        max_total_seconds: int | None = None,   #选题总时长上限（秒），用于防止超时
     ) -> list[InterviewQuestion]:
         """根据面试配置确定性选择题目并重新生成连续执行顺序。
 
@@ -465,6 +466,9 @@ class QuestionBank:
 
         # 排序问题（sort默认从小到大排序），并且截断多余问题
         selected = ranked[: config.question_count]
+        # 有时间预算时，用备选题中较短的替换过长题目
+        if max_total_seconds is not None:
+            selected = _fit_time_budget(selected, ranked, max_total_seconds)
         # 题目已经选完后，改变这些题的实际提问顺序。
         if selection_seed:
             selected = sorted(
@@ -488,6 +492,7 @@ class QuestionBank:
         relevance_text: str | None,
         explicitly_requested_topics: Iterable[str],
         selection_seed: str,
+        max_total_seconds: int | None = None,   #选题总时长上限（秒）
     ) -> TrainingSelectionResult:
         """在岗位题硬下限内，尽量满足画像产生的训练软目标
 
@@ -502,7 +507,7 @@ class QuestionBank:
         2.证据不足项：最多1个
         3.掌握项：n>=5时最多1个
 
-        先选“训练意图 + 岗位相关”的题。
+        先选"训练意图 + 岗位相关"的题。
         如果软目标还没满足，再使用非岗位题。
         但非岗位题不能超过岗位硬约束留下的容量。
         最后补齐岗位题，再用普通题补满总题量"""
@@ -686,6 +691,14 @@ class QuestionBank:
             question.model_copy(update={"order": index})
             for index, question in enumerate(ordered, start=1)
         ]
+        # 有时间预算时，用备选题中较短的替换过长题目
+        if max_total_seconds is not None:
+            ordered = _fit_time_budget(ordered, ranked, max_total_seconds)
+            # 替换后恢复 order 序号
+            ordered = [
+                question.model_copy(update={"order": index})
+                for index, question in enumerate(ordered, start=1)
+            ]
         selected_job_core = sum(job_relevance[item.id] for item in ordered)
 
         return TrainingSelectionResult(
@@ -733,7 +746,15 @@ def _has_specific_topic_match(
     normalized_weights,
     explicitly_requested_labels,
 ):
-    """判断这道题是否真实命中了用户画像中的具体技术，避免仅仅因为一级分类是agent就选中"""
+    """判断这道题是否真实命中了用户画像中的具体技术，避免仅仅因为一级分类是agent就选中。
+
+    当没有任何主题权重和显式要求时（空画像），放行所有题目——此时仅靠
+    _specific_terms_are_supported 按简历/JD 关键词做硬匹配。
+    """
+
+    # 没有主题权重也没有显式要求 → 没有筛选依据，放行
+    if not normalized_weights and not explicitly_requested_labels:
+        return True
 
     # 1. 检查二级分类和具体 topics
     specific_labels = {_normalize_topic(topic) for topic in question.topics}
@@ -766,7 +787,7 @@ def _specific_terms_are_supported(
     question: InterviewQuestion,
     relevance_text: str,
 ) -> bool:
-    """从题目正文和考察目标里找出“看起来像具体技术名”的词，然后检查这些词是否全部出现在简历或 JD 中"""
+    """从题目正文和考察目标里找出「看起来像具体技术名」的词，然后检查这些词是否全部出现在简历或 JD 中"""
 
     #提取题目中的技术关键词
     specific_terms = _TECHNICAL_TERM.findall(
@@ -777,6 +798,54 @@ def _specific_terms_are_supported(
 
     #检查所有技术词是否在JD+个人简历出现
     return all(term.casefold() in normalized_context for term in specific_terms)
+
+
+def _fit_time_budget(
+    selected: list[InterviewQuestion],
+    ranked_pool: list[InterviewQuestion],
+    max_total_seconds: int,
+) -> list[InterviewQuestion]:
+    """确保选题总时长不超过预算。超出时用备选池中较短的题替换最长题。
+
+    不会改变题目数量，仅在总时长超限时进行贪婪替换。
+    如果备选池中没有足够短的题来替换，则允许适度超限（已尽力）。
+    """
+    total = sum(q.estimated_seconds for q in selected)
+    if total <= max_total_seconds or len(selected) >= len(ranked_pool):
+        return selected
+
+    selected_ids = {q.id for q in selected}
+    remaining = [q for q in ranked_pool if q.id not in selected_ids]
+    if not remaining:
+        return selected
+
+    # 备选题按预估时长升序排列
+    remaining_sorted = sorted(remaining, key=lambda q: q.estimated_seconds)
+    # 已选题索引按预估时长降序排列（最长优先替换）
+    selected_indices = sorted(
+        range(len(selected)),
+        key=lambda i: selected[i].estimated_seconds,
+        reverse=True,
+    )
+
+    overflow = total - max_total_seconds
+    used_alt_ids: set[str] = set()
+
+    for idx in selected_indices:
+        if overflow <= 0:
+            break
+        long_q = selected[idx]
+        for alt in remaining_sorted:
+            if alt.id in used_alt_ids:
+                continue
+            saving = long_q.estimated_seconds - alt.estimated_seconds
+            if saving > 0:
+                selected[idx] = alt
+                used_alt_ids.add(alt.id)
+                overflow -= saving
+                break
+
+    return selected
 
 
 __all__ = [

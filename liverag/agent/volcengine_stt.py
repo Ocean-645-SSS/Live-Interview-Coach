@@ -125,20 +125,21 @@ class AuditedSpeechStream(bigmodel_stt.SpeechStream):
             extra={"stream_id": self.stream_id, "sequence": sequence},
         )
 
-    # 火山 ASR 会话在 15-20 秒无音频输入后会超时（45000081）。
+    # 火山 ASR 会话在约 10 秒无音频输入后会超时（45000081）。
     # 面试场景中，TTS 播放和评估阶段可能持续 30+ 秒，导致 ASR 会话
     # 在下一个回答窗口开始时已失效。
-    _KEEP_ALIVE_SECONDS = 10.0  # 每 10 秒发送一次静默帧保活
+    # 保活间隔必须远小于 10 秒，否则与火山超时窗口产生竞态条件。
+    _KEEP_ALIVE_SECONDS = 5.0  # 每 5 秒发送一次静默帧保活
 
     async def _send_loop(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         """对齐官方 ``send_task`` 的 has_ended 信令 + 诊断日志。
 
         关键改动：
-        1. 初始 Full Client Request 延迟到第一帧音频到达后才发送。
-           避免面试场景下 TTS 播放期间（麦克风输入关闭）火山服务端会话
-           因长时间无音频而超时（45000081）。
-        2. 静默保活：当 ASR 会话激活后，若超过 10 秒无音频输入，
-           发送 100ms 的静默 PCM 帧以防止火山会话超时。
+        1. 立即发送 Full Client Request 建立 ASR 会话，然后通过静默保活
+           帧维持会话生命。面试场景下 TTS 播放期间无用户音频输入，保活帧
+           防止火山服务端 45000081 超时。
+        2. 保活从会话建立后立即开始，不再依赖"第一帧音频到达"信号。
+           这避免了 TTS → 回答窗口期间 ASR 会话已经超时的竞态条件。
         """
         reason = "input_channel_closed"
         failure: BaseException | None = None
@@ -154,15 +155,41 @@ class AuditedSpeechStream(bigmodel_stt.SpeechStream):
                 samples_per_channel=self._opts.sample_rate // 10,
             )
 
-            # 预计算静默保活帧（100ms 的 16-bit PCM 静音）
-            _silence_samples = self._opts.sample_rate // 10  # 100ms
+            # 预计算静默保活帧（500ms 的 16-bit PCM 静音）
+            _silence_samples = self._opts.sample_rate // 2  # 500ms
             _silence_pcm = (
                 b"\x00" * (_silence_samples * self._opts.num_channels * 2)
             )
 
-            # ── 音频帧循环（延迟初始化握手 + 静默保活 + 自愈重连） ──
-            initial_sent = False
+            # ── 立即发送初始请求建立 ASR 会话 ────────────────
             sequence = 1
+            initial = self._opts.get_ws_query_params(uid=self._request_id)
+            initial = inject_hot_words_into_initial_request(
+                initial, self._hot_words_json
+            )
+            logger.info(
+                "volcengine.stt.initial_content",
+                extra={
+                    "stream_id": self.stream_id,
+                    "initial_hex": bytes(initial).hex(),
+                    "initial_text": bytes(initial).decode(
+                        "utf-8", errors="replace"
+                    ),
+                },
+            )
+            await self._send_packet(
+                ws,
+                initial,
+                sequence=sequence,
+                payload_bytes=len(initial),
+                is_last=False,
+            )
+            logger.info(
+                "volcengine.stt.initial_sent",
+                extra={"stream_id": self.stream_id},
+            )
+
+            # ── 音频帧循环（静默保活 + 自愈重连） ─────────────
             ait = self._input_ch.__aiter__()
             while True:
                 try:
@@ -172,10 +199,6 @@ class AuditedSpeechStream(bigmodel_stt.SpeechStream):
                     )
                 except asyncio.TimeoutError:
                     # 长时间无音频 → 发送静默帧保活
-                    if not initial_sent:
-                        # ASR 会话未激活，无需保活
-                        self._maybe_auto_reconnect()
-                        continue
                     logger.info(
                         "volcengine.stt.keep_alive_sending",
                         extra={
@@ -211,36 +234,6 @@ class AuditedSpeechStream(bigmodel_stt.SpeechStream):
                 except StopAsyncIteration:
                     # 通道关闭，正常退出
                     break
-                if not initial_sent:
-                    initial_sent = True
-                    # 等第一帧音频到达后才发送 Full Client Request，
-                    # 确保火山会话创建与音频流开始时间对齐
-                    initial = self._opts.get_ws_query_params(uid=self._request_id)
-                    # 注入热词（火山 ASR corpus.context）
-                    initial = inject_hot_words_into_initial_request(
-                        initial, self._hot_words_json
-                    )
-                    logger.info(
-                        "volcengine.stt.initial_content",
-                        extra={
-                            "stream_id": self.stream_id,
-                            "initial_hex": bytes(initial).hex(),
-                            "initial_text": bytes(initial).decode(
-                                "utf-8", errors="replace"
-                            ),
-                        },
-                    )
-                    await self._send_packet(
-                        ws,
-                        initial,
-                        sequence=1,
-                        payload_bytes=len(initial),
-                        is_last=False,
-                    )
-                    logger.info(
-                        "volcengine.stt.initial_sent_after_first_audio",
-                        extra={"stream_id": self.stream_id},
-                    )
                 is_flush = isinstance(data, self._FlushSentinel)
                 logger.info(
                     "volcengine.stt.flush_check",
@@ -465,6 +458,17 @@ class AuditedSpeechStream(bigmodel_stt.SpeechStream):
                     "payload_msg": parsed.get("payload_msg"),
                 },
             )
+            # 会话级错误（45000081 = session timeout）意味着火山 ASR 会话已死，
+            # 继续发送音频也不会有识别结果。触发重连以重建可用的 ASR 会话。
+            if code in {45000081}:
+                logger.warning(
+                    "volcengine.stt.error_response_reconnect",
+                    extra={
+                        "stream_id": self.stream_id,
+                        "code": code,
+                    },
+                )
+                self.trigger_reconnect()
             return
 
         # ── 结果诊断日志（在官方处理之前记录） ──────────────────

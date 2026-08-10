@@ -36,10 +36,10 @@ from liverag.interview.skill_progress.taxonomy import SkillTaxonomy
 from liverag.interview.state_machine import InterviewEventType
 
 
-def _question() -> InterviewQuestion:
+def _question(*, question_id: str = "question-1", order: int = 1) -> InterviewQuestion:
     return InterviewQuestion(
-        id="question-1",
-        order=1,
+        id=question_id,
+        order=order,
         type=QuestionType.TECHNICAL_KNOWLEDGE,
         source=QuestionSource.QUESTION_BANK,
         difficulty=InterviewDifficulty.INTERMEDIATE,
@@ -95,7 +95,7 @@ def interview_service(tmp_path: Path) -> Iterator[tuple[InterviewService, str, s
         evaluator=AnswerEvaluator(repository, _EvaluationProvider()),
         skill_progress_service=skill_progress_service,
     )
-    config = InterviewConfig(question_count=1)
+    config = InterviewConfig(question_count=2)
     interview = service.create_interview(title="服务测试", config=config)
     repository.save_interview_plan(
         interview_id=interview.id,
@@ -104,7 +104,10 @@ def interview_service(tmp_path: Path) -> Iterator[tuple[InterviewService, str, s
             title="服务测试计划",
             introduction="欢迎。",
             config=config,
-            questions=[_question()],
+            questions=[
+                _question(),
+                _question(question_id="question-2", order=2),
+            ],
             closing_message="结束。",
         ),
         expected_version=interview.version,
@@ -187,6 +190,53 @@ async def test_evaluation_retry_reuses_saved_result_and_transition(interview_ser
     assert progress[0].attempts == 1
 
 
+def test_failed_evaluation_recovery_advances_once_to_next_question(interview_service):
+    service, session_id, attempt_id = interview_service
+    answer = _receive_answer(service, session_id, attempt_id)
+
+    first = service.recover_failed_evaluation(answer.id, reason="timeout")
+    retry = service.recover_failed_evaluation(answer.id, reason="timeout")
+
+    assert first.state is InterviewState.ASKING
+    assert first.current_question_id == "question-2"
+    assert retry == first
+    assert [item.event_type for item in service.list_events(session_id)][-2:] == [
+        InterviewEventType.NEXT_QUESTION.value,
+        InterviewEventType.QUESTION_ADVANCED.value,
+    ]
+
+
+def test_failed_evaluation_recovery_finishes_the_last_question(interview_service):
+    service, session_id, attempt_id = interview_service
+    first_answer = _receive_answer(service, session_id, attempt_id)
+    service.recover_failed_evaluation(first_answer.id, reason="provider_failed")
+    service.transition(
+        session_id=session_id,
+        event_id="event-question-2-asked",
+        event_type=InterviewEventType.QUESTION_ASKED,
+    )
+    now = utc_now_iso()
+    second_answer = service.receive_answer(
+        AnswerReceivedCommand(
+            session_id=session_id,
+            attempt_id=attempt_id,
+            event_id="event-answer-2",
+            transcript="second answer",
+            answer_number=1,
+            started_at=now,
+            ended_at=now,
+        )
+    ).answer
+
+    recovered = service.recover_failed_evaluation(
+        second_answer.id,
+        reason="provider_failed",
+    )
+
+    assert recovered.state is InterviewState.COMPLETING
+    assert service.list_events(session_id)[-1].event_type == InterviewEventType.FINISH.value
+
+
 async def test_skill_progress_failure_does_not_block_evaluation_or_transition(
     interview_service,
 ):
@@ -266,6 +316,21 @@ async def test_interview_agent_controller_connects_voice_to_service(interview_se
     assert listening_session.state is InterviewState.LISTENING
     assert answer_result.next_speech.kind is InterviewSpeechKind.FOLLOW_UP
     assert answer_result.evaluation_result.session.state is InterviewState.FOLLOW_UP
+
+
+async def test_interview_agent_controller_resumes_pending_evaluation(interview_service):
+    service, session_id, attempt_id = interview_service
+    answer = _receive_answer(service, session_id, attempt_id)
+
+    resumed = await InterviewAgentController(
+        service=service,
+        session_id=session_id,
+        attempt_id=attempt_id,
+    ).resume_pending_evaluation()
+
+    assert resumed.next_speech.kind is InterviewSpeechKind.FOLLOW_UP
+    assert service.get_session(session_id).state is InterviewState.FOLLOW_UP
+    assert len(service.list_answers(session_id)) == 1
 
 
 async def test_interview_agent_controller_rejects_empty_answer(interview_service):

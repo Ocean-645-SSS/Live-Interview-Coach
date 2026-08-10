@@ -80,6 +80,8 @@ class _FakeInterviewController:
         self.state = state
         self.received: list[str] = []
         self.submitted: list[tuple[str, dict[str, object]]] = []
+        self.resume_calls = 0
+        self.recovery_reasons: list[str] = []
 
     def get_session(self) -> SimpleNamespace:
         return SimpleNamespace(
@@ -101,8 +103,31 @@ class _FakeInterviewController:
             transition=SimpleNamespace(session=self.get_session()),
         )
 
-    async def evaluate_submitted_answer(self, _received: object) -> None:
-        raise RuntimeError("evaluation intentionally omitted in worker unit test")
+    async def evaluate_submitted_answer(self, _received: object) -> SimpleNamespace:
+        self.state = InterviewState.ASKING
+        return SimpleNamespace(
+            next_speech=InterviewSpeech(InterviewSpeechKind.QUESTION, "next question")
+        )
+
+    async def resume_pending_evaluation(self) -> SimpleNamespace:
+        self.resume_calls += 1
+        self.state = InterviewState.ASKING
+        return SimpleNamespace(
+            next_speech=InterviewSpeech(InterviewSpeechKind.QUESTION, "next question")
+        )
+
+    def recover_pending_evaluation(self, *, reason: str) -> InterviewSpeech:
+        self.recovery_reasons.append(reason)
+        self.state = InterviewState.ASKING
+        return InterviewSpeech(InterviewSpeechKind.QUESTION, "recovered question")
+
+    def prompt_spoken(self, _kind: object, **_kwargs: object) -> SimpleNamespace:
+        self.state = InterviewState.LISTENING
+        return self.get_session()
+
+    @staticmethod
+    def answer_timeout_seconds() -> int:
+        return 90
 
 
 class _FakeEmitter:
@@ -141,13 +166,19 @@ class _FakeSession(_FakeEmitter):
 def _build_agent(controller: _FakeInterviewController) -> LiveKitInterviewAgent:
     readiness = InterviewAudioReadiness()
     readiness.update(**dict.fromkeys(readiness.missing_conditions(), True))
-    return LiveKitInterviewAgent(
+    agent = LiveKitInterviewAgent(
         controller,  # type: ignore[arg-type]
         session_id="session-1",
         attempt_id="attempt-1",
         room_name="room-1",
         audio_readiness=readiness,
     )
+
+    async def no_play(_speech: object) -> None:
+        return None
+
+    agent._play = no_play  # type: ignore[method-assign]
+    return agent
 
 
 def test_interview_diagnostics_registers_room_and_session_pipeline_events() -> None:
@@ -393,6 +424,51 @@ async def test_manual_and_timeout_compete_but_persist_only_once() -> None:
 
     assert len(controller.submitted) == 1
     await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_failed_evaluation_recovers_to_the_next_question() -> None:
+    controller = _FakeInterviewController(InterviewState.EVALUATING)
+    agent = _build_agent(controller)
+    delivered: list[InterviewSpeech] = []
+
+    async def fail_evaluation(_received: object) -> None:
+        raise RuntimeError("provider unavailable")
+
+    async def capture_delivery(speech: InterviewSpeech) -> None:
+        delivered.append(speech)
+
+    controller.evaluate_submitted_answer = fail_evaluation  # type: ignore[method-assign]
+    agent._deliver_prompt_and_open_answer_window = capture_delivery  # type: ignore[method-assign]
+
+    await agent._continue_after_submission(SimpleNamespace(answer=SimpleNamespace(id="answer-1")))
+
+    assert controller.recovery_reasons == ["RuntimeError"]
+    assert delivered == [InterviewSpeech(InterviewSpeechKind.QUESTION, "recovered question")]
+
+
+@pytest.mark.asyncio
+async def test_pending_evaluation_timeout_recovers_after_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _FakeInterviewController(InterviewState.EVALUATING)
+    agent = _build_agent(controller)
+    delivered: list[InterviewSpeech] = []
+
+    async def hang_evaluation() -> None:
+        await asyncio.sleep(1)
+
+    async def capture_delivery(speech: InterviewSpeech) -> None:
+        delivered.append(speech)
+
+    controller.resume_pending_evaluation = hang_evaluation  # type: ignore[method-assign]
+    agent._deliver_prompt_and_open_answer_window = capture_delivery  # type: ignore[method-assign]
+    monkeypatch.setattr("liverag.agent.interview_assistant._EVALUATION_TIMEOUT_SECONDS", 0.001)
+
+    await agent.on_enter()
+
+    assert controller.recovery_reasons == ["timeout"]
+    assert delivered == [InterviewSpeech(InterviewSpeechKind.QUESTION, "recovered question")]
 
 
 @pytest.mark.asyncio

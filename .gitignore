@@ -17,15 +17,17 @@ tts-debug.txt
 *.egg-info
 .pytest_cache
 .pytest-runs/
+.pytest_tmp
 .ruff_cache
 .task9-*/
 .test-runtime-*/
 /LiveRAG-Fronted/
 data/
-interview-experience-spider-main/
 liverag.rar
 study_source.md
 run_analysis.bat
+.uv-cache-test
+.uv-python-cache
 
 # Claude Code
 .claude/settings.local.json

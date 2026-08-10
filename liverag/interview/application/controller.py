@@ -225,11 +225,52 @@ class InterviewAgentController:
     ) -> AnswerTurnResult:
         """Evaluate an answer that was already persisted by submit_answer."""
 
-        evaluation_result = await self._service.evaluate_answer(received.answer.id)
+        return await self._evaluate_answer(received.answer.id)
+
+    async def resume_pending_evaluation(self) -> AnswerTurnResult:
+        """Continue the persisted answer left in EVALUATING after a reconnect."""
+
+        return await self._evaluate_answer(self._pending_evaluation_answer_id())
+
+    def recover_pending_evaluation(self, *, reason: str) -> InterviewSpeech:
+        """Advance a failed pending evaluation and return the next playable speech."""
+
+        session = self._service.recover_failed_evaluation(
+            self._pending_evaluation_answer_id(),
+            reason=reason,
+        )
+        if session.state is InterviewState.ASKING:
+            return InterviewSpeech(
+                InterviewSpeechKind.QUESTION,
+                self._question_text(session),
+            )
+        if session.state is InterviewState.COMPLETING:
+            return InterviewSpeech(
+                InterviewSpeechKind.CLOSING,
+                self._get_plan().closing_message,
+            )
+        raise ValueError(f"评价恢复后出现了无法播放的状态：{session.state.value}")
+
+    async def _evaluate_answer(self, answer_id: str) -> AnswerTurnResult:
+        evaluation_result = await self._service.evaluate_answer(answer_id)
         return AnswerTurnResult(
             evaluation_result=evaluation_result,
             next_speech=self._next_speech(evaluation_result),
         )
+
+    def _pending_evaluation_answer_id(self) -> str:
+        session = self._service.repository.get_session(self._session_id)
+        if session.state is not InterviewState.EVALUATING:
+            raise ValueError(f"当前状态不能恢复评价：{session.state.value}")
+        if session.current_question_id is None:
+            raise ValueError("评价中的 Session 缺少当前题目")
+        answers = self._service.repository.list_answers(
+            session_id=self._session_id,
+            question_id=session.current_question_id,
+        )
+        if not answers:
+            raise ValueError("评价中的 Session 找不到待处理回答")
+        return answers[-1].id
 
     def _next_speech(self, result: EvaluationDecisionResult) -> InterviewSpeech:
         """把评价后的 Session 状态转换成 LiveKit 下一句要说的话。"""

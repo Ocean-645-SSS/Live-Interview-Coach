@@ -121,6 +121,7 @@ class InterviewPlanner:
                 relevance_text="\n".join(relevance_parts) or None,
                 explicitly_requested_topics=config.topic_weights,
                 selection_seed=plan_id,
+                max_total_seconds=config.duration_minutes * 60,
             )
             #取出training推荐的题目
             questions = list(selection.questions)
@@ -154,6 +155,7 @@ class InterviewPlanner:
                     job_profile.required_skills if job_profile is not None else ()
                 ),
                 selection_seed=plan_id,
+                max_total_seconds=config.duration_minutes * 60,
             )
 
         # ── LLM 个性化改写 ──

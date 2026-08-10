@@ -142,6 +142,7 @@ async def _run_worker() -> None:
     redis_conn = redis.from_url(
         settings.redis.url,
         decode_responses=True,
+        socket_timeout=None,  # 禁用 socket 层超时，BLPOP 自带 timeout 参数
     )
     try:
         #连接成功

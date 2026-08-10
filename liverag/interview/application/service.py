@@ -25,7 +25,10 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from liverag.interview.intelligence.service import IntelligenceService
 
 from liverag.interview.application.evaluator import AnswerEvaluator
 from liverag.interview.application.orchestrator import (
@@ -133,6 +136,7 @@ class InterviewService:
         question_bank: QuestionBank | None = None,
         profile_service: InterviewProfileService | None = None,
         skill_progress_service: SkillProgressService | None = None,
+        intelligence_service: IntelligenceService | None = None,
     ):
         self.repository = repository
         self.evaluator = evaluator
@@ -142,6 +146,7 @@ class InterviewService:
         self.question_bank = question_bank
         self.profile_service = profile_service
         self.skill_progress_service = skill_progress_service
+        self.intelligence_service = intelligence_service
 
     def create_interview(self, *, title: str, config: InterviewConfig) -> InterviewRecord:
         return self.repository.create_interview(title=title, config=config)
@@ -203,12 +208,37 @@ class InterviewService:
             if self.skill_progress_service is not None
             else []
         )
+
+        # 公司面经情报（可降级：没有情报不影响面试创建）
+        company_intel = None
+        if self.intelligence_service is not None and config.target_company:
+            from liverag.interview.intelligence.provider import (
+                InterviewIntelligenceQuery,
+            )
+
+            query = InterviewIntelligenceQuery(
+                company=config.target_company,
+                role=config.target_role or "",
+            )
+            try:
+                enrichment = await self.intelligence_service.get_company_profile(query)
+                company_intel = enrichment.profile
+            except Exception:
+                logger.exception(
+                    "interview.intelligence.fetch_failed",
+                    extra={
+                        "company": config.target_company,
+                        "role": config.target_role,
+                    },
+                )
+
         #生成面试顶层计划
         plan = await InterviewPlanner(question_bank).build(
             title=title,
             config=config,
             candidate_profile=candidate_profile,
             job_profile=job_profile,
+            company_intel=company_intel,
             candidate_profile_id=candidate_record.id,
             skill_progress=skill_progress,
         )
@@ -469,6 +499,53 @@ class InterviewService:
             session=self.repository.get_session(answer.session_id),
             transitions=tuple(transitions),
         )
+
+    def recover_failed_evaluation(
+        self,
+        answer_id: str,
+        *,
+        reason: str,
+    ) -> InterviewSessionRecord:
+        """在评价不可用时释放停留在 EVALUATING 的会话。
+
+        回答已经持久化，但不会伪造一份模型评价；恢复流程直接跳到下一题，
+        最后一题则进入正常的收尾流程。确定性事件 ID 让重连或重试安全复用。
+        """
+
+        answer = self.repository.get_answer(answer_id)
+        session = self.repository.get_session(answer.session_id)
+        if session.state is not InterviewState.EVALUATING:
+            return session
+
+        plan = self.repository.get_interview_plan(session.interview_id)
+        if plan is None:
+            raise ValueError("回答对应的面试计划不存在")
+
+        #不是最后一题
+        if session.current_question_index + 1 < len(plan.questions):
+            event_types = (
+                InterviewEventType.NEXT_QUESTION,
+                InterviewEventType.QUESTION_ADVANCED,
+            )
+        #是最后一题
+        else:
+            event_types = (InterviewEventType.FINISH,)
+
+        for event_type in event_types:
+            event_id = self._decision_event_id(answer.id, event_type)
+            if self.repository.event_exists(event_id):
+                continue
+            self.transition(
+                session_id=answer.session_id,
+                event_id=event_id,
+                event_type=event_type,
+                payload={
+                    "answer_id": answer.id,
+                    "evaluation_recovery_reason": reason,
+                },
+            )
+
+        return self.repository.get_session(answer.session_id)
 
     def _apply_evaluation_decision(
         self,

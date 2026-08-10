@@ -15,6 +15,7 @@ import json
 import logging
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from livekit import rtc
@@ -38,6 +39,8 @@ from liverag.interview.persistence.db import create_database_engine, create_sess
 from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
 from liverag.interview.records import AttemptState
 from liverag.interview.schemas import InterviewState
+from liverag.interview.skill_progress.service import SkillProgressService
+from liverag.interview.skill_progress.taxonomy import SkillTaxonomy
 
 logger = logging.getLogger("liverag.interview.worker")
 server = AgentServer()  # 语音agent的任务服务器
@@ -547,7 +550,21 @@ def build_interview_service() -> InterviewService:
 
     #Interview Service层
     evaluator = AnswerEvaluator(repository, provider)
-    return InterviewService(repository, evaluator=evaluator)
+    skill_progress_service = SkillProgressService(
+        repository,
+        SkillTaxonomy.from_file(
+            Path(__file__).resolve().parent
+            / "interview"
+            / "skill_progress"
+            / "data"
+            / "skill_taxonomy.v1.json"
+        ),
+    )
+    return InterviewService(
+        repository,
+        evaluator=evaluator,
+        skill_progress_service=skill_progress_service,
+    )
 
 
 @server.rtc_session(agent_name="interview-agent")

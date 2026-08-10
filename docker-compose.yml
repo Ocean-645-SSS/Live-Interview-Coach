@@ -69,6 +69,7 @@ services:
       <<: *liverag-env
       LIVERAG_API_HOST: 0.0.0.0
       LIVERAG_API_PORT: 9821
+      INTERVIEW_REDIS_URL: redis://redis:6379/0
     command: ["liverag-api"]
     ports:
       - "9821:9821"

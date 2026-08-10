@@ -60,6 +60,11 @@ from liverag.interview.application.evaluator import (
 )
 from liverag.interview.application.profile_service import InterviewProfileService
 from liverag.interview.application.service import InterviewService
+from liverag.interview.intelligence.nowcoder_provider import NowcoderSpiderProvider
+from liverag.interview.intelligence.service import (
+    IntelligenceService,
+    IntelligenceServiceConfig,
+)
 from liverag.interview.persistence.db import create_database_engine, create_session_factory
 from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
 from liverag.interview.question_bank.catalog import QuestionBank
@@ -164,6 +169,33 @@ interview_skill_progress_service = SkillProgressService(
     ),
 )
 
+# Intelligence Service：公司面经情报（Redis 可选，不可用时降级）
+try:
+    import redis.asyncio as _intel_redis
+
+    _intel_redis_conn = _intel_redis.from_url(
+        settings.redis.url,
+        decode_responses=True,
+    )
+    intelligence_service = IntelligenceService(
+        redis_client=_intel_redis_conn,
+        provider=NowcoderSpiderProvider(
+            timeout=settings.interview_intelligence.provider_timeout_seconds,
+        ),
+        config=IntelligenceServiceConfig(
+            enabled=settings.interview_intelligence.enabled,
+            fresh_ttl_seconds=settings.interview_intelligence.cache_fresh_seconds,
+            stale_ttl_seconds=settings.interview_intelligence.cache_stale_seconds,
+        ),
+    )
+    logger.info("Intelligence Service 已初始化")
+except ImportError:
+    logger.info("redis 库未安装，Intelligence Service 不可用")
+    intelligence_service = None
+except Exception:
+    logger.exception("Intelligence Service 初始化失败，继续启动")
+    intelligence_service = None
+
 #注册interview的service层
 interview_service = InterviewService(
     interview_repository,
@@ -171,6 +203,7 @@ interview_service = InterviewService(
     question_bank=interview_question_bank,
     profile_service=interview_profile_service,
     skill_progress_service=interview_skill_progress_service,
+    intelligence_service=intelligence_service,
 )
 #把InterviewService注册给Interview API路由
 configure_interview_service(interview_service)

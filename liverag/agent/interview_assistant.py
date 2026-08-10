@@ -21,6 +21,8 @@ from liverag.interview.schemas import InterviewState
 
 logger = logging.getLogger("liverag.interview.agent")
 
+_EVALUATION_TIMEOUT_SECONDS = 35.0
+
 
 class InterviewAudioNotReadyError(RuntimeError):
     def __init__(self, missing_conditions: tuple[str, ...]) -> None:
@@ -194,6 +196,9 @@ class LiveKitInterviewAgent(Agent):
             await self._wait_for_audio_ready()
             # 获得旧状态
             state_before = self._controller.get_session().state
+            if state_before is InterviewState.EVALUATING:
+                await self._resume_pending_evaluation()
+                return
             # 决定进入房间后说的第一句话：开场白/当前题目/追问/结束语
             first_speech = self._controller.start()
 
@@ -484,15 +489,54 @@ class LiveKitInterviewAgent(Agent):
 
     async def _continue_after_submission(self, received: AnswerReceivedResult) -> None:
         try:
-            result = await self._controller.evaluate_submitted_answer(received)
-            speech = result.next_speech
-            if speech.kind is InterviewSpeechKind.CLOSING:
-                await self._play(speech)
-                self._controller.complete()
-            else:
-                await self._deliver_prompt_and_open_answer_window(speech)
-        except Exception:
+            result = await asyncio.wait_for(
+                self._controller.evaluate_submitted_answer(received),
+                timeout=_EVALUATION_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.exception(
+                "interview.answer_evaluation.timed_out",
+                extra=self._log_context(timeout_seconds=_EVALUATION_TIMEOUT_SECONDS),
+            )
+            await self._recover_failed_evaluation(reason="timeout")
+        except Exception as exc:
             logger.exception("interview.answer_evaluation.failed", extra=self._log_context())
+            await self._recover_failed_evaluation(reason=type(exc).__name__)
+        else:
+            await self._continue_after_evaluation(result.next_speech)
+
+    async def _resume_pending_evaluation(self) -> None:
+        try:
+            result = await asyncio.wait_for(
+                self._controller.resume_pending_evaluation(),
+                timeout=_EVALUATION_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.exception(
+                "interview.pending_evaluation.timed_out",
+                extra=self._log_context(timeout_seconds=_EVALUATION_TIMEOUT_SECONDS),
+            )
+            await self._recover_failed_evaluation(reason="timeout")
+        except Exception as exc:
+            logger.exception("interview.pending_evaluation.failed", extra=self._log_context())
+            await self._recover_failed_evaluation(reason=type(exc).__name__)
+        else:
+            await self._continue_after_evaluation(result.next_speech)
+
+    async def _recover_failed_evaluation(self, *, reason: str) -> None:
+        speech = self._controller.recover_pending_evaluation(reason=reason)
+        logger.warning(
+            "interview.evaluation.recovered",
+            extra=self._log_context(recovery_reason=reason),
+        )
+        await self._continue_after_evaluation(speech)
+
+    async def _continue_after_evaluation(self, speech: InterviewSpeech) -> None:
+        if speech.kind is InterviewSpeechKind.CLOSING:
+            await self._play(speech)
+            self._controller.complete()
+        else:
+            await self._deliver_prompt_and_open_answer_window(speech)
 
     async def _submit_answer_after_timeout(self, buffer: ActiveAnswerBuffer) -> None:
         delay = max(0.0, (buffer.deadline_at - datetime.now(timezone.utc)).total_seconds())
