@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -20,7 +22,11 @@ from liverag.interview.schemas import (
     InterviewQuestion,
     JobProfile,
     QuestionType,
+    SkillProgress,
+    TrainingAdjustmentAudit,
 )
+from liverag.interview.skill_progress.curriculum import TrainingCurriculum
+from liverag.interview.skill_progress.taxonomy import SkillTaxonomy
 
 
 class InterviewPlanner:
@@ -32,10 +38,17 @@ class InterviewPlanner:
         *,
         llm_client: AsyncOpenAI | None = None,
         llm_model: str = "",
+        taxonomy: SkillTaxonomy | None = None,
     ):
         self._question_bank = question_bank
         self._llm_client = llm_client
         self._llm_model = llm_model
+        self._taxonomy = taxonomy or SkillTaxonomy.from_file(
+            Path(__file__).resolve().parents[1]
+            / "skill_progress"
+            / "data"
+            / "skill_taxonomy.v1.json"
+        )
 
     async def build(
         self,
@@ -44,7 +57,9 @@ class InterviewPlanner:
         config: InterviewConfig,
         candidate_profile: CandidateProfile | None,  # 用户画像
         job_profile: JobProfile | None,  # 岗位画像
-        company_intel: CompanyInterviewProfile | None = None,
+        company_intel: CompanyInterviewProfile | None = None,   #牛客mcp提供的公司情报
+        candidate_profile_id: str | None = None,    #用户整体画像id
+        skill_progress: Sequence[SkillProgress] = (),   #用户长期画像
     ) -> InterviewPlan:
         """生成可直接交给实时 Agent 执行的计划。
 
@@ -89,15 +104,57 @@ class InterviewPlanner:
             relevance_parts.extend(company_intel.frequent_topics)
 
         # ── 选题（程序负责：section / 题量 / 难度）──
-        questions = self._question_bank.select_questions(
-            effective_config,
-            relevance_text="\n".join(relevance_parts) or None,
-            explicitly_requested_topics=config.topic_weights,
-            required_relevance_topics=(
-                job_profile.required_skills if job_profile is not None else ()
-            ),
-            selection_seed=plan_id,
-        )
+        training_adjustment = None
+        #skill progress配置了
+        if skill_progress:
+            #依据固定阈值把画像划分为弱项、证据不足和已掌握技能，生成题目选择输入
+            training = TrainingCurriculum(self._taxonomy).build(
+                question_count=config.question_count,
+                progress=skill_progress,
+                job_profile=job_profile,
+            )
+            #根据硬约束和软约束选择出的题目
+            selection = self._question_bank.select_training_questions(
+                effective_config,
+                training=training,
+                taxonomy=self._taxonomy,
+                relevance_text="\n".join(relevance_parts) or None,
+                explicitly_requested_topics=config.topic_weights,
+                selection_seed=plan_id,
+            )
+            #取出training推荐的题目
+            questions = list(selection.questions)
+            #写入审计记录
+            training_adjustment = TrainingAdjustmentAudit(
+                taxonomy_version=self._taxonomy.version,
+                source_progress_updated_at=max(
+                    item.updated_at for item in skill_progress
+                ),
+                weak_retest_skills=list(training.weak_skill_keys),
+                evidence_skills=list(training.evidence_skill_keys),
+                mastery_audit_skills=list(training.mastery_skill_keys),
+                selection_reasons=selection.selection_intents,
+                job_relevant_by_question=selection.job_relevant_by_question,
+                intent_targets=selection.intent_targets,
+                intent_selected=selection.intent_selected,
+                job_core_required=selection.job_core_required,
+                job_core_available=selection.job_core_available,
+                job_core_selected=selection.job_core_selected,
+                degraded=bool(selection.degradation_reasons),
+                degradation_reasons=list(selection.degradation_reasons),
+            )
+
+        #不使用skill progress，直接从题库选题
+        else:
+            questions = self._question_bank.select_questions(
+                effective_config,
+                relevance_text="\n".join(relevance_parts) or None,
+                explicitly_requested_topics=config.topic_weights,
+                required_relevance_topics=(
+                    job_profile.required_skills if job_profile is not None else ()
+                ),
+                selection_seed=plan_id,
+            )
 
         # ── LLM 个性化改写 ──
         if self._llm_client is not None and candidate_profile is not None:
@@ -131,7 +188,9 @@ class InterviewPlanner:
             closing_message="本次模拟面试已经结束，报告正在生成。",
             plan_version=self._question_bank.version,
             candidate_profile=candidate_profile,
+            candidate_profile_id=candidate_profile_id,
             job_profile=job_profile,
+            training_adjustment=training_adjustment,
         )
 
     # ── LLM 个性化改写 ──────────────────────────────────────────
@@ -148,7 +207,7 @@ class InterviewPlanner:
 
         # 降级防御：没传入llm_api，只用profile个性化
         if self._llm_client is None:
-            return questions  
+            return questions
 
         # 输入：只给 LLM 需要的字段，减少 token 消耗
         questions_input = [

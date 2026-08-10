@@ -59,12 +59,13 @@ from liverag.interview.application.profile_service import InterviewProfileServic
 from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.application.service import InterviewService
 from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
+from liverag.interview.skill_progress.service import SkillProgressService
+from liverag.interview.skill_progress.taxonomy import SkillTaxonomy
 from liverag.context.overview import KnowledgeOverviewGenerator
 from liverag.runtime.paths import build_runtime_paths
 from liverag.rag.metadata_store import MetadataStore
 from liverag.rag.schemas import QueryRequest,TextDocumentRequest
 from liverag.rag.service import wait_for_rag_ready
-
 
 logger = logging.getLogger("liverag.api.server")
 
@@ -149,6 +150,16 @@ interview_question_bank = QuestionBank.from_file(
 interview_profile_service = InterviewProfileService(
     RagGatewayProfileSource(rag_gateway),
 )
+interview_skill_progress_service = SkillProgressService(
+    interview_repository,
+    SkillTaxonomy.from_file(
+        Path(__file__).resolve().parents[1]
+        / "interview"
+        / "skill_progress"
+        / "data"
+        / "skill_taxonomy.v1.json"
+    ),
+)
 
 #注册interview的service层
 interview_service = InterviewService(
@@ -156,6 +167,7 @@ interview_service = InterviewService(
     evaluator=interview_evaluator,
     question_bank=interview_question_bank,
     profile_service=interview_profile_service,
+    skill_progress_service=interview_skill_progress_service,
 )
 #把InterviewService注册给Interview API路由
 configure_interview_service(interview_service)

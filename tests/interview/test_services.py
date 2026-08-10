@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -13,7 +14,7 @@ from liverag.interview.persistence.db import create_session_factory, create_sqli
 from liverag.interview.application.evaluator import AnswerEvaluator
 from liverag.interview.persistence.models import Base
 from liverag.interview.application.orchestrator import AnswerReceivedCommand
-from liverag.interview.records import InterviewAnswerRecord, utc_now_iso
+from liverag.interview.records import InterviewAnswerRecord, ReportState, utc_now_iso
 from liverag.interview.schemas import (
     AnswerEvaluation,
     DimensionScores,
@@ -31,6 +32,8 @@ from liverag.interview.schemas import (
 from liverag.interview.application.service import InterviewService
 from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
 from liverag.interview.state_machine import InterviewEventType
+from liverag.interview.skill_progress.service import SkillProgressService
+from liverag.interview.skill_progress.taxonomy import SkillTaxonomy
 
 
 def _question() -> InterviewQuestion:
@@ -41,6 +44,7 @@ def _question() -> InterviewQuestion:
         source=QuestionSource.QUESTION_BANK,
         difficulty=InterviewDifficulty.INTERMEDIATE,
         category="RAG",
+        subcategory="Embedding",
         topics=["检索"],
         question_text="RAG 的流程是什么？",
         objective="检查对 RAG 的理解",
@@ -80,9 +84,16 @@ def interview_service(tmp_path: Path) -> Iterator[tuple[InterviewService, str, s
     engine = create_sqlite_engine(tmp_path / "services.db")
     Base.metadata.create_all(engine)
     repository = SQLAlchemyInterviewRepository(create_session_factory(engine))
+    skill_progress_service = SkillProgressService(
+        repository,
+        SkillTaxonomy.from_file(
+            Path("liverag/interview/skill_progress/data/skill_taxonomy.v1.json")
+        ),
+    )
     service = InterviewService(
         repository,
         evaluator=AnswerEvaluator(repository, _EvaluationProvider()),
+        skill_progress_service=skill_progress_service,
     )
     config = InterviewConfig(question_count=1)
     interview = service.create_interview(title="服务测试", config=config)
@@ -168,6 +179,51 @@ async def test_evaluation_retry_reuses_saved_result_and_transition(interview_ser
     assert second.session.state is InterviewState.FOLLOW_UP
     assert second.transitions == ()
     assert len(service.repository.list_events(session_id=session_id)) == 5
+    interview_id = service.repository.get_session(session_id).interview_id
+    interview = service.repository.get_interview(interview_id)
+    progress = service.skill_progress_service.list_progress(
+        interview.candidate_profile_id
+    )
+    assert progress[0].attempts == 1
+
+
+async def test_skill_progress_failure_does_not_block_evaluation_or_transition(
+    interview_service,
+):
+    service, session_id, attempt_id = interview_service
+    answer = _receive_answer(service, session_id, attempt_id)
+    real_service = service.skill_progress_service
+    failing_service = MagicMock(wraps=real_service)
+    failing_service.apply_evaluation.side_effect = RuntimeError("progress unavailable")
+    service.skill_progress_service = failing_service
+
+    result = await service.evaluate_answer(answer.id)
+
+    assert service.repository.get_evaluation(answer.id) == result.evaluation
+    assert result.decision.event_type is InterviewEventType.FOLLOW_UP_REQUIRED
+    assert result.transitions
+    interview = service.repository.get_interview(
+        service.repository.get_session(session_id).interview_id
+    )
+    assert real_service.rebuild_candidate(interview.candidate_profile_id)
+
+
+async def test_report_remains_completed_when_skill_progress_rebuild_fails(
+    interview_service,
+):
+    service, session_id, attempt_id = interview_service
+    answer = _receive_answer(service, session_id, attempt_id)
+    await service.evaluate_answer(answer.id)
+    failing_service = MagicMock(wraps=service.skill_progress_service)
+    failing_service.rebuild_candidate.side_effect = RuntimeError("rebuild unavailable")
+    service.skill_progress_service = failing_service
+
+    report = service.generate_report(session_id)
+
+    assert report.state is ReportState.COMPLETED
+    saved_report = service.repository.get_report_by_session(session_id)
+    assert saved_report is not None
+    assert saved_report.state is ReportState.COMPLETED
 
 
 async def test_evaluator_rejects_provider_identity_drift(interview_service):

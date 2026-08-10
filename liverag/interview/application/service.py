@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -47,9 +48,16 @@ from liverag.interview.records import (
     generate_id,
 )
 from liverag.interview.application.report import InterviewReportBuilder
+from liverag.interview.application.skill_progress_reconciliation import (
+    reconcile_skill_progress,
+)
 from liverag.interview.persistence.repository import InterviewRepository, RecordNotFoundError
 from liverag.interview.schemas import AnswerEvaluation, InterviewConfig, InterviewPlan, InterviewState
 from liverag.interview.state_machine import InterviewEventType
+from liverag.interview.skill_progress.service import SkillProgressService
+
+
+logger = logging.getLogger("liverag.interview.application.service")
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +104,7 @@ class InterviewService:
         evaluator: AnswerEvaluator | None = None,
         question_bank: QuestionBank | None = None,
         profile_service: InterviewProfileService | None = None,
+        skill_progress_service: SkillProgressService | None = None,
     ):
         self.repository = repository
         self.evaluator = evaluator
@@ -104,6 +113,7 @@ class InterviewService:
         self.report_builder = InterviewReportBuilder(repository)
         self.question_bank = question_bank
         self.profile_service = profile_service
+        self.skill_progress_service = skill_progress_service
 
     def create_interview(self, *, title: str, config: InterviewConfig) -> InterviewRecord:
         return self.repository.create_interview(title=title, config=config)
@@ -124,6 +134,9 @@ class InterviewService:
         #用户画像+岗位画像
         candidate_profile = None
         job_profile = None
+        candidate_record = self.repository.ensure_candidate_profile(
+            kb_id=config.candidate_kb_id
+        )
 
         #开始生成画像
         if self.profile_service is not None:
@@ -145,12 +158,28 @@ class InterviewService:
                         config.candidate_kb_id
                     )
                 )
+
+        #候选人画像不为空
+        if candidate_profile is not None:
+            #把本次生成的candidate profile快照保存到数据库
+            candidate_record = self.repository.update_candidate_profile_snapshot(
+                candidate_profile_id=candidate_record.id,
+                profile=candidate_profile,
+            )
+        #列出候选人所有长期能力画像
+        skill_progress = (
+            self.skill_progress_service.list_progress(candidate_record.id)
+            if self.skill_progress_service is not None
+            else []
+        )
         #生成面试顶层计划
         plan = await InterviewPlanner(question_bank).build(
             title=title,
             config=config,
             candidate_profile=candidate_profile,
             job_profile=job_profile,
+            candidate_profile_id=candidate_record.id,
+            skill_progress=skill_progress,
         )
 
         #创建interview
@@ -329,6 +358,16 @@ class InterviewService:
             #生成评价
             evaluation = await self.evaluator.evaluate(answer_id)
 
+        if self.skill_progress_service is not None:
+            try:
+                #把这次已经持久化的回答评价，增量应用到候选人的长期能力画像中
+                self.skill_progress_service.apply_evaluation(answer_id)
+            except Exception:
+                logger.exception(
+                    "interview.skill_progress.apply_failed",
+                    extra={"answer_id": answer_id},
+                )
+
         #获取下一步行动
         decision = self.decide_after_evaluation(evaluation)
         #把评价转化为面试状态变化
@@ -430,6 +469,9 @@ class InterviewService:
             report = self.repository.create_report(session_id=session_id)
         #报告状态显示完成，直接返回
         elif report.state is ReportState.COMPLETED:
+            reconcile_skill_progress(
+                self.repository, self.skill_progress_service, session_id
+            )
             return report
 
         #标记开始生成报告->GENERATING（防止并发生成）
@@ -442,6 +484,10 @@ class InterviewService:
                 time.sleep(1.0)
                 refreshed = self.repository.get_report_by_session(session_id)
                 if refreshed is not None and refreshed.state is ReportState.COMPLETED:
+                    #报告完成后，从持久化评价重建候选人的长期技能画像
+                    reconcile_skill_progress(
+                        self.repository, self.skill_progress_service, session_id
+                    )
                     return refreshed
             raise RuntimeError(
                 f"等待报告生成超时：session {session_id} 的报告可能卡在 GENERATING 状态"
@@ -451,7 +497,7 @@ class InterviewService:
             #生成的报告内容
             content = self.report_builder.build(session_id)
             #更新报告状态为完成->COMPLETED
-            return self.repository.complete_report(report_id=report.id, content=content)
+            completed = self.repository.complete_report(report_id=report.id, content=content)
         except Exception as exc:
             #更新报告状态为失败->FAILED
             self.repository.fail_report(
@@ -459,6 +505,13 @@ class InterviewService:
                 error_message=str(exc) or type(exc).__name__,
             )
             raise
+
+        #报告完成后，从持久化评价重建候选人的长期技能画像
+        reconcile_skill_progress(
+            self.repository, self.skill_progress_service, session_id
+        )
+
+        return completed
 
 
 __all__ = ["EvaluationDecisionResult", "InterviewService", "PreparedInterviewResult"]

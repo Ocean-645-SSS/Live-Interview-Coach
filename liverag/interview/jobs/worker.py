@@ -28,6 +28,7 @@ from liverag.interview.persistence.repository import InterviewRepository
 from liverag.interview.records import JobStatus
 from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.agent.tool.rag_client import RagClient
+from liverag.interview.skill_progress.service import SkillProgressService
 
 logger = logging.getLogger("liverag.interview.jobs.worker")
 
@@ -47,6 +48,7 @@ class BackgroundWorker:
         rag_client: RagClient | None = None,
         interview_repo: InterviewRepository | None = None,
         intelligence_service: object | None = None,
+        skill_progress_service: SkillProgressService | None = None,
         poll_timeout: float = 5.0,  #轮询间隔
         task_timeout: float = 300.0,   #超时时间
         max_retries: int = 3,   #最大轮次
@@ -60,6 +62,7 @@ class BackgroundWorker:
         self._rag_client = rag_client
         self._intelligence_service = intelligence_service
         self._interview_repo = interview_repo
+        self._skill_progress_service = skill_progress_service
         self._poll_timeout = poll_timeout
         self._task_timeout = task_timeout
         self._max_retries = max_retries
@@ -211,6 +214,8 @@ class BackgroundWorker:
             handler_kwargs["interview_repo"] = self._interview_repo
         if self._intelligence_service is not None:
             handler_kwargs["intelligence_service"] = self._intelligence_service
+        if self._skill_progress_service is not None:
+            handler_kwargs["skill_progress_service"] = self._skill_progress_service
 
         try:
             result = await asyncio.wait_for(

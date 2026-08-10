@@ -23,10 +23,14 @@ from liverag.interview.application.profile_service import KnowledgeContextSource
 from liverag.interview.jobs.repository import JobRepository
 from liverag.interview.application.resume_parser import ResumeParser
 from liverag.interview.application.profile_service import InterviewProfileService
+from liverag.interview.skill_progress.service import SkillProgressService
 from liverag.interview.application.planner import InterviewPlanner, validate_plan_quality
 from liverag.interview.persistence.repository import ConcurrentUpdateError, InterviewRepository
 from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.application.report import InterviewReportBuilder
+from liverag.interview.application.skill_progress_reconciliation import (
+    reconcile_skill_progress,
+)
 from liverag.interview.records import ReportState
 from liverag.interview.schemas import CandidateFacts, InterviewConfig
 
@@ -300,6 +304,7 @@ async def interview_preparation_task(
     question_bank: QuestionBank,
     interview_repo: InterviewRepository | None = None,
     intelligence_service: IntelligenceService | None = None,
+    skill_progress_service: SkillProgressService | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """面试准备 Workflow：直接复用 ResumeParser、ProfileService、Planner 等 Service。
@@ -405,6 +410,16 @@ async def interview_preparation_task(
                     candidate_facts=candidate_facts,
                 )
                 candidate_profile = profile
+                if interview_repo is not None:
+                    #获得candidateprofile记录
+                    candidate_record = interview_repo.ensure_candidate_profile(
+                        kb_id=candidate_kb_id
+                    )
+                    #更新candidate profile快照
+                    interview_repo.update_candidate_profile_snapshot(
+                        candidate_profile_id=candidate_record.id,
+                        profile=profile,
+                    )
                 completed_steps.append(step_name)
                 stage_results[step_name.lower()] = {
                     "status": "completed",
@@ -515,12 +530,27 @@ async def interview_preparation_task(
                     raise RuntimeError("PLAN_GENERATION 需要 JobProfile，但尚未生成")
 
                 # 生成LLM改写过的个性化面试计划
+                candidate_profile_id = None
+                skill_progress = []
+                if interview_repo is not None:
+                    #获得candidate profile record
+                    candidate_record = interview_repo.ensure_candidate_profile(
+                        kb_id=candidate_kb_id
+                    )
+                    candidate_profile_id = candidate_record.id
+                    if skill_progress_service is not None:
+                        #列出候选人所有的 skill progress
+                        skill_progress = skill_progress_service.list_progress(
+                            candidate_profile_id
+                        )
                 plan = await planner.build(
                     title=f"模拟面试 - {interview_id}",
                     config=interview_config,
                     candidate_profile=candidate_profile,
                     job_profile=job_profile,
                     company_intel=company_intel,
+                    candidate_profile_id=candidate_profile_id,
+                    skill_progress=skill_progress,
                 )
 
                 # 设置公司情报审计状态
@@ -577,12 +607,53 @@ async def interview_preparation_task(
                     )
 
                 completed_steps.append(step_name)
+
+                #把planner生成的训练审计信息写入后台job的阶段结果
+                #1.取出训练审计结果
+                training_adjustment = plan.training_adjustment
+                #2.取出降级原因
+                training_degradation_reasons = (
+                    training_adjustment.degradation_reasons
+                    if training_adjustment is not None
+                    else []
+                )
+                #3.发生了降级，设置degrade=true，并且写入原因
+                if training_degradation_reasons:
+                    degraded = True
+                    degradation_reasons.extend(
+                        reason
+                        for reason in training_degradation_reasons
+                        if reason not in degradation_reasons
+                    )
+                #4.把当前阶段摘要写入job payload
                 stage_results[step_name.lower()] = {
                     "status": "completed",
                     "stage": stage_name,
                     "plan_id": plan.id,
                     "question_count": len(plan.questions),
                     "quality_issues": quality_issues,
+                    "skill_count": len(skill_progress),
+                    "selection_intent_count": (
+                        len(training_adjustment.selection_reasons)
+                        if training_adjustment is not None
+                        else 0
+                    ),
+                    "job_core_required": (
+                        training_adjustment.job_core_required
+                        if training_adjustment is not None
+                        else 0
+                    ),
+                    "job_core_available": (
+                        training_adjustment.job_core_available
+                        if training_adjustment is not None
+                        else 0
+                    ),
+                    "job_core_selected": (
+                        training_adjustment.job_core_selected
+                        if training_adjustment is not None
+                        else 0
+                    ),
+                    "degradation_reasons": training_degradation_reasons,
                 }
                 logger.info(
                     "面试计划生成完成",
@@ -656,20 +727,75 @@ async def report_generation_task(
     *,
     interview_repo: InterviewRepository,
     redis_queue: RedisQueue | None = None,
+    skill_progress_service: SkillProgressService | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """报告生成任务：加载 Session 的所有评价 → 聚合生成报告 → 持久化。
 
     输入（payload）：
-        - session_id: 面试 Session ID（必填）
+        - session_id（必填）
     输出：
         {report_id, session_id, state: "COMPLETED"}
     幂等键：report:{session_id}
 
     流程：
-    1. 加载 InterviewPlan + Answers + Evaluations
-    2. InterviewReportBuilder 聚合生成报告
-    3. DB 状态转换：PENDING/GENERATING → COMPLETED
+    先看报告有没有生成过 → 没生成就抢 Redis 锁 → 创建/标记报告生成中 →
+    聚合评价生成报告 → 落库 COMPLETED → 顺手重建长期 SkillProgress → 最后释放锁
+
+    report_generation_task
+            ↓
+    解析 session_id
+            ↓
+    查询是否已有 COMPLETED Report
+            ├── 有
+            │    ↓
+            │  reconcile_skill_progress()
+            │    ↓
+            │  从持久化 AnswerEvaluation
+            │  rebuild Candidate SkillProgress
+            │    ↓
+            │  返回已有 COMPLETED Report
+            │
+            ↓ 没有
+    尝试获取 Redis 锁
+            ├── 未获取
+            │     ↓
+            │  轮询等待已有 Report
+            │     ├── 等到 COMPLETED
+            │     │      ↓
+            │     │  reconcile_skill_progress()
+            │     │      ↓
+            │     │  返回已有 Report
+            │     │
+            │     └── 60s 未完成
+            │            ↓
+            │         再尝试获取锁
+            │            ├── 失败 → 抛错，交给任务重试
+            │            └── 成功 → 继续
+            │
+            ↓
+    创建 / 复用 Report
+            ↓
+    start_report_generation()
+            ↓
+    加载 Session + InterviewPlan + Answers + AnswerEvaluations
+            ↓
+    InterviewReportBuilder.build()
+            ↓
+    生成 Report Content
+            ↓
+    complete_report()
+            ↓
+    Report = COMPLETED
+            ↓
+    reconcile_skill_progress()
+            ↓
+    根据持久化 AnswerEvaluation
+    重建 Candidate SkillProgress
+            ↓
+    返回 {report_id , session_id , state="COMPLETED"}
+            ↓
+    finally：释放 Redis 锁
 
     并发保护（lock:interview_report:{session_id}）：
     - Redis 锁确保同一 session 的报告只生成一次
@@ -682,14 +808,19 @@ async def report_generation_task(
     if not session_id.strip():
         raise ValueError("report_generation 必须提供 session_id")
 
+    #报告生成器
     builder = InterviewReportBuilder(interview_repo)
 
-    # ── 幂等检查：已有 COMPLETED 报告 → 直接返回 ──
+    # ── 幂等检查：已有 COMPLETED 报告 → 构造长期画像 → 返回 ──
     existing = interview_repo.get_report_by_session(session_id)
     if existing is not None and existing.state is ReportState.COMPLETED:
         logger.info(
             "报告已生成，跳过",
             extra={"job_id": job.id, "session_id": session_id, "report_id": existing.id},
+        )
+        #已有报告，从持久化评价重建候选人的长期技能画像
+        reconcile_skill_progress(
+            interview_repo, skill_progress_service, session_id
         )
         return {
             "report_id": existing.id,
@@ -720,12 +851,17 @@ async def report_generation_task(
                         "另一进程已完成报告生成",
                         extra={"job_id": job.id, "session_id": session_id, "report_id": existing.id},
                     )
+                    #已有报告，从持久化评价重建候选人的长期技能画像
+                    reconcile_skill_progress(
+                        interview_repo, skill_progress_service, session_id
+                    )
                     return {
                         "report_id": existing.id,
                         "session_id": session_id,
                         "state": "COMPLETED",
                     }
-            # 超时仍未完成 → 判定上一进程已崩溃，强制接管
+            # 超时仍未完成 → 判定上一进程已崩溃，
+            # 等 60 秒后再尝试一次，如果还是拿不到，就认为当前仍然有人持锁生成，抛错让任务后续重试。
             logger.warning(
                 "等待报告生成超时（60s），强制接管",
                 extra={"job_id": job.id, "session_id": session_id},
@@ -755,6 +891,10 @@ async def report_generation_task(
         # 检查是否已有 COMPLETED 结果
         refreshed = interview_repo.get_report_by_session(session_id)
         if refreshed is not None and refreshed.state is ReportState.COMPLETED:
+            #已有报告，从持久化评价重建候选人的长期技能画像
+            reconcile_skill_progress(
+                interview_repo, skill_progress_service, session_id
+            )
             return {
                 "report_id": refreshed.id,
                 "session_id": session_id,
@@ -779,11 +919,6 @@ async def report_generation_task(
                 "overall_score": content.get("overall_score"),
             },
         )
-        return {
-            "report_id": completed.id,
-            "session_id": session_id,
-            "state": "COMPLETED",
-        }
     except Exception as exc:
         error_msg = str(exc) or type(exc).__name__
         interview_repo.fail_report(report_id=report.id, error_message=error_msg)
@@ -792,6 +927,17 @@ async def report_generation_task(
             extra={"job_id": job.id, "session_id": session_id, "error": error_msg},
         )
         raise
+
+    else:
+        #已有报告，从持久化评价重建候选人的长期技能画像
+        reconcile_skill_progress(
+            interview_repo, skill_progress_service, session_id
+        )
+        return {
+            "report_id": completed.id,
+            "session_id": session_id,
+            "state": "COMPLETED",
+        }
     finally:
         # ── 释放锁 ──
         if lock_token is not None and redis_queue is not None:

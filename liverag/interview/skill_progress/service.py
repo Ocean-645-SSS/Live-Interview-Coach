@@ -102,6 +102,11 @@ class SkillProgressService:
         )
 
     def apply_evaluation(self, answer_id: str) -> SkillProgress:
+        """根据最新的answer，更新evidence->skillprogress
+        
+        answer_id → 查询 AnswerEvaluationRecord → 找到所属 Interview / Session / Question
+        → 根据题目的 category + subcategory 映射 skill_key → 转换为 SkillProgressEvidence
+        → 写入证据表 → 重新计算对应技能的 SkillProgress"""
 
         #根据answer_id获取record
         record=self._repository.get_evaluation_record(answer_id)
@@ -166,19 +171,20 @@ class SkillProgressService:
             key=lambda item: (item.current_score, item.confidence, item.skill_key),
         )
         #收集已经做过的所有题目id，避免多次重复推荐同一题
-        attempted :set = {
-            item.question_id
-            for item in progress
-            for item in self._repository.list_skill_evidence(
-                candidate_profile_id=candidate_profile_id, skill_key=item.skill_key
+        attempted: set[str] = {
+            evidence_item.question_id
+            for progress_item in progress
+            for evidence_item in self._repository.list_skill_evidence(
+                candidate_profile_id=candidate_profile_id,
+                skill_key=progress_item.skill_key,
             )
         }
 
         recommendations: list[TrainingQuestionRecommendation] = []
         #遍历所有skillprogress
-        for item in progress:
+        for progress_item in progress:
             #1.分数不低、证据也够的skill，暂时不推荐训练题
-            if item.current_score >= 60 and item.confidence >= 0.45:
+            if progress_item.current_score >= 60 and progress_item.confidence >= 0.45:
                 continue
 
             #2.从题库里找出当前skill下，用户还没回答过的第一道题目
@@ -190,7 +196,7 @@ class SkillProgressService:
                     and self.taxonomy.resolve(
                         candidate.category, candidate.subcategory
                     ).key
-                    == item.skill_key
+                    == progress_item.skill_key
                 ),
                 None,
             )
@@ -198,7 +204,11 @@ class SkillProgressService:
                 continue
 
             #3.在taxonomy中找到当前skill的完整定义
-            skill = next(skill for skill in self.taxonomy.skills if skill.key == item.skill_key)
+            skill = next(
+                taxonomy_skill
+                for taxonomy_skill in self.taxonomy.skills
+                if taxonomy_skill.key == progress_item.skill_key
+            )
 
             #4.增加推荐题目
             recommendations.append(
@@ -206,13 +216,13 @@ class SkillProgressService:
                     question_id=question.id,
                     question_text=question.question_text,
                     difficulty=question.difficulty,
-                    skill_key=item.skill_key,
+                    skill_key=progress_item.skill_key,
                     skill_display_name=skill.display_name,
                     reason=(
                         #如果可靠性<0.45 -> 推荐原因是证据不足
                         #否则，原因是薄弱题目
                         TrainingRecommendationReason.EVIDENCE_GAP
-                        if item.confidence < 0.45
+                        if progress_item.confidence < 0.45
                         else TrainingRecommendationReason.WEAK_RETEST
                     ),
                 )

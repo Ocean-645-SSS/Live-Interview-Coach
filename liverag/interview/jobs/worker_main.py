@@ -35,6 +35,8 @@ from liverag.api.rag_gateway import RagGateway
 from liverag.interview.question_bank.catalog import QuestionBank, QuestionBankError
 from liverag.interview.intelligence.service import IntelligenceService, IntelligenceServiceConfig
 from liverag.interview.intelligence.nowcoder_provider import NowcoderSpiderProvider
+from liverag.interview.skill_progress.service import SkillProgressService
+from liverag.interview.skill_progress.taxonomy import SkillTaxonomy
 
 logger = logging.getLogger("liverag.interview.jobs.worker_main")
 
@@ -103,6 +105,16 @@ def _build_worker(
             stale_ttl_seconds=intel_config.cache_stale_seconds,
         ),
     )
+    # Skill Progress Service：长期用户画像服务
+    skill_progress_service = SkillProgressService(
+        interview_repo,
+        SkillTaxonomy.from_file(
+            Path(__file__).resolve().parents[1]
+            / "skill_progress"
+            / "data"
+            / "skill_taxonomy.v1.json"
+        ),
+    )
 
     return BackgroundWorker(
         job_repo=job_repo,
@@ -113,6 +125,7 @@ def _build_worker(
         llm_model=llm_model,
         interview_repo=interview_repo,
         intelligence_service=intelligence_service,
+        skill_progress_service=skill_progress_service,
         poll_timeout=settings.worker.poll_timeout_seconds,
         task_timeout=settings.worker.task_timeout_seconds,
         max_retries=settings.worker.max_retries,

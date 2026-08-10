@@ -23,6 +23,11 @@ from liverag.interview.schemas import (
     QuestionType,
     StrictModel,
 )
+from liverag.interview.skill_progress.curriculum import (
+    TrainingSelectionRequest,
+    TrainingSelectionResult,
+)
+from liverag.interview.skill_progress.taxonomy import SkillTaxonomy
 
 
 class QuestionBankError(RuntimeError):
@@ -133,6 +138,7 @@ _DIFFICULTY_ORDER: dict[InterviewDifficulty, int] = {
     InterviewDifficulty.SENIOR: 3,
     InterviewDifficulty.EXPERT: 4,
 }
+_DIFFICULTIES = tuple(_DIFFICULTY_ORDER)
 
 _DEFAULT_SELECTABLE_TYPES: frozenset[QuestionType] = frozenset(
     {
@@ -474,6 +480,229 @@ class QuestionBank:
             for index, question in enumerate(selected, start=1)
         ]
 
+    def select_training_questions(
+        self,
+        config: InterviewConfig,
+        *,
+        training: TrainingSelectionRequest,
+        taxonomy: SkillTaxonomy,
+        relevance_text: str | None,
+        explicitly_requested_topics: Iterable[str],
+        selection_seed: str,
+    ) -> TrainingSelectionResult:
+        """在岗位题硬下限内，尽量满足画像产生的训练软目标
+
+        硬约束：
+        1.题目数量必须等于config.question_count
+        2.题目不允许重复
+        3.只能在允许的题型中选择题目
+        4.有岗位画像和长期画像的话，岗位相关题至少占50%
+
+        软约束：尽量满足，无法满足时不破坏硬约束
+        1.薄弱项最多floor(n*0.3)个，最少1个
+        2.证据不足项：最多1个
+        3.掌握项：n>=5时最多1个
+
+        先选“训练意图 + 岗位相关”的题。
+        如果软目标还没满足，再使用非岗位题。
+        但非岗位题不能超过岗位硬约束留下的容量。
+        最后补齐岗位题，再用普通题补满总题量"""
+
+        #把题目塞入候选池
+        candidates = self.filter_questions(question_types=_DEFAULT_SELECTABLE_TYPES)
+        if relevance_text:
+            candidates = [
+                question
+                for question in candidates
+                if _specific_terms_are_supported(question, relevance_text)
+            ]
+        #可选数量比config规定的还要少，直接报错
+        if len(candidates) < config.question_count:
+            raise QuestionBankError(
+                "可选题目不足："
+                f"需要 {config.question_count} 道，题库只有 {len(candidates)} 道"
+            )
+
+        normalized_weights = {
+            _normalize_topic(topic): weight
+            for topic, weight in config.topic_weights.items()
+        }
+        explicitly_requested_labels = {
+            _normalize_topic(topic) for topic in explicitly_requested_topics
+        }
+        job_labels = {_normalize_topic(label) for label in training.job_labels}
+
+        def question_labels(question: InterviewQuestion) -> set[str]:
+            labels = {
+                _normalize_topic(question.category),
+                *(_normalize_topic(topic) for topic in question.topics),
+            }
+            if question.subcategory:
+                labels.add(_normalize_topic(question.subcategory))
+            return labels
+
+        def is_job_relevant(question: InterviewQuestion) -> bool:
+            if not job_labels:
+                return False
+            return any(
+                required in label or label in required
+                for required in job_labels
+                for label in question_labels(question)
+            )
+
+        def selection_key(question: InterviewQuestion) -> tuple[float, int, str]:
+            labels = question_labels(question)
+            topic_score = sum(normalized_weights.get(label, 0.0) for label in labels)
+            if _has_specific_topic_match(
+                question, normalized_weights, explicitly_requested_labels
+            ):
+                topic_score += 0.001
+            tie_breaker = hashlib.sha256(
+                f"{selection_seed}:{question.id}".encode("utf-8")
+            ).hexdigest()
+            return (
+                -topic_score,
+                _difficulty_distance(question.difficulty, config.difficulty),
+                tie_breaker,
+            )
+
+        ranked = sorted(candidates, key=selection_key)
+        job_relevance = {question.id: is_job_relevant(question) for question in ranked}
+        available_job_core = sum(job_relevance.values())
+        effective_job_target = min(
+            training.minimum_job_core,
+            available_job_core,
+        ) if training.job_constraint_enabled else 0
+        non_job_budget = config.question_count - effective_job_target
+
+        degradation_reasons: list[str] = []
+        if training.job_constraint_enabled and not training.job_labels:
+            degradation_reasons.append("JOB_CORE_LABELS_UNAVAILABLE")
+        if (
+            training.job_constraint_enabled
+            and available_job_core < training.minimum_job_core
+        ):
+            degradation_reasons.append("INSUFFICIENT_JOB_CORE_QUESTIONS")
+
+        #弱项复测；证据补充；掌握度抽查
+        intent_specs = (
+            ("WEAK_RETEST", training.weak_skill_keys, training.weak_target),
+            ("EVIDENCE_GAP", training.evidence_skill_keys, training.evidence_target),
+            ("MASTERY_AUDIT", training.mastery_skill_keys, training.mastery_target),
+        )
+        intent_targets = {name: target for name, _keys, target in intent_specs}
+        intent_selected = {name: 0 for name, _keys, _target in intent_specs}
+        selected: list[InterviewQuestion] = []
+        selected_ids: set[str] = set()
+        selection_intents: dict[str, str] = {}
+
+        skill_key_by_question = {
+            question.id: taxonomy.resolve(
+                question.category, question.subcategory
+            ).key
+            for question in ranked
+        }
+
+        def add(question: InterviewQuestion, intent: str) -> None:
+            selected.append(question)
+            selected_ids.add(question.id)
+            selection_intents[question.id] = intent
+
+        #优先选择同时满足：训练意图+岗位相关的题目
+        for intent, skill_keys, target in intent_specs:
+            eligible = [
+                question
+                for question in ranked
+                if question.id not in selected_ids
+                and skill_key_by_question[question.id] in skill_keys
+            ]
+            if intent == "MASTERY_AUDIT":
+                preferred_difficulty = _DIFFICULTIES[
+                    min(
+                        _DIFFICULTY_ORDER[config.difficulty] + 1,
+                        len(_DIFFICULTIES) - 1,
+                    )
+                ]
+            else:
+                preferred_difficulty = config.difficulty
+            eligible = sorted(
+                eligible,
+                key=lambda question: (
+                    _difficulty_distance(
+                        question.difficulty,
+                        (
+                            _DIFFICULTIES[
+                                max(_DIFFICULTY_ORDER[config.difficulty] - 1, 0)
+                            ]
+                            if intent == "WEAK_RETEST"
+                            and skill_key_by_question[question.id]
+                            in training.weak_lower_difficulty_skill_keys
+                            else preferred_difficulty
+                        ),
+                    ),
+                    selection_key(question),
+                ),
+            )
+            #只有岗位硬约束容量允许时，才能选择非岗位训练题
+            for question in eligible:
+                if intent_selected[intent] >= target:
+                    break
+                if job_relevance[question.id]:
+                    add(question, intent)
+                    intent_selected[intent] += 1
+            for question in eligible:
+                if intent_selected[intent] >= target:
+                    break
+                selected_non_job = sum(
+                    not job_relevance[item.id] for item in selected
+                )
+                if selected_non_job >= non_job_budget:
+                    break
+                if question.id not in selected_ids and not job_relevance[question.id]:
+                    add(question, intent)
+                    intent_selected[intent] += 1
+
+        selected_job_core = sum(job_relevance[item.id] for item in selected)
+        for question in ranked:
+            if selected_job_core >= effective_job_target:
+                break
+            if question.id not in selected_ids and job_relevance[question.id]:
+                add(question, "BASELINE")
+                selected_job_core += 1
+
+        #用剩余岗位题补充岗位最低数量
+        for question in ranked:
+            if len(selected) >= config.question_count:
+                break
+            if question.id not in selected_ids:
+                add(question, "BASELINE")
+        #用普通题补满总题数，生成稳定顺序和审计结果
+        ordered = sorted(
+            selected,
+            key=lambda question: hashlib.sha256(
+                f"order:{selection_seed}:{question.id}".encode("utf-8")
+            ).hexdigest(),
+        )
+        ordered = [
+            question.model_copy(update={"order": index})
+            for index, question in enumerate(ordered, start=1)
+        ]
+        selected_job_core = sum(job_relevance[item.id] for item in ordered)
+
+        return TrainingSelectionResult(
+            questions=tuple(ordered),
+            selection_intents={item.id: selection_intents[item.id] for item in ordered},
+            job_relevant_by_question={
+                item.id: job_relevance[item.id] for item in ordered
+            },
+            intent_targets=intent_targets,
+            intent_selected=intent_selected,
+            job_core_required=training.minimum_job_core,
+            job_core_available=available_job_core,
+            job_core_selected=selected_job_core,
+            degradation_reasons=tuple(degradation_reasons),
+        )
+
 
 def _matches_required_relevance(
     question: InterviewQuestion,
@@ -508,10 +737,10 @@ def _has_specific_topic_match(
     """判断这道题是否真实命中了用户画像中的具体技术，避免仅仅因为一级分类是agent就选中"""
 
     # 1. 检查二级分类和具体 topics
-    specific_labels = set(question.topics)
+    specific_labels = {_normalize_topic(topic) for topic in question.topics}
 
     if question.subcategory:
-        specific_labels.add(question.subcategory)
+        specific_labels.add(_normalize_topic(question.subcategory))
 
     for label in specific_labels:
         if normalized_weights.get(label, 0.0) > 0:
