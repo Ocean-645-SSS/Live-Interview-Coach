@@ -38,6 +38,7 @@ liverag-rag-service = "liverag.rag.cli:main"
 liverag-build-question-bank = "liverag.interview.question_bank.cli:main"
 liverag-interview-agent = "liverag.interview_main:main"
 liverag-interview-worker = "liverag.interview.jobs.worker_main:main"
+liverag-rebuild-skill-progress = "liverag.interview.skill_progress.cli:main"
 
 [dependency-groups]
 dev = [

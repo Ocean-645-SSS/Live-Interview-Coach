@@ -398,22 +398,6 @@ Commit: `feat(interview): add versioned skill taxonomy`
 
 ```python
 def test_skill_progress_requires_traceable_sources():
-    progress = SkillProgress(
-        candidate_profile_id="candidate_profile_abc",
-        skill_key="skill_python",
-        taxonomy_version=1,
-        attempts=2,
-        average_score=70,
-        current_score=75,
-        latest_score=80,
-        confidence=0.55,
-        weak_points=[],
-        source_evaluation_ids=["evaluation_1", "evaluation_2"],
-        first_evaluated_at=NOW,
-        last_evaluated_at=NOW,
-        updated_at=NOW,
-    )
-    assert progress.attempts == len(progress.source_evaluation_ids)
 ```
 
 在 `SkillProgress` model validator 中要求 source ID 不重复且数量等于 attempts。
@@ -422,43 +406,10 @@ def test_skill_progress_requires_traceable_sources():
 
 ```python
 class WeakPointAggregate(StrictModel):
-    text: NonEmptyText
-    count: PositiveInt
-    latest_at: datetime
-    source_evaluation_ids: list[NonEmptyText] = Field(min_length=1)
-
 
 class SkillProgress(StrictModel):
-    candidate_profile_id: NonEmptyText
-    skill_key: NonEmptyText
-    taxonomy_version: PositiveInt
-    attempts: PositiveInt
-    average_score: float = Field(ge=0, le=100)
-    current_score: float = Field(ge=0, le=100)
-    latest_score: float = Field(ge=0, le=100)
-    confidence: float = Field(ge=0, le=1)
-    weak_points: list[WeakPointAggregate] = Field(max_length=5)
-    source_evaluation_ids: list[NonEmptyText] = Field(min_length=1)
-    first_evaluated_at: datetime
-    last_evaluated_at: datetime
-    updated_at: datetime
-
 
 class TrainingAdjustmentAudit(StrictModel):
-    taxonomy_version: PositiveInt
-    source_progress_updated_at: datetime | None = None
-    weak_retest_skills: list[str] = Field(default_factory=list)
-    evidence_skills: list[str] = Field(default_factory=list)
-    mastery_audit_skills: list[str] = Field(default_factory=list)
-    selection_intents: dict[str, str] = Field(default_factory=dict)
-    job_relevant_by_question: dict[str, bool] = Field(default_factory=dict)
-    intent_targets: dict[str, int] = Field(default_factory=dict)
-    intent_selected: dict[str, int] = Field(default_factory=dict)
-    job_core_required: int = Field(ge=0)
-    job_core_available: int = Field(ge=0)
-    job_core_selected: int = Field(ge=0)
-    degraded: bool = False
-    degradation_reasons: list[str] = Field(default_factory=list)
 ```
 
 给 `InterviewPlan` 增加：

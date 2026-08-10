@@ -20,6 +20,9 @@ tts-debug.txt
 .ruff_cache
 data/
 interview-experience-spider-main/
+liverag.rar
+study_source.md
+run_analysis.bat
 
 # Claude Code
 .claude/settings.local.json

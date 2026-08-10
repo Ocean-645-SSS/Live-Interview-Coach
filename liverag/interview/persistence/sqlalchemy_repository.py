@@ -9,8 +9,6 @@ with session_scope(self._session_factory)：涉及写数据库使用，与事务
 from __future__ import annotations
 
 import json
-import statistics
-import unicodedata
 from datetime import datetime, timezone
 from typing import Any, TypeVar, cast
 
@@ -63,7 +61,6 @@ from liverag.interview.schemas import (
     InterviewState,
     SkillProgress,
     SkillProgressEvidence,
-    WeakPointAggregate,
 )
 
 ModelT = TypeVar("ModelT", bound=Base)
@@ -215,67 +212,10 @@ def _progress_record(model: SkillProgressModel) -> SkillProgress:
 
 
 def _calculate_progress(evidence: list[SkillProgressEvidence]) -> SkillProgress:
-    """把全部历史评价证据SkillProgressEvidence，转化为一份新的长期能力画像SkillProgress
+    from liverag.interview.skill_progress.policy import calculate_skill_progress
 
-    1. 按时间排序
-    2. 计算历史分数
-    3. 计算时间衰减权重
-    4. 计算置信度所需指标
-    5. 聚合薄弱点
-    6. 计算 average/current/latest
-    7. 生成 SkillProgress"""
-
-    #按照时间排序
-    ordered = sorted(evidence, key=lambda item: (item.evaluated_at, item.evaluation_id))
-    #最近一次时间
-    latest_at = ordered[-1].evaluated_at
-
-    #计算历史分数
-    scores = [item.score for item in ordered]
-    #计算时间衰减权重：90天一个半衰期
-    weights = [
-        0.5 ** ((latest_at - item.evaluated_at).total_seconds() / 86400 / 90)
-        for item in ordered
-    ]
-
-    #计算置信度所需指标
-    #1.总共评价次数
-    attempts = len(ordered)
-    #2.来自几场面试
-    sessions = len({item.session_id for item in ordered})
-    #3.横跨时间
-    span_days = (latest_at - ordered[0].evaluated_at).total_seconds() / 86400
-    #4.稳定性
-    consistency = 0.5 if attempts == 1 else max(0.0, 1.0 - statistics.pstdev(scores) / 25)
-    #5.聚合薄弱点
-    weak: dict[str, dict[str, Any]] = {}
-    for item in ordered:
-        for value in item.weak_points:
-            display = " ".join(unicodedata.normalize("NFKC", value).strip().rstrip("，。；;,. ").split())
-            key = display.casefold()
-            aggregate = weak.setdefault(key, {"text": display, "count": 0, "latest_at": item.evaluated_at, "ids": []})
-            aggregate["count"] += 1
-            aggregate["latest_at"] = max(aggregate["latest_at"], item.evaluated_at)
-            aggregate["ids"].append(item.evaluation_id)
-    weak_points = [
-        WeakPointAggregate(text=value["text"], count=value["count"], latest_at=value["latest_at"], source_evaluation_ids=value["ids"])
-        for _, value in sorted(weak.items(), key=lambda pair: (-pair[1]["count"], -pair[1]["latest_at"].timestamp(), pair[0]))[:5]
-    ]
-
-    return SkillProgress(
-        candidate_profile_id=ordered[0].candidate_profile_id,
-        skill_key=ordered[0].skill_key,
-        taxonomy_version=ordered[-1].taxonomy_version,
-        attempts=attempts,
-        average_score=round(sum(scores) / attempts, 2),
-        current_score=round(sum(item.score * weight for item, weight in zip(ordered, weights, strict=True)) / sum(weights), 2),
-        latest_score=ordered[-1].score,
-        confidence=round(0.35 * min(1.0, attempts / 5) + 0.25 * min(1.0, sessions / 3) + 0.15 * min(1.0, span_days / 90) + 0.25 * consistency, 4),
-        weak_points=weak_points,
-        source_evaluation_ids=[item.evaluation_id for item in ordered],
-        first_evaluated_at=ordered[0].evaluated_at,
-        last_evaluated_at=latest_at,
-        updated_at=_utc_now(),
+    return calculate_skill_progress(
+        evidence, taxonomy_version=evidence[-1].taxonomy_version
     )
 
 
@@ -1373,9 +1313,13 @@ class SQLAlchemyInterviewRepository:
 
         with self._session_factory() as database_session:
             row = database_session.execute(
+                #查询answerevaluation + interviewanswer + session所属的面试id
                 select(AnswerEvaluationModel, InterviewAnswerModel, InterviewSessionModel.interview_id)
+                #通过answer_id连接评价表和回答表
                 .join(InterviewAnswerModel, InterviewAnswerModel.id == AnswerEvaluationModel.answer_id)
+                #通过session_id连接回答表和会话表
                 .join(InterviewSessionModel, InterviewSessionModel.id == InterviewAnswerModel.session_id)
+                #指定answer_id对应的评价
                 .where(AnswerEvaluationModel.answer_id == answer_id)
             ).one_or_none()
             if row is None:
