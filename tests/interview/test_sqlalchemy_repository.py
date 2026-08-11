@@ -43,6 +43,7 @@ from liverag.interview.schemas import (
     QuestionType,
     RubricPoint,
     SkillProgressEvidence,
+    TranscriptCorrection,
 )
 
 
@@ -308,12 +309,12 @@ def test_repository_persists_attempt_event_answer_evaluation_and_report(
         question_id="question-1",
         attempt_id=attempt.id,
         answer_number=1,
-        transcript=" 先召回候选内容，再执行排序。 ",
+        transcript=" 我们用卡夫卡处理消息。 ",
         source_event_id=event.id,
         started_at=now,
         ended_at=now,
     )
-    assert answer.transcript == "先召回候选内容，再执行排序。"
+    assert answer.transcript == "我们用卡夫卡处理消息。"
     assert repository.get_answer(answer.id) == answer
     assert repository.list_answers(session_id=interview_session.id) == [answer]
 
@@ -347,6 +348,15 @@ def test_repository_persists_attempt_event_answer_evaluation_and_report(
         ),
         weighted_score=87.5,
         covered_points=["召回", "排序"],
+        normalized_transcript="我们用Kafka处理消息。",
+        transcript_corrections=[
+            TranscriptCorrection(
+                original="卡夫卡",
+                replacement="Kafka",
+                confidence=0.97,
+                reason="homophone",
+            )
+        ],
         summary="回答覆盖了基本流程。",
         next_action=FollowUpAction.NEXT_QUESTION,
     )
@@ -354,7 +364,10 @@ def test_repository_persists_attempt_event_answer_evaluation_and_report(
         evaluation_id="evaluation-1",
         evaluation=evaluation,
     )
-    assert repository.get_answer(answer.id).state is AnswerState.EVALUATED
+    stored_answer = repository.get_answer(answer.id)
+    assert stored_answer.state is AnswerState.EVALUATED
+    assert stored_answer.transcript == "我们用卡夫卡处理消息。"
+    assert stored_answer.normalized_transcript == "我们用Kafka处理消息。"
     assert repository.get_evaluation(answer.id) == evaluation
     assert repository.list_evaluations(interview_session.id) == [evaluation]
 

@@ -331,6 +331,7 @@ class InterviewAnswerModel(Base):
     )
     answer_number: Mapped[int] = mapped_column(Integer, nullable=False)
     transcript: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
     state: Mapped[AnswerState] = mapped_column(
         SqlEnum(
             AnswerState,

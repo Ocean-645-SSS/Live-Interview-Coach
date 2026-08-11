@@ -17,7 +17,31 @@ from liverag.interview.prompts.evaluation_prompts import ANSWER_EVALUATION_SYSTE
 from liverag.interview.records import InterviewAnswerRecord, generate_id
 from liverag.interview.schemas import AnswerEvaluation, InterviewQuestion
 
-EVALUATION_PROMPT_VERSION = "answer-evaluation-v1"
+EVALUATION_PROMPT_VERSION = "answer-evaluation-v2"
+
+
+def _validate_transcript_normalization(
+    evaluation: AnswerEvaluation,
+    raw_transcript: str,
+) -> None:
+    """纠错可审计校验：evaluator返回的normalized_transcript不能凭空改写，
+    必须从原始raw_transcipt按照transcirpt_corrrection里的记录逐条替换得到"""
+
+    normalized = evaluation.normalized_transcript
+    #确认normalized有值
+    if normalized is None:
+        raise ValueError("normalized_transcript 不能为空")
+
+    #原始转写
+    replayed = raw_transcript
+    #按顺序每一条纠错
+    for correction in evaluation.transcript_corrections:
+        if correction.original not in replayed:
+            raise ValueError("transcript_corrections 未命中 raw transcript")
+        replayed = replayed.replace(correction.original, correction.replacement, 1)
+    #结果必须与normalized_transcipt一致
+    if replayed != normalized:
+        raise ValueError("normalized_transcript 必须由纠正记录逐项重放得到")
 
 
 class AnswerEvaluationProviderError(RuntimeError):
@@ -199,6 +223,8 @@ class OpenAIAnswerEvaluationProvider:
             raise ValueError("评价结果的 answer_id 与输入不一致")
         if evaluation.question_id != question.id:
             raise ValueError("评价结果的 question_id 与输入不一致")
+        #纠错审计校验
+        _validate_transcript_normalization(evaluation, answer.transcript)
         expected_score = evaluation.scores.calculate_weighted_score(question.rubric)
         if abs(evaluation.weighted_score - expected_score) > 1e-9:
             raise ValueError(
@@ -251,6 +277,7 @@ class AnswerEvaluator:
         evaluation = await self._provider.evaluate(answer=answer, question=question)
         if evaluation.answer_id != answer.id or evaluation.question_id != question.id:
             raise ValueError("评价结果的回答或题目标识与请求不一致")
+        _validate_transcript_normalization(evaluation, answer.transcript)
 
         #保存结构化评价，记录rubric版本
         return self._repository.save_evaluation(

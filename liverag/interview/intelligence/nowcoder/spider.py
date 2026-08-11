@@ -35,8 +35,8 @@ SEARCH_API = "https://gw-c.nowcoder.com/api/sparta/pc/search"
 DISCUSS_API = "https://gw-c.nowcoder.com/api/sparta/detail/content-data/detail"
 #动态详情接口，正则提取标题+正文
 FEED_URL = "https://www.nowcoder.com/feed/main/detail"
-#固定查询页数
-SEARCH_PAGE_LIMIT = 3
+#固定查询页数（2 页足够覆盖最新面经，减少发现帖子量 → 减少抓取耗时）
+SEARCH_PAGE_LIMIT = 2
 
 HEADERS = {
     "Content-Type": "application/json; charset=UTF-8",
@@ -123,11 +123,15 @@ class NowcoderSpider:
     def __init__(
         self,
         max_results: int = 10,
-        request_delay: float = 0.8,
-        request_timeout: int = 15,
+        request_delay: float = 0.5,
+        request_timeout: int = 10,
+        *,
+        max_fetch_attempts: int | None = None,
     ) -> None:
         self._max_pages = SEARCH_PAGE_LIMIT
         self._max_results = min(max(1, max_results), 20)  # hard cap: 20
+        # 最多尝试抓取 N 篇帖子（含失败），默认 max_results × 2.5
+        self._max_fetch_attempts = max_fetch_attempts or max(1, int(self._max_results * 2.5))
         self._request_delay = request_delay
         self._request_timeout = request_timeout
         self._session = requests.Session()
@@ -166,8 +170,19 @@ class NowcoderSpider:
         # 逐篇抓取正文
         collected: list[RawNowcoderPost] = []
         failed = 0
+        attempts = 0
 
         for _key, hit in all_hits.items():
+            attempts += 1
+
+            # 抓取尝试次数达到硬上限时停止（防止大量无效帖子拖垮超时）
+            if attempts > self._max_fetch_attempts:
+                logger.info(
+                    "NowcoderSpider: reached max_fetch_attempts=%d (collected=%d, failed=%d), stop fetching",
+                    self._max_fetch_attempts, len(collected), failed,
+                )
+                break
+
             #获取单篇帖子
             post = self._fetch_one(hit)
 

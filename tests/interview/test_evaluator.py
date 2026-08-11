@@ -1,6 +1,7 @@
 """OpenAI-compatible 回答评价 Provider 的结构化输出测试。"""
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -105,6 +106,8 @@ def _evaluation_json(*, answer_id: str = "answer-1", weighted_score: float = 75.
             "covered_points": ["说明了检索和生成"],
             "missing_points": [],
             "errors": [],
+            "normalized_transcript": "先召回候选文档，再将相关上下文交给模型生成答案。",
+            "transcript_corrections": [],
             "summary": "回答正确覆盖了基本流程。",
             "next_action": "NEXT_QUESTION",
             "follow_up_target": None,
@@ -151,6 +154,39 @@ async def test_provider_rejects_identity_drift_after_retry():
         await provider.evaluate(answer=_answer(), question=_question())
 
 
+async def test_provider_accepts_auditable_transcript_correction():
+    raw_answer = replace(_answer(), transcript="我们用卡夫卡处理消息。")
+    payload = json.loads(_evaluation_json())
+    payload["normalized_transcript"] = "我们用Kafka处理消息。"
+    payload["transcript_corrections"] = [
+        {
+            "original": "卡夫卡",
+            "replacement": "Kafka",
+            "confidence": 0.97,
+            "reason": "homophone",
+        }
+    ]
+    provider, _ = _provider([json.dumps(payload, ensure_ascii=False)])
+
+    result = await provider.evaluate(answer=raw_answer, question=_question())
+
+    assert result.normalized_transcript == "我们用Kafka处理消息。"
+    assert result.transcript_corrections[0].original == "卡夫卡"
+    assert result.transcript_corrections[0].replacement == "Kafka"
+
+
+async def test_provider_rejects_normalization_that_is_not_backed_by_corrections():
+    raw_answer = replace(_answer(), transcript="我们用卡夫卡处理消息。")
+    payload = json.loads(_evaluation_json())
+    payload["normalized_transcript"] = "我们用 Kafka 处理消息。"
+    payload["transcript_corrections"] = []
+    response = json.dumps(payload, ensure_ascii=False)
+    provider, _ = _provider([response, response])
+
+    with pytest.raises(AnswerEvaluationProviderError, match="normalized_transcript"):
+        await provider.evaluate(answer=raw_answer, question=_question())
+
+
 def test_settings_reuse_voice_llm_configuration():
     voice = VoiceSettings(
         llm_model="qwen-plus",
@@ -169,4 +205,7 @@ def test_system_prompt_is_loaded_from_python_constant():
     prompt = OpenAIAnswerEvaluationProvider._system_prompt()
 
     assert "严格、一致、可审计" in prompt
+    assert "ASR 文本规范化" in prompt
+    assert "normalized_transcript" in prompt
+    assert "transcript_corrections" in prompt
     assert '"covered_points": ["评分点ID：实际覆盖内容"]' in prompt

@@ -36,11 +36,15 @@ from liverag.agent.volcengine_stt import AuditedBigModelSTT
 from liverag.config.settings import AppSettings
 
 
-def build_agent_session(settings: AppSettings) -> AgentSession:
+def build_agent_session(
+    settings: AppSettings,
+    *,
+    hot_words_json: str | None = None,
+) -> AgentSession:
     """创建实时语音会话，保留当前线上链路调优参数。
     实现AppSettings
         ↓
-    创建 STT + LLM + TTS + VAD(检测用户什么时候开始、停止讲话)
+    创建 STT（动态热词） + LLM + TTS + VAD(检测用户什么时候开始、停止讲话)
         ↓
     配置打断和轮次检测参数
         ↓
@@ -51,9 +55,10 @@ def build_agent_session(settings: AppSettings) -> AgentSession:
     if voice.stt_provider != "volcengine_bigmodel":
         raise ValueError(f"当前只支持 volcengine_bigmodel STT，实际配置为：{voice.stt_provider}")
 
-    # 加载热词表（路径可通过环境变量 STT_HOT_WORDS_PATH 覆盖）
-    hot_words_path = Path(voice.stt_hot_words_path) if voice.stt_hot_words_path else None
-    hot_words_json = load_hot_words(hot_words_path)
+    # 未提供 session 级热词时，保留原有的全局文件加载行为。
+    if hot_words_json is None:
+        hot_words_path = Path(voice.stt_hot_words_path) if voice.stt_hot_words_path else None
+        hot_words_json = load_hot_words(hot_words_path)
 
     return AgentSession(
         # STT:用户语音转为文字

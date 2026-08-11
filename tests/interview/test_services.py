@@ -72,6 +72,7 @@ class _EvaluationProvider:
             weighted_score=scores.calculate_weighted_score(question.rubric),
             covered_points=["检索"],
             missing_points=["重排"],
+            normalized_transcript=answer.transcript,
             summary="基本正确，但缺少重排过程。",
             next_action=FollowUpAction.FOLLOW_UP,
             follow_up_target="重排",
@@ -320,7 +321,7 @@ async def test_interview_agent_controller_connects_voice_to_service(interview_se
 
 async def test_interview_agent_controller_resumes_pending_evaluation(interview_service):
     service, session_id, attempt_id = interview_service
-    answer = _receive_answer(service, session_id, attempt_id)
+    _receive_answer(service, session_id, attempt_id)
 
     resumed = await InterviewAgentController(
         service=service,

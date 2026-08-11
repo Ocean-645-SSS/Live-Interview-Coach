@@ -191,6 +191,7 @@ class InterviewAnswerRecord:
     ended_at: str
     created_at: str
     updated_at: str
+    normalized_transcript: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

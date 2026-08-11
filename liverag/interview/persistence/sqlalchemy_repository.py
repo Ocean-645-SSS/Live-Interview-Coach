@@ -278,6 +278,7 @@ def _answer_record(model: InterviewAnswerModel) -> InterviewAnswerRecord:
         ended_at=_required_iso(model.ended_at),
         created_at=_required_iso(model.created_at),
         updated_at=_required_iso(model.updated_at),
+        normalized_transcript=model.normalized_transcript,
     )
 
 
@@ -1249,6 +1250,8 @@ class SQLAlchemyInterviewRepository:
                 f"面试回答不存在：{evaluation.answer_id}",
             )
 
+            #纠正过的转写文本
+            answer.normalized_transcript = evaluation.normalized_transcript
             #更新答案状态为已评价
             answer.state = AnswerState.EVALUATED
             answer.updated_at = _utc_now()

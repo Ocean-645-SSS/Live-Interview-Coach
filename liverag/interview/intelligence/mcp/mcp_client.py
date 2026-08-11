@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 _SERVER_MODULE = "liverag.interview.intelligence.mcp.server"
 
 # 默认整个 MCP stage 的超时（秒），需小于 Worker task timeout
-DEFAULT_PROVIDER_TIMEOUT = 30.0
+DEFAULT_PROVIDER_TIMEOUT = 60.0
 
 
 # ====================== Client ======================

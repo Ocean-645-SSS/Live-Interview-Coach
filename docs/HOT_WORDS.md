@@ -1,17 +1,13 @@
 # Agent / LLM 核心
 Agent|10
-AI Agent|10
-智能体|10
 LLM|10
-大语言模型|9
 Generative AI|8
-生成式AI|8
 Prompt|9
 Prompt Engineering|9
-提示词工程|8
 Context|8
 Context Engineering|9
-上下文工程|8
+Feedback Loop|8
+
 
 # Transformer / 大模型基础
 Transformer|10
@@ -44,6 +40,7 @@ FlashAttention|9
 MoE|8
 
 # Agent 技术
+Agent Loop|8
 ReAct|10
 Reflection|9
 Plan and Solve|8
@@ -65,6 +62,10 @@ Skill|8
 Skills|8
 Workflow|8
 Multi Agent|8
+Hybrid Agent|8
+A2A|8
+Harness|8
+Human-in-the-loop|8
 
 
 # RAG
@@ -88,6 +89,7 @@ Rerank|9
 Reranker|9
 Query Rewrite|8
 HyDE|8
+Sliding Window|8
 
 # RAG / 向量数据库组件
 Qdrant|10
@@ -137,6 +139,14 @@ Alembic|9
 Redis|10
 SQLite|8
 ORM|8
+Read Uncommitted|7
+Read Committed|8
+Read Repeatable|8
+Serializable|8
+Record Lock|7
+Gap Lock|8
+Next-Key Lock|8
+Text2SQL|8
 
 # AI开发工具
 Docker|9

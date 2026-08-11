@@ -190,6 +190,46 @@ class IntelligenceCache:
         logger.debug("缓存写入成功, key=%s", cache_key)
 
 
+    # ---- touch：延长 FRESH TTL ----
+    async def touch(self, cache_key: str) -> bool:
+        """不替换数据，仅将 FRESH 窗口延长一个 fresh_ttl 周期。
+
+        用于：已成功获取但希望在后台预热中保持"新鲜"状态时调用。
+        返回 True 表示缓存存在且已续期，False 表示缓存不存在或已彻底过期。
+
+        仅修改 fresh_until，stale_until 和 envelope 内容不变。
+        """
+        raw = await self._redis.get(cache_key)
+        if raw is None:
+            return False
+
+        try:
+            raw_str = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+            envelope: dict = json.loads(raw_str)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return False
+
+        now_ts = datetime.now(timezone.utc).timestamp()
+        stale_until = envelope.get("stale_until", 0)
+
+        if now_ts > stale_until:
+            # 已彻底过期，touch 无意义
+            return False
+
+        # 延长 fresh_until 但不改变 stale_until
+        envelope["fresh_until"] = now_ts + self._fresh_ttl
+
+        # STL 基于当前 envelope 的 stale_until 重新计算（touch 不改变总 stale 周期）
+        remaining_ttl = max(1, int(stale_until - now_ts))
+        await self._redis.set(
+            cache_key,
+            json.dumps(envelope, ensure_ascii=False),
+            ex=remaining_ttl,
+        )
+        logger.debug("缓存 FRESH 窗口已续期, key=%s", cache_key)
+        return True
+
+
 __all__ = [
     "CacheResult",
     "IntelligenceCache",
