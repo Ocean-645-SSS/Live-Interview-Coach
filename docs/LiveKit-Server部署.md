@@ -7,7 +7,7 @@
 ```powershell
 docker compose --env-file .env.local up --build -d
 docker compose ps
-docker compose logs -f livekit liverag-interview-agent
+docker compose logs -f livekit liverag-agent liverag-interview-agent
 ```
 
 默认本地配置：
@@ -16,6 +16,7 @@ docker compose logs -f livekit liverag-interview-agent
 LIVEKIT_URL=ws://127.0.0.1:7880
 LIVEKIT_API_KEY=liverag-local
 LIVEKIT_API_SECRET=liverag-local-development-secret-0001
+AGENT_NAME=my-agent
 INTERVIEW_AGENT_NAME=interview-agent
 ```
 
@@ -27,7 +28,7 @@ Compose 暴露以下端口：
 | 7881 | TCP | RTC TCP 回退 |
 | 7882 | UDP | WebRTC 音频媒体 |
 
-`liverag-interview-agent` 通过 `INTERVIEW_AGENT_NAME` 接收面试任务。前端签发的 token 只能使用服务端的 API Key/Secret；Secret 不得通过浏览器环境变量暴露。
+`liverag-agent` 与 `liverag-interview-agent` 使用同一 LiveKit 服务，但通过不同的 `agent_name` 接收任务。前端签发的 token 只能使用对应的 API Key/Secret；Secret 不得通过浏览器环境变量暴露。
 
 ## 生产部署
 
@@ -42,7 +43,7 @@ Compose 暴露以下端口：
 ## 常见排查
 
 - 能建立页面连接但没有声音：检查浏览器麦克风权限、UDP 7882、防火墙和公网地址配置。
-- Agent 未加入房间：确认 token 的 dispatch 名称与 `INTERVIEW_AGENT_NAME` 一致，并检查 Interview Agent 容器日志。
+- Agent 未加入房间：确认 token 的 dispatch 名称与 `AGENT_NAME` / `INTERVIEW_AGENT_NAME` 一致，并检查对应 Agent 容器日志。
 - 本地连接失败：确认 `LIVEKIT_URL` 与浏览器访问地址一致；容器内 Agent 使用 Compose 注入的 `ws://livekit:7880`，不要改成浏览器地址。
 
 LiveKit 的版本特性和生产拓扑以其官方文档为准；本项目只维护自身的 Agent、token 与 Compose 集成配置。
