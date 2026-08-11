@@ -18,7 +18,6 @@ import logging
 
 from openai import AsyncOpenAI
 
-from liverag.agent.tool.rag_client import RagClient
 from liverag.interview.application.profile_service import KnowledgeContextSource
 from liverag.interview.jobs.queue import RedisQueue
 from liverag.interview.jobs.repository import JobRepository
@@ -43,7 +42,6 @@ class BackgroundWorker:
         llm_model: str,
         llm_client: AsyncOpenAI,
         profile_source: KnowledgeContextSource,
-        rag_client: RagClient | None = None,
         interview_repo: InterviewRepository | None = None,
         intelligence_service: object | None = None,
         skill_progress_service: SkillProgressService | None = None,
@@ -57,7 +55,6 @@ class BackgroundWorker:
         self._llm_client = llm_client
         self._profile_source = profile_source
         self._llm_model = llm_model
-        self._rag_client = rag_client
         self._intelligence_service = intelligence_service
         self._interview_repo = interview_repo
         self._skill_progress_service = skill_progress_service
@@ -204,8 +201,6 @@ class BackgroundWorker:
             "llm_model": self._llm_model,
             "question_bank": self._question_bank,
         }
-        if self._rag_client is not None:
-            handler_kwargs["rag_client"] = self._rag_client
         if self._interview_repo is not None:
             handler_kwargs["interview_repo"] = self._interview_repo
         if self._intelligence_service is not None:
