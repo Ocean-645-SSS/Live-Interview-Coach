@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 import liverag.rag.engine as engine_module
@@ -30,6 +31,7 @@ class FakeLightRAG:
         self.enqueue_calls: list[dict[str, Any]] = []
         self.pipeline_process_calls = 0
         self.query_calls: list[tuple[str, Any]] = []
+        self.data_calls: list[tuple[str, Any]] = []
         self.query_results: list[dict[str, Any] | BaseException] = []
         self.llm_model_calls: list[str] = []
 
@@ -66,6 +68,13 @@ class FakeLightRAG:
 
     async def aquery_llm(self, query: str, *, param: Any) -> dict[str, Any]:
         self.query_calls.append((query, param))
+        result = self.query_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    async def aquery_data(self, query: str, *, param: Any) -> dict[str, Any]:
+        self.data_calls.append((query, param))
         result = self.query_results.pop(0)
         if isinstance(result, BaseException):
             raise result
@@ -119,6 +128,31 @@ async def initialized_engine(
     engine = RagEngine(engine_settings)
     await engine.initialize()
     return engine, fake_lightrag_factory[0][0]
+
+
+@pytest.mark.asyncio
+async def test_query_embedding_cache_preserves_the_embedding_result(
+    engine_settings: RAGSettings,
+    fake_lightrag_factory: tuple[list[FakeLightRAG], Callable[..., FakeLightRAG]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _engine, fake = await initialized_engine(engine_settings, fake_lightrag_factory)
+    calls: list[tuple[list[str], str | None]] = []
+
+    async def fake_embed(texts: list[str], **kwargs: Any) -> np.ndarray:
+        calls.append((texts, kwargs.get("context")))
+        return np.ones((1, 1024))
+
+    monkeypatch.setattr(engine_module.openai_embed, "func", fake_embed)
+    embedding_func = fake.constructor_kwargs["embedding_func"]
+
+    first = await embedding_func(["same question"], context="query")
+    second = await embedding_func(["same question"], context="query")
+    document = await embedding_func(["same question"], context="document")
+
+    assert np.array_equal(first, second)
+    assert np.array_equal(document, first)
+    assert calls == [(["same question"], "query"), (["same question"], "document")]
 
 
 @pytest.mark.asyncio
@@ -215,9 +249,19 @@ async def test_query_context_maps_options_and_returns_structured_evidence(
     assert result.chunks[0].content == "Alpha 是项目的检索模块。"
     assert result.duration >= 0
     assert metrics["chunks_count"] == 1
-    for key in ("rewrite_ms", "retrieval_ms", "extraction_ms", "evidence_gate_ms", "request_total_ms"):
+    for key in (
+        "rewrite_ms",
+        "query_rewrite_ms",
+        "retrieval_ms",
+        "search_ms",
+        "extraction_ms",
+        "evidence_gate_ms",
+        "request_total_ms",
+    ):
         assert metrics[key] >= 0
     assert metrics["request_total_ms"] >= metrics["retrieval_ms"]
+    assert metrics["query_rewrite_ms"] == metrics["rewrite_ms"]
+    assert metrics["search_ms"] == metrics["retrieval_ms"]
 
 
 @pytest.mark.asyncio
@@ -250,6 +294,26 @@ async def test_query_context_without_evidence_returns_safe_empty_result(
 
 
 @pytest.mark.asyncio
+async def test_evidence_gate_accepts_json_and_explanatory_boolean_output(
+    engine_settings: RAGSettings,
+    fake_lightrag_factory: tuple[list[FakeLightRAG], Callable[..., FakeLightRAG]],
+) -> None:
+    engine, fake = await initialized_engine(engine_settings, fake_lightrag_factory)
+
+    async def json_verdict(_: str) -> str:
+        return '{"relevant": true}'
+
+    fake.llm_model_func = json_verdict
+    assert await engine._evidence_is_relevant("Redis?", "Candidate used Redis.") is True
+
+    async def explanatory_false(_: str) -> str:
+        return "false: the context is only topically related"
+
+    fake.llm_model_func = explanatory_false
+    assert await engine._evidence_is_relevant("Kafka?", "Candidate used Redis.") is False
+
+
+@pytest.mark.asyncio
 async def test_query_answer_without_evidence_returns_fixed_refusal(
     engine_settings: RAGSettings,
     fake_lightrag_factory: tuple[list[FakeLightRAG], Callable[..., FakeLightRAG]],
@@ -270,12 +334,46 @@ async def test_query_answer_without_evidence_returns_fixed_refusal(
         ConversationOptions(),
     )
 
-    assert len(fake.query_calls) == 1
+    assert len(fake.data_calls) == 1
+    assert len(fake.query_calls) == 0
     assert result.hit is False
     assert result.has_context is False
     assert result.answer == NO_EVIDENCE_ANSWER
     assert result.references == []
     assert result.chunks == []
+
+
+@pytest.mark.asyncio
+async def test_query_answer_gates_on_ranked_chunk_content(
+    engine_settings: RAGSettings,
+    fake_lightrag_factory: tuple[list[FakeLightRAG], Callable[..., FakeLightRAG]],
+) -> None:
+    engine, fake = await initialized_engine(engine_settings, fake_lightrag_factory)
+    fake.query_results.append(
+        {
+            "status": "success",
+            "data": {
+                "context": "Unrelated aggregate context",
+                "references": [{"document_id": "resume"}],
+                "chunks": [{"chunk_id": "resume_1", "content": "Candidate used Python."}],
+            },
+        }
+    )
+    fake.query_results.append({"status": "success", "llm_response": {"content": "Python"}})
+    seen_contexts: list[str] = []
+
+    async def relevant(_: str, context: str) -> bool:
+        seen_contexts.append(context)
+        return True
+
+    engine._evidence_is_relevant = relevant
+    result, _ = await engine.query_answer(
+        "What language?", "default", QueryOptions(), ConversationOptions()
+    )
+
+    assert seen_contexts == ["Candidate used Python."]
+    assert result.answer == "Python"
+    assert result.hit is True
 
 
 @pytest.mark.asyncio

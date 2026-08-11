@@ -156,6 +156,12 @@ def test_metadata_creates_complete_interview_schema(tmp_path: Path) -> None:
             "interview_events": "RESTRICT",
             "interview_sessions": "CASCADE",
         }
+        normalized_transcript_column = next(
+            column
+            for column in database.get_columns("interview_answers")
+            if column["name"] == "normalized_transcript"
+        )
+        assert normalized_transcript_column["nullable"] is True
     finally:
         engine.dispose()
 

@@ -191,6 +191,7 @@ class InterviewAnswerRecord:
     ended_at: str
     created_at: str
     updated_at: str
+    normalized_transcript: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +246,8 @@ class BackgroundJobRecord:
     attempt: int    #重试次数
     max_attempts: int   #最多重试次数
     started_at: str | None  #任务开始时间戳
+    lease_token: str | None
+    lease_expires_at: str | None
     completed_at: str | None    #任务结束时间戳
     created_at: str
     updated_at: str

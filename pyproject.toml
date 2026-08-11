@@ -40,6 +40,14 @@ liverag-build-question-bank = "liverag.interview.question_bank.cli:main"
 liverag-interview-agent = "liverag.interview_main:main"
 liverag-interview-worker = "liverag.interview.jobs.worker_main:main"
 liverag-rebuild-skill-progress = "liverag.interview.skill_progress.cli:main"
+agent-eval-answer = "evaluation.run_evaluation:main"
+agent-eval-rag = "evaluation.run_rag_evaluation:main"
+agent-eval-rag-build = "evaluation.build_rag_benchmark:main"
+agent-eval-rag-failures = "evaluation.run_rag_failure_analysis:main"
+agent-eval-rag-generation-failures = "evaluation.run_rag_generation_failure_analysis:main"
+agent-eval-rag-merge = "evaluation.merge_rag_evaluation_reports:main"
+agent-eval-rag-rejudge = "evaluation.rerun_rag_judgments:main"
+agent-benchmark-latency = "evaluation.run_latency_benchmark:main"
 
 [dependency-groups]
 dev = [
@@ -55,7 +63,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["liverag", "liverag.*"]
+include = ["liverag", "liverag.*", "evaluation", "evaluation.*"]
+
+[tool.setuptools.package-data]
+"evaluation.benchmark" = ["*.json"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

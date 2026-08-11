@@ -10,7 +10,10 @@ from liverag.interview.application.controller import (
     InterviewAgentController,
     InterviewSpeechKind,
 )
-from liverag.interview.application.evaluator import AnswerEvaluator
+from liverag.interview.application.evaluator import (
+    AnswerEvaluationContext,
+    AnswerEvaluator,
+)
 from liverag.interview.application.orchestrator import AnswerReceivedCommand
 from liverag.interview.application.service import InterviewService
 from liverag.interview.persistence.db import create_session_factory, create_sqlite_engine
@@ -53,12 +56,17 @@ def _question(*, question_id: str = "question-1", order: int = 1) -> InterviewQu
 
 
 class _EvaluationProvider:
+    def __init__(self):
+        self.contexts: list[AnswerEvaluationContext | None] = []
+
     async def evaluate(
         self,
         *,
         answer: InterviewAnswerRecord,
         question: InterviewQuestion,
+        context: AnswerEvaluationContext | None = None,
     ) -> AnswerEvaluation:
+        self.contexts.append(context)
         scores = DimensionScores(
             technical_accuracy=3,
             completeness=3,
@@ -72,6 +80,7 @@ class _EvaluationProvider:
             weighted_score=scores.calculate_weighted_score(question.rubric),
             covered_points=["检索"],
             missing_points=["重排"],
+            normalized_transcript=answer.transcript,
             summary="基本正确，但缺少重排过程。",
             next_action=FollowUpAction.FOLLOW_UP,
             follow_up_target="重排",
@@ -152,6 +161,32 @@ def _receive_answer(
     ).answer
 
 
+def _receive_follow_up_answer(
+    service: InterviewService,
+    session_id: str,
+    attempt_id: str,
+    *,
+    answer_number: int,
+) -> InterviewAnswerRecord:
+    service.transition(
+        session_id=session_id,
+        event_id=f"event-follow-up-asked-{answer_number}",
+        event_type=InterviewEventType.FOLLOW_UP_ASKED,
+    )
+    now = utc_now_iso()
+    return service.receive_answer(
+        AnswerReceivedCommand(
+            session_id=session_id,
+            attempt_id=attempt_id,
+            event_id=f"event-follow-up-answer-{answer_number}",
+            transcript=f"follow-up answer {answer_number}",
+            answer_number=answer_number,
+            started_at=now,
+            ended_at=now,
+        )
+    ).answer
+
+
 async def test_evaluation_drives_follow_up_and_report(interview_service):
     service, session_id, attempt_id = interview_service
     answer = _receive_answer(service, session_id, attempt_id)
@@ -169,6 +204,40 @@ async def test_evaluation_drives_follow_up_and_report(interview_service):
     assert report.content_json is not None
     assert '"evaluation_count":1' in report.content_json
     assert service.repository.get_session(session_id).state is InterviewState.FOLLOW_UP
+
+
+async def test_progressive_follow_ups_keep_same_question_context(interview_service):
+    service, session_id, attempt_id = interview_service
+    first_answer = _receive_answer(service, session_id, attempt_id)
+
+    first_result = await service.evaluate_answer(first_answer.id)
+    second_answer = _receive_follow_up_answer(
+        service, session_id, attempt_id, answer_number=2
+    )
+    second_result = await service.evaluate_answer(second_answer.id)
+    third_answer = _receive_follow_up_answer(
+        service, session_id, attempt_id, answer_number=3
+    )
+    third_result = await service.evaluate_answer(third_answer.id)
+    fourth_answer = _receive_follow_up_answer(
+        service, session_id, attempt_id, answer_number=4
+    )
+    fourth_result = await service.evaluate_answer(fourth_answer.id)
+
+    assert [
+        first_result.decision.event_type,
+        second_result.decision.event_type,
+        third_result.decision.event_type,
+    ] == [InterviewEventType.FOLLOW_UP_REQUIRED] * 3
+    assert fourth_result.decision.event_type is InterviewEventType.NEXT_QUESTION
+    assert service.get_session(session_id).current_question_id == "question-2"
+    assert service.get_session(session_id).follow_up_count == 0
+
+    assert service.evaluator is not None
+    provider = service.evaluator._provider
+    assert isinstance(provider, _EvaluationProvider)
+    assert [context.follow_up_round for context in provider.contexts] == [0, 1, 2, 3]
+    assert [len(context.prior_answers) for context in provider.contexts] == [0, 1, 2, 3]
 
 
 async def test_evaluation_retry_reuses_saved_result_and_transition(interview_service):
@@ -320,7 +389,7 @@ async def test_interview_agent_controller_connects_voice_to_service(interview_se
 
 async def test_interview_agent_controller_resumes_pending_evaluation(interview_service):
     service, session_id, attempt_id = interview_service
-    answer = _receive_answer(service, session_id, attempt_id)
+    _receive_answer(service, session_id, attempt_id)
 
     resumed = await InterviewAgentController(
         service=service,

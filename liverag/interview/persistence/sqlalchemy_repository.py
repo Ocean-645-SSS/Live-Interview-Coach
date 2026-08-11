@@ -278,6 +278,7 @@ def _answer_record(model: InterviewAnswerModel) -> InterviewAnswerRecord:
         ended_at=_required_iso(model.ended_at),
         created_at=_required_iso(model.created_at),
         updated_at=_required_iso(model.updated_at),
+        normalized_transcript=model.normalized_transcript,
     )
 
 
@@ -1249,6 +1250,8 @@ class SQLAlchemyInterviewRepository:
                 f"面试回答不存在：{evaluation.answer_id}",
             )
 
+            #纠正过的转写文本
+            answer.normalized_transcript = evaluation.normalized_transcript
             #更新答案状态为已评价
             answer.state = AnswerState.EVALUATED
             answer.updated_at = _utc_now()
@@ -1662,6 +1665,45 @@ class SQLAlchemyInterviewRepository:
             model.completed_at = None
             model.updated_at = _utc_now()
             database_session.flush()
+            return _report_record(model)
+
+    def recover_stale_report_generation(
+        self,
+        *,
+        report_id: str,
+        stale_before: datetime,
+        error_message: str,
+    ) -> InterviewReportRecord | None:
+        """将已超过恢复阈值的 GENERATING 报告转为 FAILED。"""
+
+        clean_error = error_message.strip()
+        if not clean_error:
+            raise ValueError("恢复原因不能为空")
+
+        with session_scope(self._session_factory) as database_session:
+            result = database_session.execute(
+                update(InterviewReportModel)
+                .where(
+                    InterviewReportModel.id == report_id,
+                    InterviewReportModel.state == ReportState.GENERATING,
+                    InterviewReportModel.updated_at < stale_before,
+                )
+                .values(
+                    state=ReportState.FAILED,
+                    error_message=clean_error,
+                    completed_at=None,
+                    updated_at=_utc_now(),
+                )
+            )
+            if cast(CursorResult[Any], result).rowcount != 1:
+                return None
+
+            model = _require_model(
+                database_session,
+                InterviewReportModel,
+                report_id,
+                f"面试报告不存在：{report_id}",
+            )
             return _report_record(model)
 
     def complete_report(

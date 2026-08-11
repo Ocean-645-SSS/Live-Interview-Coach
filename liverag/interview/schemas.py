@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import Enum
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -287,7 +287,7 @@ class InterviewConfig(StrictModel):
     difficulty: InterviewDifficulty = InterviewDifficulty.INTERMEDIATE #面试难度：默认中级
     language: NonEmptyText = "zh-CN"
     question_count: int = Field(default=5, ge=1, le=30) #问题数量
-    max_follow_ups_per_question: int = Field(default=2, ge=0, le=5) #最多追问次数
+    max_follow_ups_per_question: int = Field(default=3, ge=0, le=5) #最多追问次数
     answer_timeout_seconds: int = Field(default=90, ge=15, le=900) #答案超时时间
     timeout_action: TimeoutAction = TimeoutAction.PAUSE #超时动作
     candidate_kb_id: NonEmptyText = "default" #固定使用不可删除的个人简历知识库
@@ -447,6 +447,26 @@ class AnswerUncertainty(StrictModel):
     )
 
 
+class TranscriptCorrection(StrictModel):
+    """一处可由原始 ASR 文本逐项重放的高置信度规范化。"""
+
+    original: NonEmptyText = Field(description="原始 ASR 文本中的连续片段")
+    replacement: NonEmptyText = Field(description="用于评分的规范化片段")
+    confidence: float = Field(ge=0.8, le=1.0, description="自动修正置信度")
+    reason: Literal[
+        "homophone",
+        "segmentation",
+        "case_normalization",
+        "punctuation",
+    ]
+
+    @model_validator(mode="after")
+    def validate_replacement(self) -> TranscriptCorrection:
+        if self.original == self.replacement:
+            raise ValueError("纠正前后的文本不能相同")
+        return self
+
+
 class AnswerEvaluation(StrictModel):
     """一段最终回答经过 rubric 核对后的结构化评价结果。"""
 
@@ -460,6 +480,14 @@ class AnswerEvaluation(StrictModel):
     asr_uncertainties: list[AnswerUncertainty] = Field(
         default_factory=list,
         description="疑似由 ASR 转写错误导致的术语偏差，不应直接作为评分扣分依据",
+    )
+    normalized_transcript: NonEmptyText | None = Field(
+        default=None,
+        description="仅由高置信度局部纠正得到、用于评分的转写文本；旧评价记录可为空",
+    )
+    transcript_corrections: list[TranscriptCorrection] = Field(
+        default_factory=list,
+        description="normalized_transcript 相对原始转写的逐项局部纠正记录",
     )
     summary: NonEmptyText   #总结
     next_action: FollowUpAction  #下一步：追问/下一个问题/理解用户/结束
@@ -503,6 +531,7 @@ __all__ = [
     "StrictModel",
     "TimeoutAction",
     "TrainingAdjustmentAudit",
+    "TranscriptCorrection",
     "WeakPointAggregate",
     "WorkExperienceFact",
 ]

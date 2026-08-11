@@ -215,6 +215,29 @@ class IntelligenceService:
             degradation_reasons=[f"Provider {error_code}, 无缓存"],
         )
 
+    async def prewarm(self, query: InterviewIntelligenceQuery) -> bool:
+        """后台预热：强制刷新指定公司/岗位的缓存。
+
+        调用 get_company_profile 并忽略 DEGRADED 结果。
+        返回 True 表示缓存已成功刷新（FRESH / CACHE_HIT / PARTIAL）。
+        供 Worker 定时任务或 API 异步任务调用，不阻塞用户请求。
+
+        使用场景：
+        - Worker 每 45min 对最近面试的热门公司预热缓存
+        - 面试创建成功后触发异步预热，延长 FRESH 窗口
+        """
+        try:
+            result = await self.get_company_profile(query)
+            return result.status in (
+                IntelligenceStatus.FRESH,
+                IntelligenceStatus.CACHE_HIT,
+                IntelligenceStatus.PARTIAL,
+                IntelligenceStatus.STALE_FALLBACK,
+            )
+        except Exception:
+            logger.exception("prewarm 失败: company=%s, role=%s", query.company, query.role)
+            return False
+
     # ---- 内部流程 ----
 
     async def _process_and_cache(

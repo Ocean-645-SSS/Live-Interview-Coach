@@ -28,6 +28,7 @@ study_source.md
 run_analysis.bat
 .uv-cache-test
 .uv-python-cache
+evaluation/
 
 # Claude Code
 .claude/settings.local.json

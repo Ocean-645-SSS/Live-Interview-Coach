@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -240,6 +241,44 @@ class TestJobStatusTransitions:
         assert len(pending) == 2
         assert all(j.status is JobStatus.PENDING for j in pending)
 
+    def test_recovers_stale_running_job_for_retry(self, job_repo: JobRepository):
+        job = job_repo.create_job(
+            job_type="demo",
+            idempotency_key="stale_running_job",
+            business_resource_id="biz_stale",
+        )
+        job_repo.mark_running(job.id, lease_seconds=1)
+
+        recovered = job_repo.recover_stale_running_jobs(
+            stale_before=datetime.now(timezone.utc) + timedelta(seconds=2),
+        )
+
+        assert [item.id for item in recovered] == [job.id]
+        restored = job_repo.get_job(job.id)
+        assert restored.status is JobStatus.PENDING
+        assert "恢复" in (restored.error_message or "")
+
+    def test_expired_lease_rejects_old_worker_result(self, job_repo: JobRepository):
+        job = job_repo.create_job(
+            job_type="demo",
+            idempotency_key="expired_lease_owner",
+            business_resource_id="biz_expired_owner",
+        )
+        first = job_repo.mark_running(job.id, lease_seconds=1)
+        assert first.lease_token is not None
+
+        job_repo.recover_stale_running_jobs(
+            stale_before=datetime.now(timezone.utc) + timedelta(seconds=2),
+        )
+        job_repo.mark_queued(job.id)
+        second = job_repo.mark_running(job.id, lease_seconds=60)
+
+        with pytest.raises(RuntimeError, match="lease 已失效"):
+            job_repo.mark_completed(
+                job.id, {"result": "old"}, lease_token=first.lease_token
+            )
+        assert job_repo.get_job(job.id).lease_token == second.lease_token
+
 
 # ── RedisQueue 测试 ──────────────────────────────────────
 
@@ -291,11 +330,93 @@ class TestRedisQueue:
         )
         assert isinstance(acquired_after_release, str)
 
+    @pytest.mark.asyncio
+    async def test_renew_lock_requires_current_token(self, redis_queue: RedisQueue):
+        lock_token = await redis_queue.acquire_lock(
+            job_type="demo", resource_id="renew_resource", ttl=1
+        )
+        assert isinstance(lock_token, str)
+
+        assert await redis_queue.renew_lock(
+            job_type="demo",
+            resource_id="renew_resource",
+            lock_token=lock_token,
+            ttl=10,
+        )
+        assert not await redis_queue.renew_lock(
+            job_type="demo",
+            resource_id="renew_resource",
+            lock_token="old-token",
+            ttl=10,
+        )
+
+    @pytest.mark.asyncio
+    async def test_keep_lock_alive_prevents_ttl_expiry(self, redis_queue: RedisQueue):
+        lock_token = await redis_queue.acquire_lock(
+            job_type="demo", resource_id="long_resource", ttl=1
+        )
+        assert isinstance(lock_token, str)
+        stop_event = asyncio.Event()
+        heartbeat = asyncio.create_task(
+            redis_queue.keep_lock_alive(
+                job_type="demo",
+                resource_id="long_resource",
+                lock_token=lock_token,
+                ttl=1,
+                stop_event=stop_event,
+            )
+        )
+
+        await asyncio.sleep(1.1)
+        assert await redis_queue.acquire_lock(
+            job_type="demo", resource_id="long_resource", ttl=1
+        ) is None
+
+        stop_event.set()
+        await heartbeat
+
 
 # ── Worker 端到端测试 ────────────────────────────────────
 
 
 class TestWorkerEndToEnd:
+    @pytest.mark.asyncio
+    async def test_worker_renews_lease_while_handler_runs(
+        self, job_repo: JobRepository, redis_queue: RedisQueue
+    ):
+        from unittest.mock import AsyncMock, MagicMock
+
+        worker = BackgroundWorker(
+            job_repo=job_repo,
+            redis_queue=redis_queue,
+            question_bank=MagicMock(),
+            llm_client=AsyncMock(),
+            profile_source=AsyncMock(),
+            llm_model="test-model",
+            task_timeout=0.5,
+            lease_heartbeat_interval=0.05,
+        )
+        job = job_repo.create_job(
+            job_type="demo",
+            idempotency_key=f"lease_heartbeat_{generate_id('key')}",
+            business_resource_id="lease_heartbeat_resource",
+            payload={"delay_seconds": 0.2},
+        )
+
+        execution = asyncio.create_task(worker._execute_job(job.id))
+        await asyncio.sleep(0.02)
+        first = job_repo.get_job(job.id)
+        await asyncio.sleep(0.08)
+        running = job_repo.get_job(job.id)
+        assert running.status is JobStatus.RUNNING
+        assert running.lease_expires_at > first.lease_expires_at
+        await execution
+
+        completed = job_repo.get_job(job.id)
+        assert completed.status is JobStatus.COMPLETED
+        assert completed.lease_token is None
+        assert completed.lease_expires_at is None
+
     @pytest.mark.asyncio
     async def test_worker_executes_demo_job(
         self, job_repo: JobRepository, redis_queue: RedisQueue, worker: BackgroundWorker

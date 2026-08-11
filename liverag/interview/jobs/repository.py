@@ -6,7 +6,8 @@ Redis 只负责队列和临时协调，权威 Job 状态始终存储在 PostgreS
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -37,6 +38,12 @@ def _required_iso(value: datetime) -> str:
     return result
 
 
+def _lease_expired(value: datetime, now: datetime) -> bool:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value <= now
+
+
 def _job_record(model: BackgroundJobModel) -> BackgroundJobRecord:
     """ORM 模型 → 不可变 Record。"""
     return BackgroundJobRecord(
@@ -51,6 +58,8 @@ def _job_record(model: BackgroundJobModel) -> BackgroundJobRecord:
         attempt=model.attempt,
         max_attempts=model.max_attempts,
         started_at=_to_iso(model.started_at),
+        lease_token=model.lease_token,
+        lease_expires_at=_to_iso(model.lease_expires_at),
         completed_at=_to_iso(model.completed_at),
         created_at=_required_iso(model.created_at),
         updated_at=_required_iso(model.updated_at),
@@ -168,7 +177,9 @@ class JobRepository(AbstractJobRepository):
 
         return self._update_status(job_id, JobStatus.QUEUED)
 
-    def mark_running(self, job_id: str) -> BackgroundJobRecord:
+    def mark_running(
+        self, job_id: str, *, lease_seconds: int = 330
+    ) -> BackgroundJobRecord:
         """QUEUED → RUNNING，记录开始时间并递增重试计数。"""
 
         with session_scope(self._session_factory) as db:
@@ -177,48 +188,103 @@ class JobRepository(AbstractJobRepository):
                 raise LookupError(f"Job 不存在：{job_id}")
 
             now = _utc_now()
+            lease_token = secrets.token_urlsafe(32)
             #状态更新为RUNNING
             model.status = JobStatus.RUNNING
             #增加尝试次数（如果次数超过3次自动退出）
             model.attempt = BackgroundJobModel.attempt + 1
             model.started_at = now
+            model.lease_token = lease_token
+            model.lease_expires_at = now + timedelta(seconds=lease_seconds)
             model.updated_at = now
 
             db.flush()
             return _job_record(model)
 
-    def mark_completed(self, job_id: str, result: dict[str, Any]) -> BackgroundJobRecord:
+    def renew_lease(
+        self, job_id: str, *, lease_token: str, lease_seconds: int
+    ) -> None:
+        """续租当前 Worker 拥有的 RUNNING Job。"""
+        with session_scope(self._session_factory) as db:
+            model = db.scalar(
+                select(BackgroundJobModel)
+                .where(BackgroundJobModel.id == job_id)
+                .with_for_update()
+            )
+            now = _utc_now()
+            if (
+                model is None
+                or model.status is not JobStatus.RUNNING
+                or model.lease_token != lease_token
+                or model.lease_expires_at is None
+                or _lease_expired(model.lease_expires_at, now)
+            ):
+                raise RuntimeError(f"Job lease 已失效：{job_id}")
+            model.lease_expires_at = now + timedelta(seconds=lease_seconds)
+            model.updated_at = now
+
+    def mark_completed(
+        self, job_id: str, result: dict[str, Any], *, lease_token: str | None = None
+    ) -> BackgroundJobRecord:
         """RUNNING → COMPLETED，保存结果。"""
 
         with session_scope(self._session_factory) as db:
-            model = db.get(BackgroundJobModel, job_id)
+            model = db.scalar(
+                select(BackgroundJobModel)
+                .where(BackgroundJobModel.id == job_id)
+                .with_for_update()
+            )
             if model is None:
                 raise LookupError(f"Job 不存在：{job_id}")
 
             now = _utc_now()
+            if lease_token is not None and (
+                model.status is not JobStatus.RUNNING
+                or model.lease_token != lease_token
+                or model.lease_expires_at is None
+                or _lease_expired(model.lease_expires_at, now)
+            ):
+                raise RuntimeError(f"Job lease 已失效：{job_id}")
             #状态更新为COMPLETED
             model.status = JobStatus.COMPLETED
             #输出JSON格式结果
             model.result_json = json.dumps(result, ensure_ascii=False)
             model.error_message = None
+            model.lease_token = None
+            model.lease_expires_at = None
             model.completed_at = now
             model.updated_at = now
 
             db.flush()
             return _job_record(model)
 
-    def mark_failed(self, job_id: str, error: str) -> BackgroundJobRecord:
+    def mark_failed(
+        self, job_id: str, error: str, *, lease_token: str | None = None
+    ) -> BackgroundJobRecord:
         """RUNNING → FAILED，记录错误信息。"""
 
         with session_scope(self._session_factory) as db:
-            model = db.get(BackgroundJobModel, job_id)
+            model = db.scalar(
+                select(BackgroundJobModel)
+                .where(BackgroundJobModel.id == job_id)
+                .with_for_update()
+            )
             if model is None:
                 raise LookupError(f"Job 不存在：{job_id}")
 
             now = _utc_now()
+            if lease_token is not None and (
+                model.status is not JobStatus.RUNNING
+                or model.lease_token != lease_token
+                or model.lease_expires_at is None
+                or _lease_expired(model.lease_expires_at, now)
+            ):
+                raise RuntimeError(f"Job lease 已失效：{job_id}")
             model.status = JobStatus.FAILED
             model.error_message = error[:2000]  # 截断过长错误
             model.completed_at = now
+            model.lease_token = None
+            model.lease_expires_at = None
             model.updated_at = now
 
             db.flush()
@@ -243,6 +309,56 @@ class JobRepository(AbstractJobRepository):
 
             db.flush()
             return _job_record(model)
+
+    def recover_stale_running_jobs(
+        self,
+        *,
+        stale_before: datetime,
+        limit: int = 100,
+    ) -> list[BackgroundJobRecord]:
+        """恢复超过阈值的 RUNNING Job，避免 Worker 崩溃后任务永久悬挂。"""
+
+        if limit <= 0:
+            raise ValueError("limit 必须大于 0")
+
+        with session_scope(self._session_factory) as db:
+            models = (
+                db.scalars(
+                    select(BackgroundJobModel)
+                    .where(
+                        BackgroundJobModel.status == JobStatus.RUNNING,
+                        (
+                            (BackgroundJobModel.lease_expires_at.is_not(None))
+                            & (BackgroundJobModel.lease_expires_at < stale_before)
+                        )
+                        | (
+                            (BackgroundJobModel.lease_expires_at.is_(None))
+                            & (BackgroundJobModel.updated_at < stale_before)
+                        ),
+                    )
+                    .with_for_update()
+                    .order_by(BackgroundJobModel.updated_at.asc())
+                    .limit(limit)
+                )
+                .all()
+            )
+            now = _utc_now()
+            recovered: list[BackgroundJobRecord] = []
+            for model in models:
+                if model.attempt < model.max_attempts:
+                    model.status = JobStatus.PENDING
+                    model.error_message = "Worker 未在超时窗口内完成，已恢复为待重试"
+                    model.completed_at = None
+                else:
+                    model.status = JobStatus.FAILED
+                    model.error_message = "Worker 未在超时窗口内完成，且已达到最大尝试次数"
+                    model.completed_at = now
+                model.lease_token = None
+                model.lease_expires_at = None
+                model.updated_at = now
+                recovered.append(_job_record(model))
+            db.flush()
+            return recovered
 
     # ======================= 内部实现 =========================
     def _update_status(self, job_id: str, status: JobStatus) -> BackgroundJobRecord:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 from collections.abc import Awaitable, Callable
@@ -15,6 +16,11 @@ from liverag.interview.application.evaluator import AnswerEvaluationProviderErro
 from liverag.interview.application.orchestrator import AnswerReceivedCommand
 from liverag.interview.application.service import InterviewService
 from liverag.interview.jobs.queue import RedisQueue
+from liverag.interview.jobs.report_generation import (
+    REPORT_GENERATION_LOCK_TTL_SECONDS,
+    enqueue_report_generation,
+    finalize_report_generation,
+)
 from liverag.interview.jobs.repository import JobRepository
 from liverag.interview.persistence.repository import (
     ConcurrentUpdateError,
@@ -367,11 +373,16 @@ async def generate_report(
 
     if async_mode:
         return await _execute_async(
-            lambda: _create_report_generation_job(service, job_repo, redis_queue, session_id)
+            lambda: enqueue_report_generation(
+                interview_repo=service.repository,
+                job_repo=job_repo,
+                redis_queue=redis_queue,
+                session_id=session_id,
+            )
         )
 
     # ── 同步路径：Redis 锁保护，防止与 Worker/Agent 并发生成 ──
-    lock_ttl = 300  # 5 分钟
+    lock_ttl = REPORT_GENERATION_LOCK_TTL_SECONDS
     lock_token = await redis_queue.acquire_lock(
         job_type="report_generation",
         resource_id=session_id,
@@ -393,9 +404,34 @@ async def generate_report(
             detail="报告正在由另一进程生成，请稍后重试",
         )
 
+    lock_heartbeat_stop = asyncio.Event()
+    lock_heartbeat_task = asyncio.create_task(
+        redis_queue.keep_lock_alive(
+            job_type="report_generation",
+            resource_id=session_id,
+            lock_token=lock_token,
+            ttl=lock_ttl,
+            stop_event=lock_heartbeat_stop,
+        )
+    )
     try:
-        return _execute(lambda: service.generate_report(session_id))
+        def generate_and_finalize():
+            report = service.generate_report(session_id)
+            finalize_report_generation(
+                interview_repo=service.repository,
+                session_id=session_id,
+            )
+            return report
+
+        report = await asyncio.to_thread(_execute, generate_and_finalize)
+        if lock_heartbeat_task.done():
+            lock_heartbeat_task.result()
+        return report
     finally:
+        lock_heartbeat_stop.set()
+        lock_heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await lock_heartbeat_task
         with contextlib.suppress(Exception):
             await redis_queue.release_lock(
                 job_type="report_generation",
@@ -691,85 +727,6 @@ def _read_preparation_status(
         updated_at=job.updated_at,
         error=job.error_message,
     )
-
-
-# ====================== Report Generation Job API ==============================
-
-async def _create_report_generation_job(
-    service: InterviewService,
-    job_repo: JobRepository,
-    redis_queue: RedisQueue,
-    session_id: str,
-) -> dict[str, Any]:
-    """创建 report_generation Job 并入队。"""
-
-    # 验证 Session 存在
-    service.get_session(session_id)
-
-    # 构建幂等键
-    idempotency_key = f"report:{session_id}"
-
-    # 步骤 1：幂等键查询 — 已有 Job 则直接返回
-    existing = job_repo.find_by_idempotency(
-        job_type="report_generation",
-        idempotency_key=idempotency_key,
-    )
-    if existing is not None:
-        if existing.status is JobStatus.COMPLETED:
-            return {"job_id": existing.id, "status": existing.status.value}
-        if existing.status in (JobStatus.PENDING, JobStatus.QUEUED, JobStatus.RUNNING):
-            return {"job_id": existing.id, "status": existing.status.value}
-
-    # 步骤 2：Redis 锁 — 短暂重复投递保护（与执行锁使用不同 key 避免冲突）
-    #   Job 创建锁 key: interview:lock:report_generation_job:{session_id}
-    #   执行锁 key:     interview:lock:report_generation:{session_id}
-    create_lock_ttl = 10
-    lock_token = await redis_queue.acquire_lock(
-        job_type="report_generation_job",
-        resource_id=session_id,
-        ttl=create_lock_ttl,
-    )
-    if lock_token is None:
-        import asyncio as _asyncio
-        await _asyncio.sleep(0.1)
-        retry_existing = job_repo.find_by_idempotency(
-            job_type="report_generation",
-            idempotency_key=idempotency_key,
-        )
-        if retry_existing is not None:
-            return {"job_id": retry_existing.id, "status": retry_existing.status.value}
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="报告生成任务正在创建中，请稍后重试",
-        )
-
-    try:
-        # 构建 payload
-        payload = {
-            "session_id": session_id,
-        }
-
-        # 创建 Job（PG 唯一约束最终防重）
-        job = job_repo.create_job(
-            job_type="report_generation",
-            idempotency_key=idempotency_key,
-            business_resource_id=session_id,
-            payload=payload,
-            max_attempts=3,
-        )
-
-        # 入队 Redis
-        await redis_queue.enqueue(job_type="report_generation", job_id=job.id)
-
-        return {"job_id": job.id, "status": job.status.value}
-    finally:
-        # Job 创建完成，释放创建锁，Worker 可以获取执行锁
-        with contextlib.suppress(Exception):
-            await redis_queue.release_lock(
-                job_type="report_generation_job",
-                resource_id=session_id,
-                lock_token=lock_token,
-            )
 
 
 __all__ = [

@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import json
 import re
 import time
 from asyncio.log import logger
@@ -123,6 +124,7 @@ class RagEngine:
     def __init__(self, settings: RAGSettings):
         self.settings = settings  # LightRAG配置类
         self.rag: LightRAG | None = None  # LightRAG
+        self._query_embedding_cache: dict[str, Any] = {}
         self._write_lock = asyncio.Lock()  # 异步写锁
         self._background_jobs: set[asyncio.Task[None]] = set()  # engine启动的后台异步任务
 
@@ -162,11 +164,24 @@ class RagEngine:
             )
 
         # 封装embedding
+        async def cached_embedding_func(texts: list[str], **kwargs: Any) -> Any:
+            context = kwargs.get("context")
+            if context == "query" and len(texts) == 1:
+                cached = self._query_embedding_cache.get(texts[0])
+                if cached is not None:
+                    return cached
+
+            embeddings = await openai_embed.func(texts, **kwargs)
+            if context == "query" and len(texts) == 1:
+                self._query_embedding_cache[texts[0]] = embeddings
+            return embeddings
+
         embedding_func = EmbeddingFunc(
             embedding_dim=self.settings.embedding_dim,
             max_token_size=self.settings.max_embed_tokens,
+            supports_asymmetric=True,
             func=partial(  # 固定参数，每次调用不会变化
-                openai_embed.func,
+                cached_embedding_func,
                 model=self.settings.embedding_model,
                 base_url=self.settings.embedding_base_url or None,
                 api_key=self.settings.embedding_api_key or None,
@@ -248,6 +263,7 @@ class RagEngine:
         if self.rag is not None:
             await self.rag.finalize_storages()
             self.rag = None
+        self._query_embedding_cache.clear()
 
 
 
@@ -407,24 +423,28 @@ class RagEngine:
 
         rag = self.ensure_ready()
         prompt = f"""
-        判断下面的证据是否包含能够直接回答问题的信息。
+Decide whether the evidence supports answering the question.
 
-        严格规则：
-        - 仅仅主题相似不算相关。
-        - 不能依靠常识补充缺失信息。
-        - 如果证据不能直接支持答案，返回 false。
-        - 只能返回 true 或 false。
+Rules:
+- Evidence may support an answer by combining several excerpts.
+- Topic similarity alone is insufficient.
+- Do not infer facts absent from the evidence.
+- Return JSON only: {{"relevant": true}} or {{"relevant": false}}.
 
-        问题：
-        {query}
+Question:
+{query}
 
-        证据：
-        {context}
+Evidence:
+{context}
         """.strip()
 
         response = await rag.llm_model_func(prompt) #调用LLM：判断证据是否真的能回答问题
-        text = str(response).strip().lower()
-        return text == "true"
+        text = str(response).strip()
+        try:
+            return bool(json.loads(text)["relevant"])
+        except (json.JSONDecodeError, KeyError, TypeError):
+            match = re.search(r"\b(true|false)\b", text, flags=re.IGNORECASE)
+            return match is not None and match.group(1).lower() == "true"
 
 
     async def query_context(
@@ -467,7 +487,9 @@ class RagEngine:
             return result, metrics | {
                 "chunks_count": 0,
                 "rewrite_ms": rewrite_ms,
+                "query_rewrite_ms": rewrite_ms,
                 "retrieval_ms": 0.0,
+                "search_ms": 0.0,
                 "extraction_ms": 0.0,
                 "evidence_gate_ms": 0.0,
                 "request_total_ms": metrics["latency_ms"],
@@ -493,7 +515,9 @@ class RagEngine:
             return result, metrics | {
                 "chunks_count": 0,
                 "rewrite_ms": rewrite_ms,
+                "query_rewrite_ms": rewrite_ms,
                 "retrieval_ms": 0.0,
+                "search_ms": 0.0,
                 "extraction_ms": 0.0,
                 "evidence_gate_ms": 0.0,
                 "request_total_ms": metrics["latency_ms"],
@@ -558,7 +582,9 @@ class RagEngine:
         metrics = self._query_metrics(started, resolved, cache_hit=False)
         metrics.update({
             "rewrite_ms": rewrite_ms,
+            "query_rewrite_ms": rewrite_ms,
             "retrieval_ms": retrieval_ms,
+            "search_ms": retrieval_ms,
             "extraction_ms": extraction_ms,
             "evidence_gate_ms": evidence_gate_ms,
             "request_total_ms": metrics["latency_ms"],
@@ -664,15 +690,10 @@ class RagEngine:
         # 计时
         started = time.perf_counter()
 
-        # 构造QueryParam
-        param = self.build_query_param(resolved, only_need_context=False)
-
-        # LightRAG调用LLM检索:
-        # 查询分析→ 关键词提取→ 向量/图谱检索→
-        # 选择相关 chunks→ 组装上下文→ 调用 LLM→ 返回答案与检索数据
+        retrieval_param = self.build_query_param(resolved, only_need_context=True)
         try:
-            result = await asyncio.wait_for(
-                rag.aquery_llm(effective_query, param=param), # 第一次调用LLM，次数取决于schemas.QueryMode
+            retrieval_result = await asyncio.wait_for(
+                rag.aquery_data(effective_query, param=retrieval_param),
                 timeout=self.settings.query_timeout_seconds
             )
         except asyncio.TimeoutError as exc:
@@ -685,24 +706,21 @@ class RagEngine:
                 "LightRAG初始化、入库或查询失败！"
             ) from exc
 
-        # 提取答案、检索结果和耗时
-        llm_response = result.get("llm_response", {}) or {}
-
-        # 增加 evidence 门控
-        data = result.get("data") or {}
+        # 使用与 /query/data 相同的候选集做证据门控，避免评测召回与生产生成脱节。
+        data = retrieval_result.get("data") or {}
         chunks = data.get("chunks") or []
         references = data.get("references") or []
-        query_succeeded=result.get("status")=="success"
+        query_succeeded=retrieval_result.get("status")=="success"
         has_evidence = bool(chunks or references)
         candidate_hit = query_succeeded and has_evidence
 
-        context = str(data.get("context") or "").strip()
+        context = "\n\n".join(
+            str(chunk.get("content") or "").strip()
+            for chunk in chunks
+            if isinstance(chunk, dict) and chunk.get("content")
+        )
         if not context:
-            context = "\n\n".join(
-                str(chunk.get("content") or "").strip()
-                for chunk in chunks
-                if isinstance(chunk, dict) and chunk.get("content")
-            )
+            context = str(data.get("context") or "").strip()
 
         # 截断 context
         context_truncated = False
@@ -717,6 +735,22 @@ class RagEngine:
             else False
         )
         hit = candidate_hit and relevant
+
+        llm_response: dict[str, Any] = {}
+        if hit:
+            answer_param = self.build_query_param(resolved, only_need_context=False)
+            try:
+                answer_result = await asyncio.wait_for(
+                    rag.aquery_llm(effective_query, param=answer_param),
+                    timeout=self.settings.query_timeout_seconds,
+                )
+            except asyncio.TimeoutError as exc:
+                raise RagQueryTimeoutError(
+                    f"LightRAG 查询超时！ {self.settings.query_timeout_seconds:g} 秒"
+                ) from exc
+            except Exception as exc:
+                raise RagEngineError("LightRAG初始化、入库或查询失败！") from exc
+            llm_response = answer_result.get("llm_response", {}) or {}
 
         # 不相关时必须清空全部证据，禁止模型答案泄漏出去
         if not hit:

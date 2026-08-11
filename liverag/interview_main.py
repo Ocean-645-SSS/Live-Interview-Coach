@@ -18,9 +18,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import redis.asyncio as redis
 from livekit import rtc
 from livekit.agents import AgentServer, JobContext, cli, room_io
 
+from liverag.agent.hot_words import build_session_hot_words
 from liverag.agent.interview_assistant import (
     InterviewAudioNotReadyError,
     InterviewAudioReadiness,
@@ -35,7 +37,11 @@ from liverag.interview.application.evaluator import (
     OpenAIAnswerEvaluationSettings,
 )
 from liverag.interview.application.service import InterviewService
+from liverag.interview.jobs.queue import RedisQueue
+from liverag.interview.jobs.report_generation import enqueue_report_generation
+from liverag.interview.jobs.repository import JobRepository
 from liverag.interview.persistence.db import create_database_engine, create_session_factory
+from liverag.interview.persistence.repository import InterviewRepository
 from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
 from liverag.interview.records import AttemptState
 from liverag.interview.schemas import InterviewState
@@ -567,6 +573,21 @@ def build_interview_service() -> InterviewService:
     )
 
 
+def _build_session_hot_words_json(
+    repository: InterviewRepository,
+    session_id: str,
+    *,
+    path: Path | None = None,
+) -> str:
+    """在ASR建连前读取 session 的冻结 plan，生成 session 热词并注入 build_agent_session()"""
+
+    session_record = repository.get_session(session_id)
+    plan = repository.get_interview_plan(session_record.interview_id)
+    if plan is None:
+        raise ValueError("面试 Session 缺少冻结计划")
+    return build_session_hot_words(plan, path)
+
+
 @server.rtc_session(agent_name="interview-agent")
 async def interview_agent_entrypoint(ctx: JobContext) -> None:
     """处理一场实时面试：连接房间、启动语音 Agent，并记录连接结果。"""
@@ -587,16 +608,41 @@ async def interview_agent_entrypoint(ctx: JobContext) -> None:
     if ctx.room.name and attempt.room_name != ctx.room.name:
         raise ValueError("当前 LiveKit 房间与 Attempt 记录不一致")
 
+    settings = load_app_settings()
+    report_job_engine = create_database_engine(settings.interview_database.url)
+    report_job_repo = JobRepository(create_session_factory(report_job_engine))
+    report_redis = redis.from_url(settings.redis.url, decode_responses=True)
+    report_queue = RedisQueue(
+        report_redis,
+        lock_ttl_seconds=settings.redis.lock_ttl_seconds,
+    )
+
+    async def enqueue_session_report(session_id: str) -> object:
+        return await enqueue_report_generation(
+            interview_repo=repository,
+            job_repo=report_job_repo,
+            redis_queue=report_queue,
+            session_id=session_id,
+        )
+
     #获得controller层
     controller = InterviewAgentController(
         service=service,
         session_id=metadata.session_id,
         attempt_id=metadata.attempt_id,
+        enqueue_report_generation=enqueue_session_report,
     )
 
-    settings = load_app_settings()
+    voice = settings.voice
+    #注入热词
+    hot_words_path = Path(voice.stt_hot_words_path) if voice.stt_hot_words_path else None
+    hot_words_json = _build_session_hot_words_json(
+        repository,
+        metadata.session_id,
+        path=hot_words_path,
+    )
     #创建实时语音会话链路
-    session = build_agent_session(settings)
+    session = build_agent_session(settings, hot_words_json=hot_words_json)
     logger.info(
         "interview.stt.instance_created",
         extra={
@@ -604,6 +650,8 @@ async def interview_agent_entrypoint(ctx: JobContext) -> None:
             "attempt_id": metadata.attempt_id,
             "room_name": attempt.room_name,
             "stt_type": type(session.stt).__name__,
+            "stt_hot_word_count": len(json.loads(hot_words_json).get("hotwords", []))
+            if hot_words_json else 0,
         },
     )
     #创建顶层面试agent
@@ -638,6 +686,8 @@ async def interview_agent_entrypoint(ctx: JobContext) -> None:
                 attempt_id=metadata.attempt_id,
                 state=AttemptState.DISCONNECTED,
             )
+        await report_redis.aclose()
+        report_job_engine.dispose()
 
     #回调
     ctx.add_shutdown_callback(finish_attempt)

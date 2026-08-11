@@ -46,3 +46,7 @@ def main()->None:
         reload=False, #关闭代码修改之后的自动重载
         log_level=os.getenv("RAG_UVICORN_LOG_LEVEL","info") #日志等级
     )
+
+
+if __name__ == "__main__":
+    main()

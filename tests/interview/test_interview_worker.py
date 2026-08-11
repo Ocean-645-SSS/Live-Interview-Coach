@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import liverag.interview_main as interview_main
 from liverag.agent.interview_assistant import (
     ActiveAnswerBuffer,
     AnswerSubmitReason,
@@ -20,6 +21,7 @@ from liverag.interview.schemas import InterviewConfig, InterviewState
 from liverag.interview_main import (
     InterviewJobMetadata,
     InterviewWorkerDiagnostics,
+    _build_session_hot_words_json,
     parse_interview_control,
 )
 
@@ -55,6 +57,46 @@ def test_interview_agent_disables_default_llm_asynchronously() -> None:
 
 def test_new_interview_answer_timeout_defaults_to_90_seconds() -> None:
     assert InterviewConfig().answer_timeout_seconds == 90
+
+
+def test_session_hot_words_are_selected_from_the_frozen_plan(monkeypatch) -> None:
+    plan = object()
+    captured: dict[str, object] = {}
+
+    class FakeRepository:
+        @staticmethod
+        def get_session(session_id: str) -> SimpleNamespace:
+            captured["session_id"] = session_id
+            return SimpleNamespace(interview_id="interview-1")
+
+        @staticmethod
+        def get_interview_plan(interview_id: str) -> object:
+            captured["interview_id"] = interview_id
+            return plan
+
+    def fake_build_session_hot_words(received_plan: object, path=None) -> str:
+        captured["plan"] = received_plan
+        captured["path"] = path
+        return '{"hotwords": [{"word": "Kafka", "level": 10}]}'
+
+    monkeypatch.setattr(
+        interview_main,
+        "build_session_hot_words",
+        fake_build_session_hot_words,
+    )
+
+    result = _build_session_hot_words_json(
+        FakeRepository(),
+        "session-1",
+    )
+
+    assert result == '{"hotwords": [{"word": "Kafka", "level": 10}]}'
+    assert captured == {
+        "session_id": "session-1",
+        "interview_id": "interview-1",
+        "plan": plan,
+        "path": None,
+    }
 
 
 def test_answer_buffer_merges_multiple_final_segments_without_duplicates() -> None:

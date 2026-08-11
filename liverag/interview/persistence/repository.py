@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 from liverag.interview.records import (
@@ -311,6 +312,14 @@ class InterviewRepository(Protocol):
         content: dict[str, Any],
     ) -> InterviewReportRecord: ...
 
+    def recover_stale_report_generation(
+        self,
+        *,
+        report_id: str,
+        stale_before: datetime,
+        error_message: str,
+    ) -> InterviewReportRecord | None: ...
+
 #===================== Background Worker ======================
 @runtime_checkable
 class JobRepository(Protocol):
@@ -357,21 +366,38 @@ class JobRepository(Protocol):
 
     def mark_queued(self, job_id: str) -> BackgroundJobRecord: ...
 
-    def mark_running(self, job_id: str) -> BackgroundJobRecord: ...
+    def mark_running(
+        self, job_id: str, *, lease_seconds: int = 330
+    ) -> BackgroundJobRecord: ...
+
+    def renew_lease(
+        self, job_id: str, *, lease_token: str, lease_seconds: int
+    ) -> None: ...
 
     def mark_completed(
         self,
         job_id: str,
         result: dict[str, Any],
+        *,
+        lease_token: str | None = None,
     ) -> BackgroundJobRecord: ...
 
     def mark_failed(
         self,
         job_id: str,
         error: str,
+        *,
+        lease_token: str | None = None,
     ) -> BackgroundJobRecord: ...
 
     def retry_job(self, job_id: str) -> BackgroundJobRecord: ...
+
+    def recover_stale_running_jobs(
+        self,
+        *,
+        stale_before: datetime,
+        limit: int = 100,
+    ) -> list[BackgroundJobRecord]: ...
 
     def update_payload(
         self,

@@ -37,6 +37,10 @@ class _StateMachineTestDriver:
         self.repository = repository
 
 
+def test_default_follow_up_limit_supports_three_progressive_rounds():
+    assert InterviewConfig().max_follow_ups_per_question == 3
+
+
 @dataclass(frozen=True, slots=True)
 class _TransitionResult:
     event: InterviewEventRecord

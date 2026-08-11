@@ -703,7 +703,7 @@ class QuestionBank:
 
         return TrainingSelectionResult(
             questions=tuple(ordered),
-            selection_intents={item.id: selection_intents[item.id] for item in ordered},
+            selection_intents={item.id: selection_intents.get(item.id, "BASELINE") for item in ordered},
             job_relevant_by_question={
                 item.id: job_relevance[item.id] for item in ordered
             },

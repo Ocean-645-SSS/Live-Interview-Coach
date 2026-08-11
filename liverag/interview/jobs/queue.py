@@ -28,6 +28,14 @@ else
 end
 """
 
+_RENEW_LOCK_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("pexpire", KEYS[1], ARGV[2])
+else
+    return 0
+end
+"""
+
 
 class RedisQueue:
     """基于 Redis List 的 FIFO 任务队列 + String 短期幂等锁。"""
@@ -157,6 +165,55 @@ class RedisQueue:
                 "释放锁跳过（token 不匹配，锁可能已过期被其他进程占用）",
                 extra={"lock_key": self._lock_key(job_type, resource_id)},
             )
+
+    async def renew_lock(
+        self,
+        *,
+        job_type: str,
+        resource_id: str,
+        lock_token: str,
+        ttl: int,
+    ) -> bool:
+        """仅在 token 仍匹配时原子续期锁。"""
+
+        result = await self._redis.eval(
+            _RENEW_LOCK_SCRIPT,
+            1,
+            self._lock_key(job_type, resource_id),
+            lock_token,
+            ttl * 1000,
+        )
+        return result == 1
+
+    async def keep_lock_alive(
+        self,
+        *,
+        job_type: str,
+        resource_id: str,
+        lock_token: str,
+        ttl: int,
+        stop_event,
+    ) -> None:
+        """在持锁临界区内按 TTL 的三分之一续租。"""
+
+        import asyncio
+
+        interval = max(0.1, ttl / 3)
+        while True:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                return
+            except asyncio.TimeoutError:
+                renewed = await self.renew_lock(
+                    job_type=job_type,
+                    resource_id=resource_id,
+                    lock_token=lock_token,
+                    ttl=ttl,
+                )
+                if not renewed:
+                    raise RuntimeError(
+                        f"Redis 锁已失效：{self._lock_key(job_type, resource_id)}"
+                    ) from None
 
     async def lock_exists(self, *, job_type: str, resource_id: str) -> bool:
         """检查锁是否存在。"""

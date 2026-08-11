@@ -214,7 +214,7 @@ class LiveKitInterviewAgent(Agent):
             elif first_speech.kind is InterviewSpeechKind.CLOSING:
                 await self._play(first_speech)
                 # 生成面试报告，面试结束
-                self._controller.complete()
+                await self._controller.complete()
             # 判断用于恢复题目还是追问
             elif state_before is not InterviewState.LISTENING:
                 await self._deliver_prompt_and_open_answer_window(first_speech)
@@ -365,7 +365,7 @@ class LiveKitInterviewAgent(Agent):
             speech = result.next_speech
             if speech.kind is InterviewSpeechKind.CLOSING:
                 await self._play(speech)
-                self._controller.complete()
+                await self._controller.complete()
             else:
                 await self._deliver_prompt_and_open_answer_window(speech)
 
@@ -534,7 +534,7 @@ class LiveKitInterviewAgent(Agent):
     async def _continue_after_evaluation(self, speech: InterviewSpeech) -> None:
         if speech.kind is InterviewSpeechKind.CLOSING:
             await self._play(speech)
-            self._controller.complete()
+            await self._controller.complete()
         else:
             await self._deliver_prompt_and_open_answer_window(speech)
 

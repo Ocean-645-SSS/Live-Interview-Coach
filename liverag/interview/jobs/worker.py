@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from datetime import datetime, timedelta, timezone
 
 from openai import AsyncOpenAI
 
@@ -22,7 +23,11 @@ from liverag.agent.tool.rag_client import RagClient
 from liverag.interview.application.profile_service import KnowledgeContextSource
 from liverag.interview.jobs.queue import RedisQueue
 from liverag.interview.jobs.repository import JobRepository
-from liverag.interview.jobs.tasks import get_handler, registered_types
+from liverag.interview.jobs.tasks import (
+    REPORT_GENERATION_STALE_AFTER_SECONDS,
+    get_handler,
+    registered_types,
+)
 from liverag.interview.persistence.repository import InterviewRepository
 from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.records import JobStatus
@@ -50,6 +55,7 @@ class BackgroundWorker:
         poll_timeout: float = 5.0,  #轮询间隔
         task_timeout: float = 300.0,   #超时时间
         max_retries: int = 3,   #最大轮次
+        lease_heartbeat_interval: float | None = None,
     ) -> None:
         self._repo = job_repo
         self._queue = redis_queue
@@ -64,6 +70,7 @@ class BackgroundWorker:
         self._poll_timeout = poll_timeout
         self._task_timeout = task_timeout
         self._max_retries = max_retries
+        self._lease_heartbeat_interval = lease_heartbeat_interval
         self._shutdown_event = asyncio.Event()  #初始状态
         self._running = False
 
@@ -103,6 +110,8 @@ class BackgroundWorker:
     # ================================ 核心循环 =================================
     async def _poll_and_execute(self) -> None:
         """兜底扫描 PostgreSQL PENDING Job + 从 Redis 获取下一个 Job 并执行。"""
+
+        await self._recover_stale_running_jobs()
 
         # 兜底扫描：把数据库中 PENDING 但不在 Redis 队列里的 Job 补入队
         await self._backfill_pending_jobs()
@@ -194,7 +203,20 @@ class BackgroundWorker:
             return
 
         #标记运行中：QUEUE->RUNNING
-        self._repo.mark_running(job_id)
+        lease_seconds = int(self._task_timeout) + 30
+        running_job = self._repo.mark_running(job_id, lease_seconds=lease_seconds)
+        lease_token = running_job.lease_token
+        if lease_token is None:
+            raise RuntimeError(f"RUNNING Job 缺少 lease token：{job_id}")
+        heartbeat_stop = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            self._heartbeat_lease(
+                job_id=job_id,
+                lease_token=lease_token,
+                lease_seconds=lease_seconds,
+                stop_event=heartbeat_stop,
+            )
+        )
 
         # 组装 handler 依赖注入
         handler_kwargs = {
@@ -212,14 +234,14 @@ class BackgroundWorker:
             handler_kwargs["intelligence_service"] = self._intelligence_service
         if self._skill_progress_service is not None:
             handler_kwargs["skill_progress_service"] = self._skill_progress_service
+        if job.job_type == "report_generation":
+            handler_kwargs["redis_queue"] = self._queue
+            handler_kwargs["stale_after_seconds"] = REPORT_GENERATION_STALE_AFTER_SECONDS
 
         try:
-            result = await asyncio.wait_for(
-                handler(job, **handler_kwargs),
-                timeout=self._task_timeout,
-            )
+            result = await asyncio.wait_for(handler(job, **handler_kwargs), timeout=self._task_timeout)
             #标记任务完成
-            self._repo.mark_completed(job_id, result)
+            self._repo.mark_completed(job_id, result, lease_token=lease_token)
             logger.info(
                 "Job 执行成功",
                 extra={"job_id": job_id, "job_type": job.job_type},
@@ -227,12 +249,12 @@ class BackgroundWorker:
         #任务超时报错
         except asyncio.TimeoutError:
             error_msg = f"任务超时（{self._task_timeout}s）"
-            self._repo.mark_failed(job_id, error_msg)
+            self._repo.mark_failed(job_id, error_msg, lease_token=lease_token)
             logger.error("Job 超时", extra={"job_id": job_id, "error": error_msg})
         #其他原因失败报错
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
-            self._repo.mark_failed(job_id, error_msg)
+            self._repo.mark_failed(job_id, error_msg, lease_token=lease_token)
             logger.exception(
                 "Job 执行失败",
                 extra={"job_id": job_id, "error": error_msg},
@@ -248,6 +270,55 @@ class BackgroundWorker:
                     )
                 except RuntimeError:
                     pass
+        finally:
+            heartbeat_stop.set()
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat_task
+
+    async def _heartbeat_lease(
+        self,
+        *,
+        job_id: str,
+        lease_token: str,
+        lease_seconds: int,
+        stop_event: asyncio.Event,
+    ) -> None:
+        interval = self._lease_heartbeat_interval or max(1.0, lease_seconds / 3)
+        while True:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                return
+            except asyncio.TimeoutError:
+                self._repo.renew_lease(
+                    job_id,
+                    lease_token=lease_token,
+                    lease_seconds=lease_seconds,
+                )
+
+    async def _recover_stale_running_jobs(self) -> None:
+        """将超过执行窗口的 RUNNING Job 恢复为 PENDING 或 FAILED。"""
+
+        stale_after_seconds = max(
+            int(self._task_timeout) + 30,
+            REPORT_GENERATION_STALE_AFTER_SECONDS,
+        )
+        stale_before = datetime.now(timezone.utc) - timedelta(
+            seconds=stale_after_seconds
+        )
+        recovered = self._repo.recover_stale_running_jobs(
+            stale_before=stale_before,
+        )
+        for job in recovered:
+            logger.warning(
+                "恢复陈旧的 RUNNING Job",
+                extra={
+                    "job_id": job.id,
+                    "job_type": job.job_type,
+                    "status": job.status.value,
+                    "attempt": job.attempt,
+                },
+            )
 
 
 __all__ = ["BackgroundWorker"]

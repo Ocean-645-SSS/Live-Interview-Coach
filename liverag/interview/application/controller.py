@@ -7,12 +7,13 @@
 
 流程：
 start():开场白 -> introduction_spoken()：获取第一道题 -> prompt_spoken()：标记题目播放完毕，等待回答
--> receive_final_answer():保存答案、调用评价、决定下一步行动 -> complete():生成报告，标记面试完成
+-> receive_final_answer():保存答案、调用评价、决定下一步行动 -> complete():投递报告任务
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -62,10 +63,12 @@ class InterviewAgentController:
         service: InterviewService,
         session_id: str,
         attempt_id: str,
+        enqueue_report_generation: Callable[[str], Awaitable[object]] | None = None,
     ) -> None:
         self._service = service
         self._session_id = session_id
         self._attempt_id = attempt_id
+        self._enqueue_report_generation = enqueue_report_generation
 
     def start(self) -> InterviewSpeech:
         """根据数据库状态返回连接后应该播放的第一段话。"""
@@ -299,19 +302,18 @@ class InterviewAgentController:
 
         raise ValueError(f"评价后出现了无法播放下一句话的状态：{result.session.state.value}")
 
-    def complete(self) -> InterviewSessionRecord:
-        """生成最终报告，并把 Session 标记成已完成。"""
+    async def complete(self) -> InterviewSessionRecord:
+        """在结束语播放后投递报告任务，完成状态由 Worker 写入。"""
 
         session = self._service.repository.get_session(self._session_id)
         # 当前状态还未结束
         if session.state is not InterviewState.COMPLETING:
             raise ValueError(f"当前状态不能结束面试：{session.state.value}")
 
-        # 生成最终面试报告
-        self._service.generate_report(self._session_id)
-
-        # 更新状态：面试报告生成完毕
-        return self._transition(InterviewEventType.REPORT_COMPLETED).session
+        if self._enqueue_report_generation is None:
+            raise RuntimeError("面试 Controller 缺少报告任务投递器")
+        await self._enqueue_report_generation(self._session_id)
+        return self._service.repository.get_session(self._session_id)
 
     def _get_plan(self):
         """读取当前 Session 使用的面试计划；没有计划时给出明确错误。"""

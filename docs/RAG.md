@@ -2,148 +2,56 @@
 
 ## 服务定位
 
-`liverag/rag/` 是基于 `lightrag-hku` Core API 的内置 RAG Core Service（端口 9721），不使用官方 WebUI。Agent 和管理 API 启动时都会自动检查并拉起该服务。
+`liverag-rag-service` 是知识库的唯一服务入口，负责 LightRAG 的生命周期、文档解析、索引、查询与元数据管理。管理 API 和语音 Agent 都通过 HTTP 调用它，而不直接操作 LightRAG 存储。
 
-通用语音助手和 Interview Coach 都通过 `RagGateway` 复用此层。通用助手用它做实时知识检索，Interview Coach 用它生成候选人画像和岗位画像。
+## 知识库模型
 
----
+每个知识库由稳定的 `kb_id` 标识，并拥有独立的：
 
-## 存储模型
+- 元数据与文档清单；
+- 原始上传文件；
+- 解析、分块和索引结果；
+- 概览（overview）与跨会话历史；
+- 查询和会话审计记录。
 
-LiveRAG 使用 SQLite 保存产品元数据，使用每知识库独立目录保存原文件和 LightRAG 派生索引。
+会话开始后其 `kb_id` 被固定；切换默认知识库只影响之后创建的会话。该约束防止不同知识库的上下文、缓存和长期记忆互相污染。
 
-```text
-~/.LiveRAG/
-  liverag.db                                    # SQLite 元数据 (MetadataStore)
-  rag/knowledge_bases/
-    default/                                    # 不可删除的个人简历知识库
-      sources/{document_id}/{original_filename} # 原始文件
-      storage/                                  # LightRAG 向量/图谱索引
-      logs/                                     # LightRAG 日志
-    kb_xxx/                                     # 其他知识库（如公司岗位 JD 库）
-      sources/{document_id}/{original_filename}
-      storage/
-      logs/
+## 导入流程
+
+1. 通过管理 API 创建知识库。
+2. 调用文本导入接口或文件上传接口；文件类型由解析器处理，受密码保护的 PDF 可通过 `pdf_password` 提供密码。
+3. RAG Core 创建索引任务，保存原始文件名、来源信息和状态。
+4. 调用方轮询 `/rag/knowledge-bases/{kb_id}/jobs/{job_id}`，确认文档可用后再查询。
+
+上传接口返回任务而非“立即可检索”的承诺。任务状态、文档详情和原始文件均可通过管理 API 查询。
+
+## 查询模式
+
+| 接口 | 用途 |
+| --- | --- |
+| `query/context` | 返回检索上下文和证据，供 Agent 或上层 LLM 使用 |
+| `query/data` | 返回结构化命中数据，适合调试、前端展示和审计 |
+| `query/answer` | 由 RAG Core 基于检索结果直接生成答案 |
+| `session-query/*` | 使用通用语音会话当前冻结的知识库查询 |
+
+查询结果会携带命中与证据相关信息。涉及库内事实的回答应以这些证据为依据：无上下文或无命中时，明确说明当前知识库未提供相关信息，而不是补充未经检索支持的内容。
+
+## 通用语音助手中的工具调用
+
+通用 Agent 在 `rag_tool_mode=auto` 时可调用 `search_knowledge_base`。`ContextManager` 会记录用户问题、补全短追问的查询语境、调用 RAG Core，并按 `session_id` 和轮次保存命中、来源与错误记录。`rag_tool_mode=never` 时工具被禁用。
+
+## 配置
+
+RAG 模型和连接配置由 `.env.local` 提供，主要包括：
+
+```dotenv
+LIVERAG_RAG_LLM_MODEL=
+LIVERAG_RAG_LLM_BASE_URL=
+LIVERAG_RAG_LLM_API_KEY=
+LIVERAG_RAG_EMBEDDING_MODEL=
+LIVERAG_RAG_EMBEDDING_BASE_URL=
+LIVERAG_RAG_EMBEDDING_API_KEY=
+LIGHTRAG_TIMEOUT_MS=120000
 ```
 
-SQLite 只保存元数据（文档名、状态、大小、SHA256 等），不保存原文件二进制、向量、图谱或 chunk 原文。
-
----
-
-## 单知识库隔离
-
-- 每个知识库对应一个独立 LightRAG workspace。
-- 通用助手一次语音通话只锁定一个 `kb_id`，通话中禁止切换。
-- 查询不会同时访问多个知识库，不做多库 fan-out 或结果合并。
-- 速度依赖预热后的 per-KB engine cache。
-- Interview Coach 创建面试时明确指定 `candidate_kb_id`（固定为 `default` 个人简历库）和 `target_kb_id`（目标岗位资料库），两个 KB 分别检索、不混合。
-
----
-
-## 上传与索引流程
-
-文件上传后，后端按以下顺序处理：
-
-1. 生成 `document_id`。
-2. 保存原文件到 `sources/{document_id}/`。
-3. 计算大小、SHA256、扩展名和 content type。
-4. 写入 SQLite，状态为 `parse_status=pending`、`index_status=pending`。
-5. 解析原文件（支持 UTF-8 文本、PDF、DOCX、PPTX、XLSX、Markdown 等）。
-6. 解析成功后写入 LightRAG，进入异步索引队列。
-7. 解析或索引失败时保留原文件，并把失败原因写入 `error_msg`。
-8. 文档变更成功后，标记 `context/{kb_id}/knowledge_overview_meta.json.stale=true`。
-
----
-
-## 知识库概览
-
-每个知识库有一份固定概览：
-
-```text
-~/.LiveRAG/context/{kb_id}/knowledge_overview.md
-~/.LiveRAG/context/{kb_id}/knowledge_overview_meta.json
-```
-
-概览由独立 Context Model 生成，输入包括：
-- 知识库 metadata
-- 文档列表
-- LightRAG 提供的 topics、entities、relations、documents overview
-- 当前 RAG 查询参数
-
-概览不会在通话启动时生成，也不提供前端手动触发接口。固定生成时机是：文件索引任务完成，并且至少有一个新文档进入 `processed` 状态。
-
-前端上传后应轮询 `GET /rag/knowledge-bases/{kb_id}/jobs/{job_id}` 等待完成。生成失败时写入降级概览，不阻断文档管理和后续通话。
-
----
-
-## 语音查询参数
-
-语音链路默认使用低延迟参数：
-
-```bash
-LIGHTRAG_QUERY_MODE=naive
-LIGHTRAG_TOP_K=4
-LIGHTRAG_CHUNK_TOP_K=4
-LIGHTRAG_CONTEXT_MAX_CHARS=1800
-LIGHTRAG_VOICE_ENABLE_RERANK=false
-```
-
-如果需要更高召回，可以提高 `top_k`、`chunk_top_k` 或切换查询模式，但会增加延迟。
-
----
-
-## RAG 工具模式（通用语音助手）
-
-只支持两种：
-- `auto`：通话前把工具说明渲染进 `session_system_prompt.md`，并向 LLM 提供 `search_knowledge_base` 工具。
-- `never`：通话前写入禁用说明，不向 LLM 提供知识库工具。
-
-不支持强制每轮检索。
-
----
-
-## Interview Coach 中的 RAG 使用
-
-Interview Coach 在**面试准备阶段**使用 RAG，不在实时语音主链路中调用：
-
-1. **候选人画像**：从 `default` 知识库（个人简历）检索，提取技能、项目经历、evidence refs → `CandidateProfile`
-2. **岗位画像**：从目标岗位知识库检索，提取公司、岗位、技能要求、evidence refs → `JobProfile`
-3. **画像冻结**：生成的 `CandidateProfile` 和 `JobProfile` 作为快照保存在 `InterviewPlan` 中，之后资料更新不会影响已开始的面试
-
-实时面试链路**不调用 RAG**。所有需要的事实信息已经在 Plan 生成时冻结。
-
-**RAG 边界约定：**
-
-适合进入 RAG：简历、项目文档、README、技术总结、JD 等非结构化候选人材料。
-
-不进入 RAG：固定题库、rubric、expected points、状态机规则、配置、评分权重、结构化 SkillProgress。这些需要稳定版本、精确过滤和确定性读取，向量召回无法保证完整性或唯一性。
-
----
-
-## 前端接口
-
-前端只对接管理 API（9821），不直接访问 RAG Core（9721）：
-
-```text
-GET    /rag/knowledge-bases
-POST   /rag/knowledge-bases
-GET    /rag/knowledge-bases/{kb_id}
-PATCH  /rag/knowledge-bases/{kb_id}
-DELETE /rag/knowledge-bases/{kb_id}
-GET    /rag/knowledge-bases/{kb_id}/documents
-POST   /rag/knowledge-bases/{kb_id}/documents/files
-POST   /rag/knowledge-bases/{kb_id}/documents/text
-GET    /rag/knowledge-bases/{kb_id}/documents/{document_id}
-GET    /rag/knowledge-bases/{kb_id}/documents/{document_id}/source
-DELETE /rag/knowledge-bases/{kb_id}/documents/{document_id}
-DELETE /rag/knowledge-bases/{kb_id}/documents
-GET    /rag/knowledge-bases/{kb_id}/jobs/{job_id}
-GET    /rag/knowledge-bases/{kb_id}/context/overview
-PUT    /rag/knowledge-bases/{kb_id}/context/overview
-POST   /rag/knowledge-bases/{kb_id}/query/context
-POST   /rag/knowledge-bases/{kb_id}/query/data
-POST   /rag/session-query/context
-POST   /rag/session-query/data
-```
-
-完整字段见 [API.md](./API.md)。
+运行时也可通过 `GET/PUT /rag/config` 管理客户端侧的查询模式、超时、`top_k`、重排和上下文长度等设置。密钥不会以明文返回。

@@ -331,6 +331,7 @@ class InterviewAnswerModel(Base):
     )
     answer_number: Mapped[int] = mapped_column(Integer, nullable=False)
     transcript: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
     state: Mapped[AnswerState] = mapped_column(
         SqlEnum(
             AnswerState,
@@ -580,6 +581,7 @@ class BackgroundJobModel(Base):
             name="uq_background_jobs_idempotency",
         ),
         Index("idx_background_jobs_status", "status", "created_at"),
+        Index("idx_background_jobs_running_lease", "status", "lease_expires_at"),
         Index(
             "idx_background_jobs_resource",
             "job_type",
@@ -608,6 +610,8 @@ class BackgroundJobModel(Base):
     attempt: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[str | None] = mapped_column(String(64))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, nullable=False

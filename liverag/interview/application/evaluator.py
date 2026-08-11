@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Protocol
@@ -17,7 +18,40 @@ from liverag.interview.prompts.evaluation_prompts import ANSWER_EVALUATION_SYSTE
 from liverag.interview.records import InterviewAnswerRecord, generate_id
 from liverag.interview.schemas import AnswerEvaluation, InterviewQuestion
 
-EVALUATION_PROMPT_VERSION = "answer-evaluation-v1"
+EVALUATION_PROMPT_VERSION = "answer-evaluation-v6"
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerEvaluationContext:
+    """Same-question interview context used to generate progressive follow-ups."""
+
+    prior_answers: tuple[InterviewAnswerRecord, ...] = ()
+    follow_up_round: int = 0
+    max_follow_ups: int = 0
+
+
+def _validate_transcript_normalization(
+    evaluation: AnswerEvaluation,
+    raw_transcript: str,
+) -> None:
+    """纠错可审计校验：evaluator返回的normalized_transcript不能凭空改写，
+    必须从原始raw_transcipt按照transcirpt_corrrection里的记录逐条替换得到"""
+
+    normalized = evaluation.normalized_transcript
+    #确认normalized有值
+    if normalized is None:
+        raise ValueError("normalized_transcript 不能为空")
+
+    #原始转写
+    replayed = raw_transcript
+    #按顺序每一条纠错
+    for correction in evaluation.transcript_corrections:
+        if correction.original not in replayed:
+            raise ValueError("transcript_corrections 未命中 raw transcript")
+        replayed = replayed.replace(correction.original, correction.replacement, 1)
+    #结果必须与normalized_transcipt一致
+    if replayed != normalized:
+        raise ValueError("normalized_transcript 必须由纠正记录逐项重放得到")
 
 
 class AnswerEvaluationProviderError(RuntimeError):
@@ -55,6 +89,7 @@ class AnswerEvaluationProvider(Protocol):
         *,
         answer: InterviewAnswerRecord,
         question: InterviewQuestion,
+        context: AnswerEvaluationContext | None = None,
     ) -> AnswerEvaluation: ...
 
 
@@ -81,14 +116,16 @@ class OpenAIAnswerEvaluationProvider:
         *,
         answer: InterviewAnswerRecord,
         question: InterviewQuestion,
+        context: AnswerEvaluationContext | None = None,
     ) -> AnswerEvaluation:
         """通过已知的answer+question，调用LLM返回评价结果"""
 
         #构造prompt
-        prompt = self._build_prompt(answer, question)
+        prompt = self._build_prompt(answer, question, context)
 
         try:
             validation_error: ValidationError | ValueError | None = None
+            invalid_content: str | None = None
 
             #最多尝试调用 LLM 2次
             for attempt in range(2):
@@ -103,8 +140,12 @@ class OpenAIAnswerEvaluationProvider:
                         {
                             "role": "user",
                             "content": (
-                                "上一份 JSON 未通过校验，请修正后重新输出完整 JSON。"
+                                "上一份 JSON 未通过校验。请以它为基础修正后重新输出完整 JSON。"
+                                "\n若 next_action 是 FOLLOW_UP 或 CLARIFY，"
+                                "follow_up_target 和 follow_up_question 都必须是非空字符串；"
+                                "否则两者都必须为 null。"
                                 f"\n校验错误：{validation_error}"
+                                f"\n上一份无效 JSON：{invalid_content}"
                             ),
                         }
                     )
@@ -141,6 +182,7 @@ class OpenAIAnswerEvaluationProvider:
                 #捕捉失败
                 except (ValidationError, ValueError) as exc:
                     validation_error = exc
+                    invalid_content = content
                     if attempt == 1:
                         raise
             raise AnswerEvaluationProviderError("模型没有返回可校验的评价")
@@ -155,6 +197,7 @@ class OpenAIAnswerEvaluationProvider:
         self,
         answer: InterviewAnswerRecord,
         question: InterviewQuestion,
+        context: AnswerEvaluationContext | None = None,
     ) -> str:
         """构造模型提示词"""
 
@@ -163,6 +206,15 @@ class OpenAIAnswerEvaluationProvider:
         reference_answer = (question.reference_answer or "")[
             : self._settings.max_reference_answer_chars
         ]
+        context = context or AnswerEvaluationContext()
+        prior_answers = [
+            {
+                "answer_number": item.answer_number,
+                "candidate_answer": item.transcript[: self._settings.max_transcript_chars],
+            }
+            for item in context.prior_answers[-3:]
+        ]
+        remaining_follow_ups = max(0, context.max_follow_ups - context.follow_up_round)
 
         return (
             f"prompt_version: {EVALUATION_PROMPT_VERSION}\n"
@@ -171,6 +223,10 @@ class OpenAIAnswerEvaluationProvider:
             f"question: {question.question_text}\n"
             f"objective: {question.objective}\n"
             f"rubric: {question.rubric.model_dump_json()}\n"
+            f"allow_follow_up: {question.allow_follow_up}\n"
+            f"follow_up_round: {context.follow_up_round}\n"
+            f"remaining_follow_ups: {remaining_follow_ups}\n"
+            f"prior_candidate_answers: {json.dumps(prior_answers, ensure_ascii=False)}\n"
             "<reference_answer>\n"
             f"{reference_answer}\n"
             "</reference_answer>\n"
@@ -199,6 +255,8 @@ class OpenAIAnswerEvaluationProvider:
             raise ValueError("评价结果的 answer_id 与输入不一致")
         if evaluation.question_id != question.id:
             raise ValueError("评价结果的 question_id 与输入不一致")
+        #纠错审计校验
+        _validate_transcript_normalization(evaluation, answer.transcript)
         expected_score = evaluation.scores.calculate_weighted_score(question.rubric)
         if abs(evaluation.weighted_score - expected_score) > 1e-9:
             raise ValueError(
@@ -247,10 +305,27 @@ class AnswerEvaluator:
         if question is None:
             raise ValueError(f"面试计划中不存在题目：{answer.question_id}")
 
-        #调用LLM做出评价
-        evaluation = await self._provider.evaluate(answer=answer, question=question)
+        # 同一主问题下的前序回答用于生成不重复的递进式追问。
+        prior_answers = tuple(
+            item
+            for item in self._repository.list_answers(
+                session_id=answer.session_id,
+                question_id=answer.question_id,
+            )
+            if item.id != answer.id
+        )
+        evaluation = await self._provider.evaluate(
+            answer=answer,
+            question=question,
+            context=AnswerEvaluationContext(
+                prior_answers=prior_answers,
+                follow_up_round=session.follow_up_count,
+                max_follow_ups=plan.config.max_follow_ups_per_question,
+            ),
+        )
         if evaluation.answer_id != answer.id or evaluation.question_id != question.id:
             raise ValueError("评价结果的回答或题目标识与请求不一致")
+        _validate_transcript_normalization(evaluation, answer.transcript)
 
         #保存结构化评价，记录rubric版本
         return self._repository.save_evaluation(
@@ -262,6 +337,7 @@ class AnswerEvaluator:
 
 __all__ = [
     "EVALUATION_PROMPT_VERSION",
+    "AnswerEvaluationContext",
     "AnswerEvaluationProvider",
     "AnswerEvaluationProviderError",
     "AnswerEvaluator",

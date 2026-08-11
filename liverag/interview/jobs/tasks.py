@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -29,6 +31,10 @@ from liverag.interview.application.skill_progress_reconciliation import (
 from liverag.interview.intelligence.provider import InterviewIntelligenceQuery
 from liverag.interview.intelligence.service import IntelligenceService
 from liverag.interview.jobs.queue import RedisQueue
+from liverag.interview.jobs.report_generation import (
+    REPORT_GENERATION_LOCK_TTL_SECONDS,
+    finalize_report_generation,
+)
 from liverag.interview.jobs.repository import BackgroundJobRecord, JobRepository
 from liverag.interview.persistence.repository import ConcurrentUpdateError, InterviewRepository
 from liverag.interview.question_bank.catalog import QuestionBank
@@ -37,6 +43,9 @@ from liverag.interview.schemas import CandidateFacts, InterviewConfig
 from liverag.interview.skill_progress.service import SkillProgressService
 
 logger = logging.getLogger("liverag.interview.jobs.tasks")
+
+# 必须大于 Worker 默认 300 秒任务超时，避免仍在正常执行的任务被误恢复。
+REPORT_GENERATION_STALE_AFTER_SECONDS = 330
 
 # job_type → async handler
 _TASK_REGISTRY: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {}
@@ -729,6 +738,7 @@ async def report_generation_task(
     interview_repo: InterviewRepository,
     redis_queue: RedisQueue | None = None,
     skill_progress_service: SkillProgressService | None = None,
+    stale_after_seconds: int = REPORT_GENERATION_STALE_AFTER_SECONDS,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """报告生成任务：加载 Session 的所有评价 → 聚合生成报告 → 持久化。
@@ -823,6 +833,7 @@ async def report_generation_task(
         reconcile_skill_progress(
             interview_repo, skill_progress_service, session_id
         )
+        finalize_report_generation(interview_repo=interview_repo, session_id=session_id)
         return {
             "report_id": existing.id,
             "session_id": session_id,
@@ -830,8 +841,10 @@ async def report_generation_task(
         }
 
     # ── Redis 锁：防止多个 Worker/API 同时生成同一份报告 ──
-    lock_ttl = 300  # 5 分钟，足够报告生成完成
+    lock_ttl = REPORT_GENERATION_LOCK_TTL_SECONDS
     lock_token: str | None = None
+    lock_heartbeat_stop: asyncio.Event | None = None
+    lock_heartbeat_task: asyncio.Task[None] | None = None
     if redis_queue is not None:
         lock_token = await redis_queue.acquire_lock(
             job_type="report_generation",
@@ -844,7 +857,7 @@ async def report_generation_task(
                 "报告生成锁已被占用，等待另一进程完成",
                 extra={"job_id": job.id, "session_id": session_id},
             )
-            for _ in range(60):  # 最多等 60 秒
+            for _ in range(lock_ttl + 1):
                 await asyncio.sleep(1.0)
                 existing = interview_repo.get_report_by_session(session_id)
                 if existing is not None and existing.state is ReportState.COMPLETED:
@@ -856,6 +869,9 @@ async def report_generation_task(
                     reconcile_skill_progress(
                         interview_repo, skill_progress_service, session_id
                     )
+                    finalize_report_generation(
+                        interview_repo=interview_repo, session_id=session_id
+                    )
                     return {
                         "report_id": existing.id,
                         "session_id": session_id,
@@ -864,10 +880,10 @@ async def report_generation_task(
             # 超时仍未完成 → 判定上一进程已崩溃，
             # 等 60 秒后再尝试一次，如果还是拿不到，就认为当前仍然有人持锁生成，抛错让任务后续重试。
             logger.warning(
-                "等待报告生成超时（60s），强制接管",
+                "等待报告生成超过锁 TTL，尝试重新获取锁",
                 extra={"job_id": job.id, "session_id": session_id},
             )
-            # 旧锁已过 TTL 的 60/300，重新尝试获取
+            # 锁已自然过期后重新尝试获取；这不是删除或抢占仍有效的锁。
             lock_token = await redis_queue.acquire_lock(
                 job_type="report_generation",
                 resource_id=session_id,
@@ -877,6 +893,27 @@ async def report_generation_task(
                 raise RuntimeError(
                     f"无法获取报告生成锁：session {session_id} 的报告可能正在由另一进程生成"
                 )
+
+    # ── 已持锁且报告状态已陈旧：恢复后允许本次 Job 重试 ──
+    if (
+        lock_token is not None
+        and existing is not None
+        and existing.state is ReportState.GENERATING
+    ):
+        stale_before = datetime.now(timezone.utc) - timedelta(
+            seconds=stale_after_seconds
+        )
+        recovered = interview_repo.recover_stale_report_generation(
+            report_id=existing.id,
+            stale_before=stale_before,
+            error_message="报告生成 Worker 超时未完成，已由后续 Job 恢复",
+        )
+        if recovered is not None:
+            logger.warning(
+                "恢复陈旧的报告生成状态",
+                extra={"job_id": job.id, "session_id": session_id, "report_id": existing.id},
+            )
+            existing = recovered
 
     # ── 创建或复用报告记录 ──
     report = interview_repo.create_report(session_id=session_id) if existing is None else existing
@@ -893,6 +930,7 @@ async def report_generation_task(
             reconcile_skill_progress(
                 interview_repo, skill_progress_service, session_id
             )
+            finalize_report_generation(interview_repo=interview_repo, session_id=session_id)
             return {
                 "report_id": refreshed.id,
                 "session_id": session_id,
@@ -900,9 +938,23 @@ async def report_generation_task(
             }
         raise
 
+    if lock_token is not None and redis_queue is not None:
+        lock_heartbeat_stop = asyncio.Event()
+        lock_heartbeat_task = asyncio.create_task(
+            redis_queue.keep_lock_alive(
+                job_type="report_generation",
+                resource_id=session_id,
+                lock_token=lock_token,
+                ttl=lock_ttl,
+                stop_event=lock_heartbeat_stop,
+            )
+        )
+
     try:
         # ── 聚合生成 ──
-        content = builder.build(session_id)
+        content = await asyncio.to_thread(builder.build, session_id)
+        if lock_heartbeat_task is not None and lock_heartbeat_task.done():
+            lock_heartbeat_task.result()
         # ── 持久化完成 ──
         completed = interview_repo.complete_report(
             report_id=report.id, content=content
@@ -931,6 +983,7 @@ async def report_generation_task(
         reconcile_skill_progress(
             interview_repo, skill_progress_service, session_id
         )
+        finalize_report_generation(interview_repo=interview_repo, session_id=session_id)
         return {
             "report_id": completed.id,
             "session_id": session_id,
@@ -938,6 +991,12 @@ async def report_generation_task(
         }
     finally:
         # ── 释放锁 ──
+        if lock_heartbeat_stop is not None:
+            lock_heartbeat_stop.set()
+        if lock_heartbeat_task is not None:
+            lock_heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await lock_heartbeat_task
         if lock_token is not None and redis_queue is not None:
             try:
                 await redis_queue.release_lock(
