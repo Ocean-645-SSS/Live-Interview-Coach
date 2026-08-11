@@ -170,7 +170,10 @@ class NowcoderSpider:
         # 逐篇抓取正文
         collected: list[RawNowcoderPost] = []
         failed = 0
-        for attempts, (_key, hit) in enumerate(all_hits.items(), start=1):
+        attempts = 0
+
+        for _key, hit in all_hits.items():
+            attempts += 1
 
             # 抓取尝试次数达到硬上限时停止（防止大量无效帖子拖垮超时）
             if attempts > self._max_fetch_attempts:

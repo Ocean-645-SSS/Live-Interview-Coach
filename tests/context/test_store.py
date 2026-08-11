@@ -1,0 +1,310 @@
+"""M2-A 不可变原始 Session 存档测试。"""
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from liverag.context.store import ContextStore
+from liverag.runtime.paths import build_runtime_paths
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> ContextStore:
+    """创建完全隔离于真实用户数据目录的 ContextStore。"""
+
+    value = ContextStore(build_runtime_paths(tmp_path / "user-data"))
+    value.initialize()
+    return value
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """读取测试生成的 JSONL，并让格式错误直接导致测试失败。"""
+
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def test_start_session_creates_independent_archives_and_retention_metadata(
+    store: ContextStore,
+) -> None:
+    store.start_session("session-one", "kb-one")
+    store.start_session("session-two", "kb-two")
+
+    first = store.paths.sessions_dir / "session-one"
+    second = store.paths.sessions_dir / "session-two"
+
+    for directory in (first, second):
+        assert directory.is_dir()
+        assert (directory / "messages.jsonl").is_file()
+        assert (directory / "rag_context.jsonl").is_file()
+        assert (directory / "runtime.json").is_file()
+        assert (directory / "session_system_prompt.md").is_file()
+
+    assert first != second
+    assert store.read_runtime_state("session-one")["kb_id"] == "kb-one"
+    assert store.read_runtime_state("session-two")["kb_id"] == "kb-two"
+    assert store.read_runtime_state("session-one")["retention"] == {
+        "cleanup_enabled": False
+    }
+
+
+def test_messages_are_appended_with_required_audit_fields(store: ContextStore) -> None:
+    store.start_session("session-1", "kb-1")
+
+    store.append_message(
+        session_id="session-1",
+        role="user",
+        content="第一个问题",
+        turn_index=1,
+        duration=1.25,
+    )
+    store.append_message(
+        session_id="session-1",
+        role="assistant",
+        content="第一个回答",
+        turn_index=1,
+        duration=0.75,
+        metadata={"source": "agent"},
+    )
+
+    records = store.read_message(session_id="session-1")
+
+    assert [record["content"] for record in records] == ["第一个问题", "第一个回答"]
+    assert all(record["session_id"] == "session-1" for record in records)
+    assert all(record["kb_id"] == "kb-1" for record in records)
+    assert all(record["turn_index"] == 1 for record in records)
+    assert all(isinstance(record["timestamp"], str) and record["timestamp"] for record in records)
+    assert [record["duration"] for record in records] == [1.25, 0.75]
+    assert records[1]["metadata"] == {"source": "agent"}
+
+
+def test_rag_contexts_are_appended_with_required_audit_fields(store: ContextStore) -> None:
+    store.start_session("session-1", "kb-1")
+
+    store.append_rag_context(
+        "session-1",
+        {
+            "turn_index": 1,
+            "duration": 0.12,
+            "query": "第一个问题",
+            "hit": True,
+            "evidence_count": 1,
+        },
+    )
+    store.append_rag_context(
+        "session-1",
+        {
+            "turn_index": 2,
+            "duration": 0.08,
+            "query": "第二个问题",
+            "hit": False,
+            "evidence_count": 0,
+        },
+    )
+
+    records = store.read_rag_context("session-1")
+
+    assert [record["query"] for record in records] == ["第一个问题", "第二个问题"]
+    assert all(record["session_id"] == "session-1" for record in records)
+    assert all(record["kb_id"] == "kb-1" for record in records)
+    assert [record["turn_index"] for record in records] == [1, 2]
+    assert [record["duration"] for record in records] == [0.12, 0.08]
+    assert all(isinstance(record["timestamp"], str) and record["timestamp"] for record in records)
+
+
+def test_end_session_preserves_raw_records_and_updates_runtime(store: ContextStore) -> None:
+    store.start_session("session-1", "kb-1")
+    store.append_message(
+        session_id="session-1",
+        role="user",
+        content="需要永久保留的问题",
+        turn_index=1,
+        duration=0.5,
+    )
+    store.append_rag_context(
+        "session-1",
+        {"turn_index": 1, "duration": 0.1, "query": "问题", "hit": False},
+    )
+
+    session_dir = store.paths.sessions_dir / "session-1"
+    messages_file = session_dir / "messages.jsonl"
+    rag_file = session_dir / "rag_context.jsonl"
+    messages_before = messages_file.read_bytes()
+    rag_before = rag_file.read_bytes()
+
+    store.end_session("session-1")
+
+    assert messages_file.read_bytes() == messages_before
+    assert rag_file.read_bytes() == rag_before
+    runtime = store.read_runtime_state("session-1")
+    assert runtime["state"] == "ended"
+    assert isinstance(runtime["ended_at"], str) and runtime["ended_at"]
+    assert isinstance(runtime["duration"], float)
+    assert runtime["duration"] >= 0
+    assert runtime["retention"]["cleanup_enabled"] is False
+
+
+@pytest.mark.parametrize("filename,reader", [
+    ("messages.jsonl", lambda value: value.read_message(session_id="session-1")),
+    ("rag_context.jsonl", lambda value: value.read_rag_context("session-1")),
+])
+def test_corrupt_jsonl_line_is_skipped(
+    store: ContextStore,
+    filename: str,
+    reader: Any,
+) -> None:
+    store.start_session("session-1", "kb-1")
+    path = store.paths.sessions_dir / "session-1" / filename
+    path.write_text(
+        '{"sequence": 1}\n{this is not json}\n{"sequence": 2}\n',
+        encoding="utf-8",
+    )
+
+    assert reader(store) == [{"sequence": 1}, {"sequence": 2}]
+
+
+def test_invalid_duration_is_rejected(store: ContextStore) -> None:
+    store.start_session("session-1", "kb-1")
+
+    with pytest.raises(ValueError, match="duration"):
+        store.append_message(
+            session_id="session-1",
+            role="user",
+            content="问题",
+            turn_index=1,
+            duration=-0.1,
+        )
+
+    with pytest.raises(ValueError, match="duration"):
+        store.append_rag_context(
+            "session-1",
+            {"turn_index": 1, "duration": -0.1},
+        )
+
+
+def test_audit_records_require_an_initialized_session(store: ContextStore) -> None:
+    with pytest.raises(ValueError, match="valid kb_id"):
+        store.append_message(
+            session_id="missing-session",
+            role="user",
+            content="问题",
+            turn_index=1,
+            duration=0.1,
+        )
+
+    with pytest.raises(ValueError, match="valid kb_id"):
+        store.append_rag_context(
+            "missing-session",
+            {"turn_index": 1, "duration": 0.1},
+        )
+
+
+def test_global_prompt_files_can_be_read_and_written_independently(
+    store: ContextStore,
+) -> None:
+    original_soul = store.read_soul()
+
+    store.write_system_prompt_template("新的系统模板")
+    store.write_history_compress_prompt("新的历史压缩提示词")
+    store.write_knowledge_overview_prompt("新的知识库概览提示词")
+
+    assert store.read_system_prompt_template() == "新的系统模板\n"
+    assert store.read_history_compress_prompt() == "新的历史压缩提示词\n"
+    assert store.read_knowledge_overview_prompt() == "新的知识库概览提示词\n"
+    assert store.read_soul() == original_soul
+
+    store.write_soul("新的人格设定")
+
+    assert store.read_soul() == "新的人格设定\n"
+    assert store.read_system_prompt_template() == "新的系统模板\n"
+
+
+def test_session_system_prompts_are_isolated_from_global_template(
+    store: ContextStore,
+) -> None:
+    store.start_session("session-one", "kb-one")
+    store.start_session("session-two", "kb-two")
+    global_template = store.read_system_prompt_template()
+
+    store.write_session_system_prompt("session-one", "会话一提示词")
+    store.write_session_system_prompt("session-two", "会话二提示词")
+
+    assert store.read_session_system_prompt("session-one") == "会话一提示词\n"
+    assert store.read_session_system_prompt("session-two") == "会话二提示词\n"
+    assert store.read_system_prompt_template() == global_template
+
+
+def test_append_history_persists_traceability_cursor_and_kb_isolation(
+    store: ContextStore,
+) -> None:
+    first = store.append_history(
+        kb_id="kb-one",
+        content="  第一条长期摘要  ",
+        source_session_id="session-1",
+    )
+    second = store.append_history(
+        kb_id="kb-one",
+        content="第二条长期摘要",
+        source_session_id="session-2",
+    )
+    other = store.append_history(
+        kb_id="kb-two",
+        content="另一个知识库的摘要",
+        source_session_id="session-3",
+    )
+
+    assert first["cursor"] == 1
+    assert first["content"] == "第一条长期摘要"
+    assert first["source_session_id"] == "session-1"
+    assert isinstance(first["timestamp"], str) and first["timestamp"]
+    assert second["cursor"] == 2
+    assert second["source_session_id"] == "session-2"
+    assert other["cursor"] == 1
+    assert store.read_recent_history("kb-one", limit=10) == [first, second]
+    assert store.read_recent_history("kb-two", limit=10) == [other]
+
+
+def test_append_history_rejects_empty_content(store: ContextStore) -> None:
+    with pytest.raises(ValueError, match="history content"):
+        store.append_history(
+            kb_id="kb-one",
+            content=" \n ",
+            source_session_id="session-1",
+        )
+
+    assert store.read_recent_history("kb-one", limit=10) == []
+
+
+def test_history_cursor_recovers_from_existing_jsonl(
+    store: ContextStore,
+) -> None:
+    directory = store.paths.history_dir / "kb-one"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "history.jsonl").write_text(
+        '{"cursor": 4, "content": "existing", "source_session_id": "old"}\n',
+        encoding="utf-8",
+    )
+
+    record = store.append_history(
+        kb_id="kb-one",
+        content="new",
+        source_session_id="session-new",
+    )
+
+    assert record["cursor"] == 5
+
+
+def test_clear_history_removes_records_and_restarts_cursor(
+    store: ContextStore,
+) -> None:
+    store.append_history("kb-one", "第一条", "session-1")
+    store.append_history("kb-one", "第二条", "session-2")
+    store.append_history("kb-two", "其他库记录", "session-other")
+
+    store.clear_history("kb-one")
+
+    assert store.read_recent_history("kb-one", limit=10) == []
+    assert store.read_recent_history("kb-two", limit=10)[0]["content"] == "其他库记录"
+    record = store.append_history("kb-one", "清空后的记录", "session-3")
+    assert record["cursor"] == 1

@@ -1,7 +1,7 @@
 [project]
 name = "LiveRAG"
 version = "1.0.0"
-description = "基于 LiveKit、LightRAG 和在线模型的中文 AI 模拟面试教练"
+description = "基于 LiveKit、LightRAG 和在线模型的个人知识库语音助手"
 requires-python = ">=3.10, <3.15"
 
 dependencies = [
@@ -33,6 +33,7 @@ dependencies = [
 ]
 
 [project.scripts]
+liverag-agent = "liverag.main:main"
 liverag-api = "liverag.api.main:main"
 liverag-rag-service = "liverag.rag.cli:main"
 liverag-build-question-bank = "liverag.interview.question_bank.cli:main"

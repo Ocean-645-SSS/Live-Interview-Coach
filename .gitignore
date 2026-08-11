@@ -22,7 +22,6 @@ tts-debug.txt
 .task9-*/
 .test-runtime-*/
 /LiveRAG-Fronted/
-logs/
 data/
 liverag.rar
 study_source.md

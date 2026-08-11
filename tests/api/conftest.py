@@ -23,6 +23,7 @@ def api_server(
     """在 pytest 临时用户目录中重新加载管理 API 模块。"""
 
     import liverag.rag.service as service_module
+    from liverag.runtime.paths import build_runtime_paths, ensure_runtime_dirs
 
     # 防止 server 导入时用 .env.local 覆盖根 conftest 设置的 pytest 临时目录。
     monkeypatch.setenv("LIVERAG_USER_DATA_DIR", str(tmp_path))
@@ -37,6 +38,8 @@ def api_server(
             error="RAG Core is not running in API tests",
         ),
     )
+    test_settings = settings_module.load_app_settings()
+    ensure_runtime_dirs(build_runtime_paths(test_settings.user_data_dir))
     sys.modules.pop("liverag.api.server", None)
     return importlib.import_module("liverag.api.server")
 
