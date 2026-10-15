@@ -20,7 +20,12 @@ from enum import Enum
 
 from liverag.interview.application.orchestrator import AnswerReceivedCommand, AnswerReceivedResult
 from liverag.interview.application.service import EvaluationDecisionResult, InterviewService
-from liverag.interview.records import InterviewSessionRecord, generate_id
+from liverag.interview.records import (
+    AnswerDraftRecord,
+    AnswerDraftSegmentRecord,
+    InterviewSessionRecord,
+    generate_id,
+)
 from liverag.interview.schemas import InterviewState
 from liverag.interview.state_machine import InterviewEventType
 
@@ -48,6 +53,14 @@ class AnswerTurnResult:
 
     evaluation_result: EvaluationDecisionResult
     next_speech: InterviewSpeech
+
+
+@dataclass(frozen=True, slots=True)
+class OpenAnswerDraft:
+    """The persisted answer window that the real-time Agent can resume."""
+
+    draft: AnswerDraftRecord
+    final_segments: tuple[AnswerDraftSegmentRecord, ...]
 
 
 class InterviewAgentController:
@@ -168,6 +181,56 @@ class InterviewAgentController:
 
         return self._get_plan().config.answer_timeout_seconds
 
+    def open_or_resume_answer_draft(
+        self,
+        *,
+        opened_at: str,
+        deadline_at: str,
+    ) -> OpenAnswerDraft:
+        """Return the one open draft for the current LISTENING question."""
+
+        session = self._service.repository.get_session(self._session_id)
+        if session.state is not InterviewState.LISTENING:
+            raise ValueError("answer draft can only be opened while LISTENING")
+        question_id = session.current_question_id
+        if question_id is None:
+            raise ValueError("LISTENING Session is missing current_question_id")
+        draft = self._service.repository.get_open_answer_draft(
+            session_id=self._session_id,
+            question_id=question_id,
+        )
+        if draft is None:
+            answer_number = len(
+                self._service.repository.list_answers(
+                    session_id=self._session_id,
+                    question_id=question_id,
+                )
+            ) + 1
+            draft = self._service.repository.get_or_create_open_answer_draft(
+                session_id=self._session_id,
+                question_id=question_id,
+                answer_number=answer_number,
+                opened_at=opened_at,
+                deadline_at=deadline_at,
+            )
+        return OpenAnswerDraft(
+            draft=draft,
+            final_segments=tuple(
+                self._service.repository.list_answer_draft_segments(draft_id=draft.id)
+            ),
+        )
+
+    def checkpoint_final_answer_segment(
+        self, *, draft_id: str, segment_index: int, transcript: str
+    ) -> AnswerDraftSegmentRecord:
+        """Persist a confirmed STT segment before it becomes Agent-only state."""
+
+        return self._service.repository.append_answer_draft_segment(
+            draft_id=draft_id,
+            segment_index=segment_index,
+            transcript=transcript,
+        )
+
     async def receive_final_answer(
         self,
         transcript: str,
@@ -194,6 +257,8 @@ class InterviewAgentController:
         ended_at: str | None = None,
         answer_disposition: str = "ANSWERED",
         event_id: str | None = None,
+        draft_id: str | None = None,
+        answer_number: int | None = None,
     ) -> AnswerReceivedResult:
         """Atomically persist an answer and move LISTENING to EVALUATING."""
 
@@ -205,20 +270,23 @@ class InterviewAgentController:
             raise ValueError("当前 Session 没有正在回答的题目")
 
         now = datetime.now(timezone.utc).isoformat()
-        previous_answers = self._service.repository.list_answers(
-            session_id=self._session_id,
-            question_id=session.current_question_id,
-        )
+        if answer_number is None:
+            previous_answers = self._service.repository.list_answers(
+                session_id=self._session_id,
+                question_id=session.current_question_id,
+            )
+            answer_number = len(previous_answers) + 1
         return self._service.receive_answer(
             AnswerReceivedCommand(
                 session_id=self._session_id,
                 attempt_id=self._attempt_id,
                 event_id=event_id or generate_id("event"),
                 transcript=clean_transcript,
-                answer_number=len(previous_answers) + 1,
+                answer_number=answer_number,
                 started_at=started_at or now,
                 ended_at=ended_at or now,
                 payload={"answer_disposition": answer_disposition},
+                draft_id=draft_id,
             )
         )
 

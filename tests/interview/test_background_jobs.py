@@ -1166,6 +1166,7 @@ class TestPreparationStage:
         assert PreparationStage.PENDING.value == "PENDING"
         assert PreparationStage.RESUME_PARSING.value == "RESUME_PARSING"
         assert PreparationStage.CANDIDATE_PROFILE_GENERATION.value == "CANDIDATE_PROFILE_GENERATION"
+        assert PreparationStage.JOB_FACTS_EXTRACTION.value == "JOB_FACTS_EXTRACTION"
         assert PreparationStage.JOB_PROFILE_GENERATION.value == "JOB_PROFILE_GENERATION"
         assert PreparationStage.COMPANY_INTELLIGENCE.value == "COMPANY_INTELLIGENCE"
         assert PreparationStage.PLAN_GENERATION.value == "PLAN_GENERATION"
@@ -1256,20 +1257,116 @@ class TestInterviewPreparationTask:
         result = await handler(job, job_repo=job_repo, **deps)
 
         assert result["status"] == "READY"
-        assert len(result["completed_steps"]) == 5
+        assert len(result["completed_steps"]) == 6
         assert "RESUME_PARSE" in result["completed_steps"]
         assert "CANDIDATE_PROFILE" in result["completed_steps"]
+        assert "JOB_FACTS" in result["completed_steps"]
         assert "JOB_PROFILE" in result["completed_steps"]
         assert "COMPANY_INTELLIGENCE" in result["completed_steps"]
         assert "PLAN_GENERATION" in result["completed_steps"]
         # COMPANY_INTELLIGENCE 无 handler → 降级
         assert result["degraded"] is True
-        assert len(result["degradation_reasons"]) == 2  # NOWCODER_MCP + PLAN_QUALITY
+        assert len(result["degradation_reasons"]) == 3
+        assert "JOB_FACTS_EXTRACTION:FALLBACK" in result["degradation_reasons"]
         # stage_results 只保存摘要信息（skills_count / plan_id 等）
         assert "skills_count" in result["stage_results"]["resume_parse"]
         assert "skills_count" in result["stage_results"]["candidate_profile"]
+        assert "extraction_mode" in result["stage_results"]["job_facts"]
         assert "skills_count" in result["stage_results"]["job_profile"]
         assert "plan_id" in result["stage_results"]["plan_generation"]
+
+    @pytest.mark.asyncio
+    async def test_project_skill_mapping_uses_one_consolidated_mix_retrieval(
+        self, job_repo: JobRepository
+    ):
+        """项目—技能 enrichment 对候选人 KB 只检索一次，不按技能循环。"""
+        from unittest.mock import AsyncMock
+
+        from liverag.interview.application.profile_service import KnowledgeContext
+
+        redis_skill_id = "skill_0e2148153dc5ab23"
+        lock_skill_id = "skill_3c3e2443bf72f90a"
+        profile_context = "岗位要求掌握 Redis 和分布式锁，负责后端服务开发。"
+        candidate_facts = {
+            **_MINIMAL_CANDIDATE_FACTS,
+            "name": "张三",
+            "skills": ["Redis"],
+            "raw_evidence_refs": ["resume.pdf"],
+            "projects": [
+                {
+                    "name": "Interview Coach",
+                    "role": "后端开发",
+                    "description": "负责 Redis 分布式锁避免重复报告生成",
+                    "technologies": ["Redis"],
+                }
+            ],
+        }
+        job_facts = {
+            "kb_id": "default",
+            "job_title": "后端工程师",
+            "required_skills": [
+                {"skill_id": redis_skill_id, "evidence": "Redis"},
+                {"skill_id": lock_skill_id, "evidence": "分布式锁"},
+            ],
+        }
+        mapping = {
+            "relations": [
+                {
+                    "skill_id": redis_skill_id,
+                    "project_name": "Interview Coach",
+                    "responsibility": "负责 Redis 分布式锁避免重复报告生成",
+                    "jd_evidence": "Redis",
+                    "candidate_evidence": "Redis 分布式锁",
+                    "source_refs": ["resume.pdf"],
+                    "relation_type": "DIRECT",
+                }
+            ]
+        }
+
+        deps = self._fake_deps(
+            profile_context=profile_context,
+            llm_facts=candidate_facts,
+            bank_labels=["Redis"],
+        )
+        deps["llm_client"].chat.completions.create.side_effect = [
+            _make_fake_facts_response(candidate_facts),
+            _make_fake_facts_response(job_facts),
+            _make_fake_facts_response(mapping),
+        ]
+        source = deps["profile_source"]
+        source.retrieve_raw_context = AsyncMock(
+            return_value=KnowledgeContext(
+                context="Interview Coach 项目负责 Redis 分布式锁避免重复报告生成。",
+                evidence_refs=("resume.pdf",),
+            )
+        )
+        payload = self._workflow_payload(
+            interview_id="interview_relation_001",
+            target_company=None,
+            config_json=(
+                '{"question_count":1,"candidate_kb_id":"default",'
+                '"topic_weights":{"Redis":1.0}}'
+            ),
+        )
+        job = job_repo.create_job(
+            job_type="interview_preparation",
+            idempotency_key=f"prep_relation_{generate_id('key')}",
+            business_resource_id="interview_relation_001",
+            payload=payload,
+        )
+
+        handler = get_handler("interview_preparation")
+        assert handler is not None
+        result = await handler(job, job_repo=job_repo, **deps)
+
+        source.retrieve_raw_context.assert_awaited_once()
+        raw_query = source.retrieve_raw_context.await_args.kwargs
+        assert raw_query["kb_id"] == "default"
+        assert raw_query["mode"] == "mix"
+        assert redis_skill_id in raw_query["query"]
+        assert lock_skill_id in raw_query["query"]
+        assert result["stage_results"]["plan_generation"]["project_skill_relation_count"] == 1
+        assert deps["llm_client"].chat.completions.create.await_count == 3
 
     @pytest.mark.asyncio
     async def test_skips_completed_stages(self, job_repo: JobRepository):
@@ -1306,7 +1403,7 @@ class TestInterviewPreparationTask:
         result = await handler(job, job_repo=job_repo, **deps)
 
         assert result["status"] == "READY"
-        assert len(result["completed_steps"]) == 5
+        assert len(result["completed_steps"]) == 6
         # 恢复逻辑清除 RESUME_PARSE/CANDIDATE_PROFILE/JOB_PROFILE，全部重跑
         assert result["completed_steps"][0] == "RESUME_PARSE"
         assert result["completed_steps"][1] == "CANDIDATE_PROFILE"
@@ -1335,7 +1432,7 @@ class TestInterviewPreparationTask:
         updated_job = job_repo.get_job(job.id)
         updated_payload = json.loads(updated_job.payload_json)
         assert updated_payload["current_stage"] == "READY"
-        assert len(updated_payload["completed_steps"]) == 5
+        assert len(updated_payload["completed_steps"]) == 6
         assert result["status"] == "READY"
 
     def test_handler_declares_job_repo_dependency(self):
@@ -1471,7 +1568,7 @@ class TestPreparationWorkerEndToEnd:
         assert updated.status is JobStatus.COMPLETED
         result = json.loads(updated.result_json)
         assert result["status"] == "READY"
-        assert len(result["completed_steps"]) == 5
+        assert len(result["completed_steps"]) == 6
         assert "RESUME_PARSE" in result["completed_steps"]
         assert "PLAN_GENERATION" in result["completed_steps"]
 
@@ -1593,7 +1690,7 @@ class TestPreparationWorkerEndToEnd:
         updated = job_repo.get_job(job.id)
         assert updated.status is JobStatus.COMPLETED
         result = json.loads(updated.result_json)
-        assert len(result["completed_steps"]) == 5
+        assert len(result["completed_steps"]) == 6
         # RESUME_PARSE 旧数据保留，CANDIDATE_PROFILE 因无法恢复而重跑
         assert result["stage_results"]["resume_parse"]["status"] == "completed"
         assert result["stage_results"]["candidate_profile"]["status"] == "completed"

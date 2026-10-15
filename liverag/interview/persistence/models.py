@@ -19,7 +19,13 @@ from sqlalchemy import (
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from liverag.interview.records import AnswerState, AttemptState, JobStatus, ReportState
+from liverag.interview.records import (
+    AnswerDraftState,
+    AnswerState,
+    AttemptState,
+    JobStatus,
+    ReportState,
+)
 from liverag.interview.schemas import InterviewState
 
 
@@ -182,6 +188,11 @@ class InterviewSessionModel(Base):
         passive_deletes=True,
     )
     answers: Mapped[list[InterviewAnswerModel]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    answer_drafts: Mapped[list[InterviewAnswerDraftModel]] = relationship(
         back_populates="session",
         cascade="all, delete-orphan",
         passive_deletes=True,
@@ -366,6 +377,87 @@ class InterviewAnswerModel(Base):
         passive_deletes=True,
         uselist=False,
     )
+
+
+class InterviewAnswerDraftModel(Base):
+    """Recoverable STT final segments before a formal answer is submitted."""
+
+    __tablename__ = "answer_drafts"
+    __table_args__ = (
+        CheckConstraint("answer_number >= 1", name="ck_answer_drafts_answer_number"),
+        UniqueConstraint(
+            "session_id",
+            "question_id",
+            "answer_number",
+            name="uq_answer_drafts_session_question_number",
+        ),
+        Index("idx_answer_drafts_session_question_state", "session_id", "question_id", "state"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("interview_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    question_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    answer_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[AnswerDraftState] = mapped_column(
+        SqlEnum(
+            AnswerDraftState,
+            name="ck_answer_drafts_state_values",
+            native_enum=False,
+            create_constraint=True,
+            validate_strings=True,
+        ),
+        default=AnswerDraftState.OPEN,
+        nullable=False,
+    )
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+    session: Mapped[InterviewSessionModel] = relationship(back_populates="answer_drafts")
+    segments: Mapped[list[InterviewAnswerDraftSegmentModel]] = relationship(
+        back_populates="draft",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="InterviewAnswerDraftSegmentModel.segment_index",
+    )
+
+
+class InterviewAnswerDraftSegmentModel(Base):
+    """An ordered final STT segment belonging to one open answer draft."""
+
+    __tablename__ = "answer_draft_segments"
+    __table_args__ = (
+        CheckConstraint("segment_index >= 0", name="ck_answer_draft_segments_index"),
+        CheckConstraint(
+            "length(trim(transcript)) > 0",
+            name="ck_answer_draft_segments_transcript",
+        ),
+        UniqueConstraint(
+            "draft_id",
+            "segment_index",
+            name="uq_answer_draft_segments_draft_index",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    draft_id: Mapped[str] = mapped_column(
+        ForeignKey("answer_drafts.id", ondelete="CASCADE"), nullable=False
+    )
+    segment_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    transcript: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+
+    draft: Mapped[InterviewAnswerDraftModel] = relationship(back_populates="segments")
 
 
 class AnswerEvaluationModel(Base):

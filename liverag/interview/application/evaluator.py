@@ -16,9 +16,15 @@ from liverag.config.settings import VoiceSettings
 from liverag.interview.persistence.repository import InterviewRepository
 from liverag.interview.prompts.evaluation_prompts import ANSWER_EVALUATION_SYSTEM_PROMPT
 from liverag.interview.records import InterviewAnswerRecord, generate_id
-from liverag.interview.schemas import AnswerEvaluation, InterviewQuestion
+from liverag.interview.schemas import (
+    AnswerEvaluation,
+    InterviewQuestion,
+    QuestionRubric,
+    QuestionType,
+)
+from liverag.interview.state_machine import InterviewEventType
 
-EVALUATION_PROMPT_VERSION = "answer-evaluation-v6"
+EVALUATION_PROMPT_VERSION = "answer-evaluation-v7"
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +32,7 @@ class AnswerEvaluationContext:
     """Same-question interview context used to generate progressive follow-ups."""
 
     prior_answers: tuple[InterviewAnswerRecord, ...] = ()
+    asked_follow_up_question: str | None = None
     follow_up_round: int = 0
     max_follow_ups: int = 0
 
@@ -120,8 +127,19 @@ class OpenAIAnswerEvaluationProvider:
     ) -> AnswerEvaluation:
         """通过已知的answer+question，调用LLM返回评价结果"""
 
+        context = context or AnswerEvaluationContext()
+        evaluation_question = question
+        if context.asked_follow_up_question:
+            evaluation_question = question.model_copy(
+                update={
+                    "rubric": question.rubric.with_dimension_weights_from(
+                        QuestionRubric.for_question_type(QuestionType.FOLLOW_UP)
+                    )
+                }
+            )
+
         #构造prompt
-        prompt = self._build_prompt(answer, question, context)
+        prompt = self._build_prompt(answer, evaluation_question, context)
 
         try:
             validation_error: ValidationError | ValueError | None = None
@@ -170,13 +188,13 @@ class OpenAIAnswerEvaluationProvider:
                     evaluation = evaluation.model_copy(
                         update={
                             "weighted_score": evaluation.scores.calculate_weighted_score(
-                                question.rubric
+                                evaluation_question.rubric
                             )
                         }
                     )
 
                     #校验evaluation是否合格
-                    self._validate_evaluation(evaluation, answer, question)
+                    self._validate_evaluation(evaluation, answer, evaluation_question)
 
                     return evaluation
                 #捕捉失败
@@ -226,6 +244,7 @@ class OpenAIAnswerEvaluationProvider:
             f"allow_follow_up: {question.allow_follow_up}\n"
             f"follow_up_round: {context.follow_up_round}\n"
             f"remaining_follow_ups: {remaining_follow_ups}\n"
+            f"asked_follow_up_question: {json.dumps(context.asked_follow_up_question, ensure_ascii=False)}\n"
             f"prior_candidate_answers: {json.dumps(prior_answers, ensure_ascii=False)}\n"
             "<reference_answer>\n"
             f"{reference_answer}\n"
@@ -314,11 +333,16 @@ class AnswerEvaluator:
             )
             if item.id != answer.id
         )
+        asked_follow_up_question = self._find_asked_follow_up_question(
+            session_id=answer.session_id,
+            previous_answer_id=prior_answers[-1].id if prior_answers else None,
+        )
         evaluation = await self._provider.evaluate(
             answer=answer,
             question=question,
             context=AnswerEvaluationContext(
                 prior_answers=prior_answers,
+                asked_follow_up_question=asked_follow_up_question,
                 follow_up_round=session.follow_up_count,
                 max_follow_ups=plan.config.max_follow_ups_per_question,
             ),
@@ -333,6 +357,26 @@ class AnswerEvaluator:
             evaluation=evaluation,
             rubric_version=plan.plan_version,
         )
+
+    def _find_asked_follow_up_question(
+        self,
+        *,
+        session_id: str,
+        previous_answer_id: str | None,
+    ) -> str | None:
+        """Return the persisted follow-up that directly follows the prior answer."""
+
+        if previous_answer_id is None:
+            return None
+
+        for event in reversed(self._repository.list_events(session_id=session_id)):
+            if event.event_type != InterviewEventType.FOLLOW_UP_REQUIRED.value:
+                continue
+            payload = json.loads(event.payload_json)
+            if payload.get("answer_id") != previous_answer_id:
+                continue
+            return str(payload["follow_up_question"]).strip()
+        raise ValueError("追问回答缺少对应的 FOLLOW_UP_REQUIRED 事件")
 
 
 __all__ = [

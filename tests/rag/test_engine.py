@@ -265,6 +265,37 @@ async def test_query_context_maps_options_and_returns_structured_evidence(
 
 
 @pytest.mark.asyncio
+async def test_query_data_returns_raw_mix_retrieval_without_answer_generation(
+    engine_settings: RAGSettings,
+    fake_lightrag_factory: tuple[list[FakeLightRAG], Callable[..., FakeLightRAG]],
+) -> None:
+    engine, fake = await initialized_engine(engine_settings, fake_lightrag_factory)
+    raw_result = {
+        "status": "success",
+        "data": {
+            "references": [{"document_id": "resume", "file_path": "resume.pdf"}],
+            "chunks": [{"chunk_id": "resume_1", "content": "Interview Coach 使用 Redis。"}],
+        },
+    }
+    fake.query_results.append(raw_result)
+
+    result, metrics = await engine.query_data(
+        "Find projects related to Redis and RAG.",
+        "default",
+        QueryOptions(mode="mix", include_references=True, include_chunk_content=True),
+        ConversationOptions(),
+    )
+
+    assert len(fake.data_calls) == 1
+    assert fake.query_calls == []
+    _, query_param = fake.data_calls[0]
+    assert query_param.mode == "mix"
+    assert query_param.only_need_context is True
+    assert result["result"] == raw_result
+    assert metrics["mode"] == "mix"
+
+
+@pytest.mark.asyncio
 async def test_query_context_without_evidence_returns_safe_empty_result(
     engine_settings: RAGSettings,
     fake_lightrag_factory: tuple[list[FakeLightRAG], Callable[..., FakeLightRAG]],

@@ -238,6 +238,12 @@ async def test_progressive_follow_ups_keep_same_question_context(interview_servi
     assert isinstance(provider, _EvaluationProvider)
     assert [context.follow_up_round for context in provider.contexts] == [0, 1, 2, 3]
     assert [len(context.prior_answers) for context in provider.contexts] == [0, 1, 2, 3]
+    assert [context.asked_follow_up_question for context in provider.contexts] == [
+        None,
+        "为什么需要重排？",
+        "为什么需要重排？",
+        "为什么需要重排？",
+    ]
 
 
 async def test_evaluation_retry_reuses_saved_result_and_transition(interview_service):

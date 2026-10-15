@@ -23,6 +23,8 @@ from liverag.interview.persistence.models import (
     AnswerEvaluationModel,
     Base,
     CandidateProfileModel,
+    InterviewAnswerDraftModel,
+    InterviewAnswerDraftSegmentModel,
     InterviewAnswerModel,
     InterviewAttemptModel,
     InterviewEventModel,
@@ -39,6 +41,9 @@ from liverag.interview.persistence.repository import (
     RecordNotFoundError,
 )
 from liverag.interview.records import (
+    AnswerDraftRecord,
+    AnswerDraftSegmentRecord,
+    AnswerDraftState,
     AnswerEvaluationRecord,
     AnswerState,
     AttemptState,
@@ -279,6 +284,33 @@ def _answer_record(model: InterviewAnswerModel) -> InterviewAnswerRecord:
         created_at=_required_iso(model.created_at),
         updated_at=_required_iso(model.updated_at),
         normalized_transcript=model.normalized_transcript,
+    )
+
+
+def _answer_draft_record(model: InterviewAnswerDraftModel) -> AnswerDraftRecord:
+    return AnswerDraftRecord(
+        id=model.id,
+        session_id=model.session_id,
+        question_id=model.question_id,
+        answer_number=model.answer_number,
+        state=model.state,
+        opened_at=_required_iso(model.opened_at),
+        deadline_at=_required_iso(model.deadline_at),
+        submitted_at=_to_iso(model.submitted_at),
+        created_at=_required_iso(model.created_at),
+        updated_at=_required_iso(model.updated_at),
+    )
+
+
+def _answer_draft_segment_record(
+    model: InterviewAnswerDraftSegmentModel,
+) -> AnswerDraftSegmentRecord:
+    return AnswerDraftSegmentRecord(
+        id=model.id,
+        draft_id=model.draft_id,
+        segment_index=model.segment_index,
+        transcript=model.transcript,
+        created_at=_required_iso(model.created_at),
     )
 
 
@@ -962,6 +994,7 @@ class SQLAlchemyInterviewRepository:
         answer_started_at: str,
         answer_ended_at: str,
         answer_id: str | None = None,
+        draft_id: str | None = None,
     ) -> AnswerTransitionResult:
         """原子更新 Session、追加 Event，并保存一条 STT final Answer。
         用于用户回答引发的状态变化：更新 session+event+answer"""
@@ -998,6 +1031,23 @@ class SQLAlchemyInterviewRepository:
                     raise ValueError("Answer 的 Attempt 不属于当前 Session")
 
                 #乐观锁更新Session
+                draft_model: InterviewAnswerDraftModel | None = None
+                if draft_id is not None:
+                    draft_model = _require_model(
+                        database_session,
+                        InterviewAnswerDraftModel,
+                        draft_id,
+                        f"Answer draft does not exist: {draft_id}",
+                    )
+                    if (
+                        draft_model.session_id != session_id
+                        or draft_model.question_id != clean_question_id
+                        or draft_model.answer_number != answer_number
+                    ):
+                        raise ValueError("Answer draft does not match submitted answer")
+                    if draft_model.state is not AnswerDraftState.OPEN:
+                        raise ValueError("Answer draft is not open")
+
                 version_after = _apply_session_transition(
                     database_session,
                     session_id=session_id,
@@ -1037,6 +1087,9 @@ class SQLAlchemyInterviewRepository:
                 )
                 #一次性add
                 database_session.add_all((event_model, answer_model))
+                if draft_model is not None:
+                    draft_model.state = AnswerDraftState.SUBMITTED
+                    draft_model.submitted_at = _utc_now()
                 #执行sql
                 database_session.flush()
 
@@ -1201,6 +1254,134 @@ class SQLAlchemyInterviewRepository:
 
             return [
                 _answer_record(model)
+                for model in database_session.scalars(statement).all()
+            ]
+
+    def get_or_create_open_answer_draft(
+        self,
+        *,
+        session_id: str,
+        question_id: str,
+        answer_number: int,
+        opened_at: str,
+        deadline_at: str,
+    ) -> AnswerDraftRecord:
+        if answer_number < 1:
+            raise ValueError("answer_number must be at least 1")
+        clean_question_id = question_id.strip()
+        if not clean_question_id:
+            raise ValueError("question_id cannot be empty")
+        with session_scope(self._session_factory) as database_session:
+            _require_model(
+                database_session,
+                InterviewSessionModel,
+                session_id,
+                f"Interview Session does not exist: {session_id}",
+            )
+            statement = select(InterviewAnswerDraftModel).where(
+                InterviewAnswerDraftModel.session_id == session_id,
+                InterviewAnswerDraftModel.question_id == clean_question_id,
+                InterviewAnswerDraftModel.answer_number == answer_number,
+            )
+            model = database_session.scalar(statement)
+            if model is None:
+                model = InterviewAnswerDraftModel(
+                    id=generate_id("answer_draft"),
+                    session_id=session_id,
+                    question_id=clean_question_id,
+                    answer_number=answer_number,
+                    state=AnswerDraftState.OPEN,
+                    opened_at=_parse_datetime(opened_at),
+                    deadline_at=_parse_datetime(deadline_at),
+                )
+                database_session.add(model)
+                database_session.flush()
+            if model.state is not AnswerDraftState.OPEN:
+                raise ValueError("answer draft has already been submitted")
+            return _answer_draft_record(model)
+
+    def get_open_answer_draft(
+        self, *, session_id: str, question_id: str
+    ) -> AnswerDraftRecord | None:
+        with self._session_factory() as database_session:
+            statement = (
+                select(InterviewAnswerDraftModel)
+                .where(
+                    InterviewAnswerDraftModel.session_id == session_id,
+                    InterviewAnswerDraftModel.question_id == question_id,
+                    InterviewAnswerDraftModel.state == AnswerDraftState.OPEN,
+                )
+                .order_by(InterviewAnswerDraftModel.created_at.desc())
+            )
+            model = database_session.scalar(statement)
+            return _answer_draft_record(model) if model is not None else None
+
+    def append_answer_draft_segment(
+        self, *, draft_id: str, segment_index: int, transcript: str
+    ) -> AnswerDraftSegmentRecord:
+        clean_transcript = transcript.strip()
+        if segment_index < 0:
+            raise ValueError("segment_index cannot be negative")
+        if not clean_transcript:
+            raise ValueError("draft segment transcript cannot be empty")
+        try:
+            with session_scope(self._session_factory) as database_session:
+                draft = _require_model(
+                    database_session,
+                    InterviewAnswerDraftModel,
+                    draft_id,
+                    f"Answer draft does not exist: {draft_id}",
+                )
+                if draft.state is not AnswerDraftState.OPEN:
+                    raise ValueError("cannot append to a submitted answer draft")
+                existing = database_session.scalar(
+                    select(InterviewAnswerDraftSegmentModel).where(
+                        InterviewAnswerDraftSegmentModel.draft_id == draft_id,
+                        InterviewAnswerDraftSegmentModel.segment_index == segment_index,
+                    )
+                )
+                if existing is not None:
+                    if existing.transcript != clean_transcript:
+                        raise ValueError("draft segment index already has different text")
+                    return _answer_draft_segment_record(existing)
+                model = InterviewAnswerDraftSegmentModel(
+                    id=generate_id("answer_draft_segment"),
+                    draft_id=draft_id,
+                    segment_index=segment_index,
+                    transcript=clean_transcript,
+                )
+                database_session.add(model)
+                database_session.flush()
+                return _answer_draft_segment_record(model)
+        except IntegrityError:
+            with self._session_factory() as database_session:
+                existing = database_session.scalar(
+                    select(InterviewAnswerDraftSegmentModel).where(
+                        InterviewAnswerDraftSegmentModel.draft_id == draft_id,
+                        InterviewAnswerDraftSegmentModel.segment_index == segment_index,
+                    )
+                )
+                if existing is not None and existing.transcript == clean_transcript:
+                    return _answer_draft_segment_record(existing)
+            raise
+
+    def list_answer_draft_segments(
+        self, *, draft_id: str
+    ) -> list[AnswerDraftSegmentRecord]:
+        with self._session_factory() as database_session:
+            _require_model(
+                database_session,
+                InterviewAnswerDraftModel,
+                draft_id,
+                f"Answer draft does not exist: {draft_id}",
+            )
+            statement = (
+                select(InterviewAnswerDraftSegmentModel)
+                .where(InterviewAnswerDraftSegmentModel.draft_id == draft_id)
+                .order_by(InterviewAnswerDraftSegmentModel.segment_index.asc())
+            )
+            return [
+                _answer_draft_segment_record(model)
                 for model in database_session.scalars(statement).all()
             ]
 

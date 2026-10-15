@@ -80,10 +80,13 @@ class ActiveAnswerBuffer:
     session_id: str
     question_id: str
     attempt_id: str
+    draft_id: str
+    answer_number: int
     opened_at: datetime
     deadline_at: datetime
     answer_window_id: str = ""
     final_segments: list[str] = field(default_factory=list)
+    next_segment_index: int = 0
     current_interim: str = ""
     is_open: bool = False
     submitted: bool = False
@@ -219,8 +222,7 @@ class LiveKitInterviewAgent(Agent):
             elif state_before is not InterviewState.LISTENING:
                 await self._deliver_prompt_and_open_answer_window(first_speech)
             else:
-                # A reconnected LISTENING session remains authoritative; replay only.
-                await self._play(first_speech)
+                await self._restore_listening_answer_window(first_speech)
 
     async def on_user_turn_completed(
         self,
@@ -282,7 +284,18 @@ class LiveKitInterviewAgent(Agent):
             buffer.first_transcript_received = True
             logger.info("STT_FIRST_TRANSCRIPT_RECEIVED", extra=self._log_context())
         if is_final:
-            appended = buffer.append_final(clean)
+            if clean in buffer.final_segments:
+                buffer.current_interim = ""
+                appended = False
+            else:
+                self._controller.checkpoint_final_answer_segment(
+                    draft_id=buffer.draft_id,
+                    segment_index=buffer.next_segment_index,
+                    transcript=clean,
+                )
+                appended = buffer.append_final(clean)
+                if appended:
+                    buffer.next_segment_index += 1
             logger.info(
                 "interview.stt.segment_final.buffered",
                 extra=self._log_context(transcript=clean, duplicate=not appended),
@@ -453,6 +466,8 @@ class LiveKitInterviewAgent(Agent):
                     ended_at=datetime.now(timezone.utc).isoformat(),
                     answer_disposition=disposition,
                     event_id=submit_event_id,
+                    draft_id=buffer.draft_id,
+                    answer_number=buffer.answer_number,
                 )
             except Exception:
                 # 数据库写入失败 → 清理残留 buffer 状态
@@ -605,17 +620,6 @@ class LiveKitInterviewAgent(Agent):
         question_id = asking_session.current_question_id
         if question_id is None:
             raise RuntimeError("Question prompt is missing current_question_id")
-        answer_window_id = f"{self._attempt_id}:{question_id}:{opened_at.isoformat()}"
-        buffer = ActiveAnswerBuffer(
-            session_id=self._session_id,
-            question_id=question_id,
-            attempt_id=self._attempt_id,
-            opened_at=opened_at,
-            deadline_at=deadline_at,
-            answer_window_id=answer_window_id,
-        )
-        self._answer_buffer = buffer
-        logger.info("ANSWER_BUFFER_CREATED", extra=self._log_context())
         session = self._controller.prompt_spoken(
             kind,
             answer_started_at=opened_at.isoformat(),
@@ -628,21 +632,15 @@ class LiveKitInterviewAgent(Agent):
             )
         if session.current_question_id is None:
             raise RuntimeError("LISTENING Session is missing current_question_id")
-        if session.current_question_id != buffer.question_id:
-            self._answer_buffer = None
-            raise RuntimeError("LISTENING question_id does not match answer buffer")
-        buffer.is_open = True
-        logger.info("SERVER_STATE_LISTENING", extra=self._log_context())
-        logger.info(
-            "ANSWER_WINDOW_OPENED",
-            extra=self._log_context(
-                question_id=session.current_question_id,
-                session_version=session.version,
-            ),
+        if session.current_question_id != question_id:
+            raise RuntimeError("LISTENING question_id changed after prompt playback")
+        self._open_or_resume_answer_buffer(
+            opened_at=opened_at,
+            deadline_at=deadline_at,
         )
-        self._answer_timeout_task = asyncio.create_task(
-            self._submit_answer_after_timeout(buffer)
-        )
+        buffer = self._answer_buffer
+        if buffer is None:
+            raise RuntimeError("Answer buffer was not opened")
         if session.current_question_index == 0:
             logger.info(
                 "FIRST_QUESTION_READY",
@@ -653,6 +651,51 @@ class LiveKitInterviewAgent(Agent):
                     buffer_created=True,
                 ),
             )
+
+    async def _restore_listening_answer_window(self, speech: InterviewSpeech) -> None:
+        """Replay the prompt and rebuild the buffer from durable final segments."""
+
+        await self._wait_for_audio_ready()
+        await self._play(speech)
+        now = datetime.now(timezone.utc)
+        self._open_or_resume_answer_buffer(
+            opened_at=now,
+            deadline_at=now + timedelta(seconds=self._controller.answer_timeout_seconds()),
+        )
+
+    def _open_or_resume_answer_buffer(
+        self,
+        *,
+        opened_at: datetime,
+        deadline_at: datetime,
+    ) -> None:
+        persisted = self._controller.open_or_resume_answer_draft(
+            opened_at=opened_at.isoformat(),
+            deadline_at=deadline_at.isoformat(),
+        )
+        draft = persisted.draft
+        buffer = ActiveAnswerBuffer(
+            session_id=self._session_id,
+            question_id=draft.question_id,
+            attempt_id=self._attempt_id,
+            draft_id=draft.id,
+            answer_number=draft.answer_number,
+            opened_at=datetime.fromisoformat(draft.opened_at),
+            deadline_at=datetime.fromisoformat(draft.deadline_at),
+            answer_window_id=f"{self._attempt_id}:{draft.id}",
+            final_segments=[segment.transcript for segment in persisted.final_segments],
+            next_segment_index=len(persisted.final_segments),
+            is_open=True,
+        )
+        self._answer_buffer = buffer
+        logger.info(
+            "ANSWER_BUFFER_RESTORED",
+            extra=self._log_context(restored_segment_count=len(buffer.final_segments)),
+        )
+        self._answer_timeout_task = asyncio.create_task(
+            self._submit_answer_after_timeout(buffer)
+        )
+        logger.info("SERVER_STATE_LISTENING", extra=self._log_context())
 
     @staticmethod
     def _answer_window_id(buffer: ActiveAnswerBuffer) -> str:

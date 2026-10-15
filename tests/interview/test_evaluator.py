@@ -92,12 +92,18 @@ def _question() -> InterviewQuestion:
     )
 
 
-def _evaluation_json(*, answer_id: str = "answer-1", weighted_score: float = 75.0):
+def _evaluation_json(
+    *,
+    answer_id: str = "answer-1",
+    weighted_score: float = 75.0,
+    scores: dict[str, int] | None = None,
+):
     return json.dumps(
         {
             "answer_id": answer_id,
             "question_id": "question-1",
-            "scores": {
+            "scores": scores
+            or {
                 "technical_accuracy": 3,
                 "completeness": 3,
                 "clarity_and_structure": 3,
@@ -143,6 +149,7 @@ def test_provider_prompt_contains_progressive_follow_up_context():
         _question(),
         AnswerEvaluationContext(
             prior_answers=(previous_answer,),
+            asked_follow_up_question="缓存穿透发生时如何处理？",
             follow_up_round=1,
             max_follow_ups=3,
         ),
@@ -151,6 +158,7 @@ def test_provider_prompt_contains_progressive_follow_up_context():
     assert "follow_up_round: 1" in prompt
     assert "remaining_follow_ups: 2" in prompt
     assert "allow_follow_up: True" in prompt
+    assert 'asked_follow_up_question: "缓存穿透发生时如何处理？"' in prompt
     assert "prior_candidate_answers:" in prompt
     assert "Redis 缓存热点数据" in prompt
 
@@ -167,6 +175,36 @@ async def test_provider_recalculates_weighted_score_without_retry():
 
     assert result.weighted_score == 75.0
     assert len(completions.calls) == 1
+
+
+async def test_provider_uses_follow_up_profile_and_parent_rubric():
+    provider, completions = _provider(
+        [
+            _evaluation_json(
+                scores={
+                    "technical_accuracy": 4,
+                    "completeness": 0,
+                    "clarity_and_structure": 4,
+                    "job_relevance": 0,
+                }
+            )
+        ]
+    )
+
+    result = await provider.evaluate(
+        answer=_answer(),
+        question=_question(),
+        context=AnswerEvaluationContext(
+            asked_follow_up_question="缓存穿透发生时如何处理？"
+        ),
+    )
+
+    prompt = completions.calls[0]["messages"][1]["content"]
+    assert result.weighted_score == 55.0
+    assert '"id":"retrieval"' in prompt
+    assert '"content":"说明检索过程"' in prompt
+    assert '"clarity_and_structure_weight":0.2' in prompt
+    assert '"job_relevance_weight":0.15' in prompt
 
 
 async def test_provider_retries_follow_up_missing_required_fields_with_invalid_json_context():

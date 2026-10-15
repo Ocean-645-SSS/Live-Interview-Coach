@@ -20,6 +20,7 @@ from liverag.interview.jobs.report_generation import (
     REPORT_GENERATION_LOCK_TTL_SECONDS,
     enqueue_report_generation,
     finalize_report_generation,
+    retry_report_generation,
 )
 from liverag.interview.jobs.repository import JobRepository
 from liverag.interview.persistence.repository import (
@@ -445,6 +446,25 @@ def get_report(session_id: str, service: ServiceDependency):
     """返回已经生成的报告；尚未生成时返回 null。"""
 
     return _execute(lambda: service.get_report(session_id))
+
+
+@router.post("/sessions/{session_id}/report/retry")
+async def retry_report(
+    session_id: str,
+    service: ServiceDependency,
+    job_repo: JobRepoDependency,
+    redis_queue: RedisQueueDependency,
+):
+    """为最终失败的报告创建全新的异步生成任务。"""
+
+    return await _execute_async(
+        lambda: retry_report_generation(
+            interview_repo=service.repository,
+            job_repo=job_repo,
+            redis_queue=redis_queue,
+            session_id=session_id,
+        )
+    )
 
 
 # =========================== Background Job API ==============================

@@ -48,6 +48,13 @@ class InterviewDifficulty(str, Enum):
     EXPERT = "EXPERT"   #专家
 
 
+class FactsExtractionMode(str, Enum):
+    """Facts 来源：LLM 语义抽取或规则降级。"""
+
+    LLM = "LLM"
+    FALLBACK = "FALLBACK"
+
+
 class QuestionType(str, Enum):
     """标识问题的主要考察方式，供计划和前端展示使用。"""
 
@@ -55,8 +62,7 @@ class QuestionType(str, Enum):
     TECHNICAL_KNOWLEDGE = "TECHNICAL_KNOWLEDGE"   #技术知识
     PROJECT_DEEP_DIVE = "PROJECT_DEEP_DIVE"   #项目深入
     SYSTEM_DESIGN = "SYSTEM_DESIGN"   #系统设计
-    SCENARIO = "SCENARIO"   #场景题
-    BEHAVIORAL = "BEHAVIORAL"   #行为分析
+    SCENARIO = "SCENARIO"   #真实场景
     FOLLOW_UP = "FOLLOW_UP"   #追问
 
 
@@ -90,6 +96,7 @@ class PreparationStage(str, Enum):
     PENDING = "PENDING" #等待
     RESUME_PARSING = "RESUME_PARSING"   #解析简历
     CANDIDATE_PROFILE_GENERATION = "CANDIDATE_PROFILE_GENERATION"   #生成个人经历profile
+    JOB_FACTS_EXTRACTION = "JOB_FACTS_EXTRACTION"   #提取岗位事实
     JOB_PROFILE_GENERATION = "JOB_PROFILE_GENERATION"   #生成岗位profile
     COMPANY_INTELLIGENCE = "COMPANY_INTELLIGENCE"   #公司面经情报（可降级）
     PLAN_GENERATION = "PLAN_GENERATION" #生成计划
@@ -138,6 +145,8 @@ class CandidateFacts(StrictModel):
     projects: list[ProjectFact] = Field(default_factory=list)    #项目经历
     skills: list[str] = Field(default_factory=list)  #技术技能
     raw_evidence_refs: list[str] = Field(default_factory=list)   #原始文档来源
+    extraction_mode: FactsExtractionMode = FactsExtractionMode.LLM
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0)
 
 class CandidateProfile(StrictModel):
     """从个人资料库中提取、用于本次选题的候选人快照。"""
@@ -148,17 +157,101 @@ class CandidateProfile(StrictModel):
     projects: list[NonEmptyText] = Field(default_factory=list)  #项目经历
     experience_level: str = ""      # 匹配 schemas.py 中的InterviewDifficulty字段
     evidence_refs: list[NonEmptyText] = Field(default_factory=list)  #画像信息对应的原始资料列表
+    facts_extraction_mode: FactsExtractionMode = FactsExtractionMode.FALLBACK
+    facts_confidence: float = Field(default=0.2, ge=0.0, le=1.0)
+
+
+class JobSkillFact(StrictModel):
+    """从 JD 原文提取并映射到统一 taxonomy 的技能事实。"""
+
+    skill_id: NonEmptyText
+    evidence: NonEmptyText
+
+
+class JobFrameworkToolFact(StrictModel):
+    """JD 中明确出现、但不一定能唯一映射到 taxonomy 的框架或工具。"""
+
+    name: NonEmptyText
+    evidence: NonEmptyText
+
+
+class JobFacts(StrictModel):
+    """岗位 JD 的结构化事实，不包含选题权重或面试策略。"""
+
+    kb_id: NonEmptyText = "default"
+    job_title: str = ""
+    raw_text: str = ""
+    responsibilities: list[NonEmptyText] = Field(default_factory=list)
+    required_skills: list[JobSkillFact] = Field(default_factory=list)
+    preferred_skills: list[JobSkillFact] = Field(default_factory=list)
+    frameworks_tools: list[JobFrameworkToolFact] = Field(default_factory=list)
+    experience_requirements: list[NonEmptyText] = Field(default_factory=list)
+    education_requirements: list[NonEmptyText] = Field(default_factory=list)
+    raw_evidence_refs: list[NonEmptyText] = Field(default_factory=list)
+    extraction_mode: FactsExtractionMode = FactsExtractionMode.LLM
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_skill_partitions(self) -> JobFacts:
+        required_ids = [item.skill_id for item in self.required_skills]
+        preferred_ids = [item.skill_id for item in self.preferred_skills]
+        if len(required_ids) != len(set(required_ids)):
+            raise ValueError("岗位必备技能不能重复")
+        if len(preferred_ids) != len(set(preferred_ids)):
+            raise ValueError("岗位加分技能不能重复")
+        if set(required_ids) & set(preferred_ids):
+            raise ValueError("岗位必备技能和加分技能不能重叠")
+        return self
+
+
+class JobSkill(StrictModel):
+    """供 Planner 消费的岗位技能优先级，保留其 JD 依据。"""
+
+    skill_id: NonEmptyText
+    weight: float = Field(ge=0.0, le=1.0)
+    evidence: NonEmptyText
 
 
 class JobProfile(StrictModel):
-    """从用户选中的公司岗位资料库中提取的岗位快照。"""
+    """由 JobFacts 经确定性规则生成、供选题使用的岗位画像。"""
 
     kb_id: NonEmptyText
     company: str | None = None  #公司
     role: NonEmptyText  #岗位
     summary: str = ""   #JD
-    required_skills: list[NonEmptyText] = Field(default_factory=list)   #需要的技能
+    required_skills: list[JobSkill] = Field(default_factory=list)
+    preferred_skills: list[JobSkill] = Field(default_factory=list)
     evidence_refs: list[NonEmptyText] = Field(default_factory=list)  #参考资料
+    facts_extraction_mode: FactsExtractionMode = FactsExtractionMode.LLM
+    facts_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_skill_partitions(self) -> JobProfile:
+        required_ids = [item.skill_id for item in self.required_skills]
+        preferred_ids = [item.skill_id for item in self.preferred_skills]
+        if len(required_ids) != len(set(required_ids)):
+            raise ValueError("岗位必备技能不能重复")
+        if len(preferred_ids) != len(set(preferred_ids)):
+            raise ValueError("岗位加分技能不能重复")
+        if set(required_ids) & set(preferred_ids):
+            raise ValueError("岗位必备技能和加分技能不能重叠")
+        return self
+
+
+class ProjectSkillRelation(StrictModel):
+    """一条由候选人材料证实的岗位技能—项目关系。
+
+    这是面试准备时产生的轻量 enrichment，随题目冻结以供审计和
+    项目型题目改写；它不改变 CandidateFacts 或 JobProfile 的职责。
+    """
+
+    skill_id: NonEmptyText
+    project_name: NonEmptyText
+    responsibility: NonEmptyText
+    jd_evidence: NonEmptyText
+    candidate_evidence: NonEmptyText
+    source_refs: list[NonEmptyText] = Field(default_factory=list)
+    relation_type: Literal["DIRECT", "RELATED"] = "DIRECT"
 
 
 class WeakPointAggregate(StrictModel):
@@ -255,6 +348,40 @@ class QuestionRubric(StrictModel):
     job_relevance_weight: float = Field(default=0.20, ge=0, le=1)  # 工作相关性权重
     notes: str | None = Field(default=None, description="供评价服务理解题目边界的补充说明")
 
+    @classmethod
+    def for_question_type(cls, question_type: QuestionType) -> QuestionRubric:
+        """创建对应题型的四维评分权重配置。"""
+
+        if question_type is QuestionType.INTRODUCTION:
+            raise ValueError("INTRODUCTION 不参与回答评分")
+
+        weights = {
+            QuestionType.TECHNICAL_KNOWLEDGE: (0.45, 0.35, 0.15, 0.05),
+            QuestionType.PROJECT_DEEP_DIVE: (0.25, 0.25, 0.20, 0.30),
+            QuestionType.SYSTEM_DESIGN: (0.30, 0.30, 0.20, 0.20),
+            QuestionType.SCENARIO: (0.25, 0.25, 0.20, 0.30),
+            QuestionType.FOLLOW_UP: (0.35, 0.30, 0.20, 0.15),
+        }[question_type]
+        return cls(
+            expected_points=[RubricPoint(id="profile", content="profile")],
+            technical_accuracy_weight=weights[0],
+            completeness_weight=weights[1],
+            clarity_and_structure_weight=weights[2],
+            job_relevance_weight=weights[3],
+        )
+
+    def with_dimension_weights_from(self, profile: QuestionRubric) -> QuestionRubric:
+        """仅替换四维评分权重，保留本题的评分点和说明。"""
+
+        return self.model_copy(
+            update={
+                "technical_accuracy_weight": profile.technical_accuracy_weight,
+                "completeness_weight": profile.completeness_weight,
+                "clarity_and_structure_weight": profile.clarity_and_structure_weight,
+                "job_relevance_weight": profile.job_relevance_weight,
+            }
+        )
+
     @field_validator("expected_points")
     @classmethod
     def validate_unique_point_ids(cls, value: list[RubricPoint]) -> list[RubricPoint]:
@@ -347,6 +474,9 @@ class InterviewQuestion(StrictModel):
     estimated_seconds: int = Field(default=180, ge=30, le=1800) #预计回答时长
     allow_follow_up: bool = True  #是否允许追问
     follow_up_hints: list[NonEmptyText] = Field(default_factory=list)  #追问方向，供实时 Agent 生成追问时参考
+    job_skill_matches: list[JobSkill] = Field(default_factory=list)
+    job_skill_score: float = Field(default=0.0, ge=0.0)
+    project_skill_relations: list[ProjectSkillRelation] = Field(default_factory=list)
 
     @field_validator("topics")
     @classmethod
@@ -513,15 +643,21 @@ __all__ = [
     "CandidateFacts",
     "CandidateProfile",
     "DimensionScores",
+    "FactsExtractionMode",
     "FollowUpAction",
     "InterviewConfig",
     "InterviewDifficulty",
     "InterviewPlan",
     "InterviewQuestion",
     "InterviewState",
+    "JobFacts",
+    "JobFrameworkToolFact",
     "JobProfile",
+    "JobSkill",
+    "JobSkillFact",
     "PreparationStage",
     "ProjectFact",
+    "ProjectSkillRelation",
     "QuestionRubric",
     "QuestionSource",
     "QuestionType",

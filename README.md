@@ -1,14 +1,13 @@
 # Interview-Coach
 
-Interview-RAG 是一个以面向中文场景的实时语音 RAG 为基础的 AI 模拟面试官。它将 LiveKit 实时音频、可配置的语音模型、LightRAG 知识库和 FastAPI 管理接口组合为一套可本地部署的系统。
+面向技术岗位求职者的可部署实时模拟面试系统，基于简历、岗位 JD、版本化题库、公司面经与历史能力画像生成冻结的个性化 InterviewPlan，通过实时语音 Agent 完成受控提问、结构化评分、动态追问与训练报告闭环。
 
 ## 功能概览
 
-- **实时语音助手**：浏览器通过 LiveKit 与 Agent 建立音频会话；Agent 按会话绑定的知识库检索后回答。
-- **知识库管理**：支持创建知识库、导入文本或文件、查看索引任务、查询证据和管理原始文档。
-- **会话记忆**：保存对话与检索审计记录；通话结束后可用独立 Context Model 提炼跨会话历史。
-- **Interview Coach**：根据候选人资料、目标岗位和版本化题库生成面试计划，完成实时面试、逐题评价、报告与长期能力画像。
-- **ASR 专业术语增强**：面试会话依据冻结的计划选择热词，并对可审计的转写纠正结果进行评分。
+技术栈： Python、FastAPI、LiveKit、LightRAG、MCP、SQLAlchemy、PostgreSQL、Redis、Docker。
+- **个性化面试准备**：融合候选人/岗位画像、版本化题库、可选公司面经与历史能力画像生成并冻结InterviewPlan；通过LightRAG Mix 检索项目证据，并双侧校验岗位技能与候选人项目后定向改写题目，以题量、难度和追问上限约束实时Agent；将准备流程拆为异步阶段，通过Redis Worker、幂等键和阶段持久化支持断点恢复与降级。
+- **结构化评分与训练闭环**：设计按题型加权的Answer Evaluator，通过Pydantic约束结构化输出、服务端依据 rubric 重算评分并保存可审计的 ASR 局部修正；基于Evaluation Evidence幂等聚合历史均分、30 天衰减分、最新分与置信度，将弱项复测反馈至下一场 InterviewPlan，形成持续训练闭环。
+- **测评驱动模型优化**：围绕空泛回答误判、追问相关性等失败样本迭代评分Prompt，建立 Answer、Behavior与RAG 三类离线评测；50 组人工标注样本上评分 Pearson 达 0.925，追问决策准确率 98%、追问质量达 4.92/5，RAG Recall@5 达 0.958、Faithfulness 达 4.96/5。
 
 ## 架构与文档
 

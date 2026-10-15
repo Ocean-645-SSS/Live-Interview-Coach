@@ -9,14 +9,14 @@ from __future__ import annotations
 import logging
 import re
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, OpenAIError
 from openai.types.chat import ChatCompletionMessageParam
 
 from liverag.interview.application.profile_service import KnowledgeContextSource
 from liverag.interview.prompts.resume_parse_prompts import (
     RESUME_FACTS_EXTRACTION_SYSTEM_PROMPT,
 )
-from liverag.interview.schemas import CandidateFacts
+from liverag.interview.schemas import CandidateFacts, FactsExtractionMode
 
 logger = logging.getLogger("liverag.interview.application.resume_parser")
 
@@ -91,12 +91,23 @@ class ResumeParser:
             "</candidate_documents>"
         )
 
-        return await self._llm_extract(
-            kb_id=kb_id,
-            user_prompt=user_prompt,
-            evidence_refs=evidence_refs,
-            job_id=job_id,
-        )
+        try:
+            return await self._llm_extract(
+                kb_id=kb_id,
+                user_prompt=user_prompt,
+                evidence_refs=evidence_refs,
+                job_id=job_id,
+            )
+        except (OpenAIError, RuntimeError):
+            logger.exception(
+                "简历事实 LLM 抽取失败，使用规则降级结果",
+                extra={"job_id": job_id, "kb_id": kb_id},
+            )
+            return _fallback_candidate_facts(
+                kb_id=kb_id,
+                context=context,
+                evidence_refs=evidence_refs,
+            )
 
     async def _llm_extract(
         self,
@@ -150,6 +161,12 @@ class ResumeParser:
                     facts = facts.model_copy(
                         update={"raw_evidence_refs": evidence_refs}
                     )
+                facts = facts.model_copy(
+                    update={
+                        "extraction_mode": FactsExtractionMode.LLM,
+                        "confidence": 0.9,
+                    }
+                )
 
                 logger.info(
                     "简历事实抽取完成",
@@ -164,7 +181,7 @@ class ResumeParser:
 
                 return facts
 
-            except Exception as exc:
+            except (AttributeError, IndexError, TypeError, ValueError) as exc:
                 validation_error = exc
                 if attempt == 1:
                     raise RuntimeError(
@@ -176,6 +193,53 @@ class ResumeParser:
                 )
 
         raise RuntimeError("LLM 没有返回可校验的 CandidateFacts")
+
+
+def _fallback_candidate_facts(
+    *,
+    kb_id: str,
+    context: str,
+    evidence_refs: list[str],
+) -> CandidateFacts:
+    skills = [
+        skill
+        for skill in _FALLBACK_SKILLS
+        if skill.casefold() in context.casefold()
+    ]
+    return CandidateFacts(
+        kb_id=kb_id,
+        skills=skills,
+        raw_evidence_refs=evidence_refs,
+        extraction_mode=FactsExtractionMode.FALLBACK,
+        confidence=0.35,
+    )
+
+
+_FALLBACK_SKILLS = (
+    "Python",
+    "Java",
+    "Go",
+    "C++",
+    "FastAPI",
+    "Django",
+    "Flask",
+    "Spring Boot",
+    "Redis",
+    "MySQL",
+    "PostgreSQL",
+    "Kafka",
+    "RabbitMQ",
+    "Docker",
+    "Kubernetes",
+    "RAG",
+    "LLM",
+    "LangChain",
+    "LangGraph",
+    "React",
+    "Vue",
+    "Git",
+    "Linux",
+)
 
 
 __all__ = ["ResumeParser"]

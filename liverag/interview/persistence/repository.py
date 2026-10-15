@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 from liverag.interview.records import (
+    AnswerDraftRecord,
+    AnswerDraftSegmentRecord,
     AnswerEvaluationRecord,
     AnswerState,
     AttemptState,
@@ -204,6 +206,7 @@ class InterviewRepository(Protocol):
         answer_started_at: str,
         answer_ended_at: str,
         answer_id: str | None = None,
+        draft_id: str | None = None,
     ) -> AnswerTransitionResult: ...
 
     def list_events(
@@ -237,6 +240,29 @@ class InterviewRepository(Protocol):
         session_id: str,
         question_id: str | None = None,
     ) -> list[InterviewAnswerRecord]: ...
+
+    #======================Recoverable Answer Draft======================
+    def get_or_create_open_answer_draft(
+        self,
+        *,
+        session_id: str,
+        question_id: str,
+        answer_number: int,
+        opened_at: str,
+        deadline_at: str,
+    ) -> AnswerDraftRecord: ...
+
+    def get_open_answer_draft(
+        self, *, session_id: str, question_id: str
+    ) -> AnswerDraftRecord | None: ...
+
+    def append_answer_draft_segment(
+        self, *, draft_id: str, segment_index: int, transcript: str
+    ) -> AnswerDraftSegmentRecord: ...
+
+    def list_answer_draft_segments(
+        self, *, draft_id: str
+    ) -> list[AnswerDraftSegmentRecord]: ...
 
     def update_answer_state(
         self,

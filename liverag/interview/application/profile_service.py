@@ -8,13 +8,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import Protocol
+from typing import Literal, Protocol
 
 from liverag.interview.schemas import (
     CandidateFacts,
     CandidateProfile,
+    FactsExtractionMode,
     InterviewDifficulty,
+    JobFacts,
     JobProfile,
+    JobSkill,
     WorkExperienceFact,
 )
 
@@ -31,7 +34,22 @@ class KnowledgeContextSource(Protocol):
     """屏蔽 Profile Service 对具体 RAG HTTP 实现的依赖。"""
 
     #interview_profile_source.py中实现
-    async def retrieve(self, *, kb_id: str, query: str) -> KnowledgeContext: ...
+    async def retrieve(
+        self,
+        *,
+        kb_id: str,
+        query: str,
+        mode: Literal["naive", "mix"] = "naive",
+    ) -> KnowledgeContext: ...
+
+    async def retrieve_raw_context(
+        self,
+        *,
+        kb_id: str,
+        query: str,
+        mode: Literal["naive", "mix"],
+    ) -> KnowledgeContext:
+        """读取未经答案生成的检索上下文，供一次性 enrichment 使用。"""
 
 
 class InterviewProfileService:
@@ -75,6 +93,14 @@ class InterviewProfileService:
             projects=_project_lines(result.context),
             experience_level=experience_level,
             evidence_refs=list(result.evidence_refs),
+            facts_extraction_mode=(
+                candidate_facts.extraction_mode
+                if candidate_facts is not None
+                else FactsExtractionMode.FALLBACK
+            ),
+            facts_confidence=(
+                candidate_facts.confidence if candidate_facts is not None else 0.2
+            ),
         )
 
     async def build_job_profile(
@@ -83,8 +109,9 @@ class InterviewProfileService:
         kb_id: str,
         company: str | None,
         role: str,
+        job_facts: JobFacts | None = None,
     ) -> JobProfile:
-        """读取选中的公司岗位库，生成岗位画像。"""
+        """从 JobFacts 用确定性规则生成岗位画像；没有 Facts 时保留原始摘要回退。"""
 
         result = await self._source.retrieve(
             kb_id=kb_id,
@@ -93,13 +120,48 @@ class InterviewProfileService:
                 "加分技能、业务场景和面试考察重点。"
             ),
         )
+        weight_scale = (
+            0.6
+            if job_facts is not None
+            and job_facts.extraction_mode is FactsExtractionMode.FALLBACK
+            else 1.0
+        )
         return JobProfile(
             kb_id=kb_id,
             company=company,
             role=role,
             summary=_limit_text(result.context),
-            required_skills=[],
+            required_skills=(
+                [
+                    JobSkill(
+                        skill_id=item.skill_id,
+                        weight=1.0 * weight_scale,
+                        evidence=item.evidence,
+                    )
+                    for item in job_facts.required_skills
+                ]
+                if job_facts is not None
+                else []
+            ),
+            preferred_skills=(
+                [
+                    JobSkill(
+                        skill_id=item.skill_id,
+                        weight=0.6 * weight_scale,
+                        evidence=item.evidence,
+                    )
+                    for item in job_facts.preferred_skills
+                ]
+                if job_facts is not None
+                else []
+            ),
             evidence_refs=list(result.evidence_refs),
+            facts_extraction_mode=(
+                job_facts.extraction_mode
+                if job_facts is not None
+                else FactsExtractionMode.FALLBACK
+            ),
+            facts_confidence=job_facts.confidence if job_facts is not None else 0.2,
         )
 
 

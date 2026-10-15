@@ -17,16 +17,18 @@ from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.records import generate_id
 from liverag.interview.schemas import (
     CandidateProfile,
+    FactsExtractionMode,
     InterviewConfig,
     InterviewPlan,
     InterviewQuestion,
     JobProfile,
+    ProjectSkillRelation,
     QuestionType,
     SkillProgress,
     TrainingAdjustmentAudit,
 )
 from liverag.interview.skill_progress.curriculum import TrainingCurriculum
-from liverag.interview.skill_progress.taxonomy import SkillTaxonomy
+from liverag.interview.skill_progress.taxonomy import SkillNotMappedError, SkillTaxonomy
 
 
 class InterviewPlanner:
@@ -60,6 +62,8 @@ class InterviewPlanner:
         company_intel: CompanyInterviewProfile | None = None,   #牛客mcp提供的公司情报
         candidate_profile_id: str | None = None,    #用户整体画像id
         skill_progress: Sequence[SkillProgress] = (),   #用户长期画像
+        project_skill_relations: Sequence[ProjectSkillRelation] = (),
+        selection_seed: str | None = None,
     ) -> InterviewPlan:
         """生成可直接交给实时 Agent 执行的计划。
 
@@ -68,17 +72,25 @@ class InterviewPlanner:
         """
 
         plan_id = generate_id("plan")
+        effective_selection_seed = selection_seed or plan_id
 
         # ── 主题权重 ──
         weights = dict(config.topic_weights)
 
         if candidate_profile is not None:
+            candidate_skill_weight = (
+                0.6
+                if candidate_profile.facts_extraction_mode
+                is FactsExtractionMode.FALLBACK
+                else 1.0
+            )
             for skill in candidate_profile.skills:
-                weights[skill] = weights.get(skill, 0.0) + 1.0
+                weights[skill] = weights.get(skill, 0.0) + candidate_skill_weight
 
+        job_skill_weights: dict[str, float] = {}
         if job_profile is not None:
-            for skill in job_profile.required_skills:
-                weights[skill] = weights.get(skill, 0.0) + 2.0
+            for skill in (*job_profile.required_skills, *job_profile.preferred_skills):
+                job_skill_weights[skill.skill_id] = skill.weight
 
         if company_intel is not None:
             for topic in company_intel.frequent_topics:
@@ -98,7 +110,12 @@ class InterviewPlanner:
             )
         if job_profile is not None:
             relevance_parts.extend(
-                [job_profile.summary, job_profile.role, *job_profile.required_skills]
+                [
+                    job_profile.summary,
+                    job_profile.role,
+                    *(skill.evidence for skill in job_profile.required_skills),
+                    *(skill.evidence for skill in job_profile.preferred_skills),
+                ]
             )
         if company_intel is not None:
             relevance_parts.extend(company_intel.frequent_topics)
@@ -120,8 +137,9 @@ class InterviewPlanner:
                 taxonomy=self._taxonomy,
                 relevance_text="\n".join(relevance_parts) or None,
                 explicitly_requested_topics=config.topic_weights,
-                selection_seed=plan_id,
+                selection_seed=effective_selection_seed,
                 max_total_seconds=config.duration_minutes * 60,
+                job_skill_weights=job_skill_weights,
             )
             #取出training推荐的题目
             questions = list(selection.questions)
@@ -149,22 +167,26 @@ class InterviewPlanner:
         else:
             questions = self._question_bank.select_questions(
                 effective_config,
+                taxonomy=self._taxonomy,
+                job_skill_weights=job_skill_weights,
                 relevance_text="\n".join(relevance_parts) or None,
                 explicitly_requested_topics=config.topic_weights,
-                required_relevance_topics=(
-                    job_profile.required_skills if job_profile is not None else ()
-                ),
-                selection_seed=plan_id,
+                selection_seed=effective_selection_seed,
                 max_total_seconds=config.duration_minutes * 60,
             )
 
+        questions = self._annotate_job_skill_matches(questions, job_profile)
+        questions = self._annotate_project_skill_relations(
+            questions, project_skill_relations
+        )
+
         # ── LLM 个性化改写 ──
-        if self._llm_client is not None and candidate_profile is not None:
+        if self._llm_client is not None and any(
+            question.project_skill_relations for question in questions
+        ):
             try:
                 questions = await self._personalize_questions(
                     questions=questions,
-                    candidate_profile=candidate_profile,
-                    job_profile=job_profile,
                 )
             except Exception:
                 import logging
@@ -200,18 +222,32 @@ class InterviewPlanner:
         self,
         *,
         questions: list[InterviewQuestion],
-        candidate_profile: CandidateProfile,
-        job_profile: JobProfile | None,
     ) -> list[InterviewQuestion]:
-        """调用 LLM 改写 question_text / objective / follow_up_hints。
-        LLM 只修改三个字段，其余字段由代码原样复制，确保结构性约束不被破坏。
+        """只按已验证的项目—技能关系改写适合的项目型题目。
+
+        LLM 只修改 question_text / objective / follow_up_hints，其余字段由代码
+        原样复制。没有关系、或不是项目型的题目绝不交给 LLM 改写。
         """
 
         # 降级防御：没传入llm_api，只用profile个性化
         if self._llm_client is None:
             return questions
 
-        # 输入：只给 LLM 需要的字段，减少 token 消耗
+        eligible_types = {
+            QuestionType.PROJECT_DEEP_DIVE,
+            QuestionType.SYSTEM_DESIGN,
+            QuestionType.SCENARIO,
+        }
+        eligible_questions = [
+            question
+            for question in questions
+            if question.type in eligible_types and question.project_skill_relations
+        ]
+        if not eligible_questions:
+            return questions
+
+        # 输入：只给 LLM 需要的字段，减少 token 消耗。候选人画像不作为
+        # 项目关系依据，只有冻结在题目上的关系可用于项目化改写。
         questions_input = [
             {
                 "id": q.id,
@@ -231,25 +267,13 @@ class InterviewPlanner:
                 "estimated_seconds": q.estimated_seconds,
                 "allow_follow_up": q.allow_follow_up,
                 "follow_up_hints": q.follow_up_hints,
+                "project_skill_relations": [
+                    relation.model_dump(mode="json")
+                    for relation in q.project_skill_relations
+                ],
             }
-            for q in questions
+            for q in eligible_questions
         ]
-
-        candidate_input = {
-            "summary": candidate_profile.summary,
-            "skills": candidate_profile.skills,
-            "projects": candidate_profile.projects,
-            "experience_level": candidate_profile.experience_level,
-        }
-
-        job_input: dict[str, Any] | None = None
-        if job_profile is not None:
-            job_input = {
-                "company": job_profile.company,
-                "role": job_profile.role,
-                "summary": job_profile.summary,
-                "required_skills": job_profile.required_skills,
-            }
 
         # LLM 调用
         response = await self._llm_client.chat.completions.create(
@@ -264,8 +288,6 @@ class InterviewPlanner:
                     "content": json.dumps(
                         {
                             "questions": questions_input,
-                            "candidate_profile": candidate_input,
-                            "job_profile": job_input,
                         },
                         ensure_ascii=False,
                     ),
@@ -286,7 +308,11 @@ class InterviewPlanner:
         }
 
         merged: list[InterviewQuestion] = []
+        eligible_question_ids = {question.id for question in eligible_questions}
         for q in questions:
+            if q.id not in eligible_question_ids:
+                merged.append(q)
+                continue
             llm_item = lookup.get(q.id)
             if llm_item is None:
                 # LLM 没有返回该题目 → 保留原题（防御）
@@ -306,6 +332,77 @@ class InterviewPlanner:
             )
 
         return merged
+
+    @staticmethod
+    def _annotate_project_skill_relations(
+        questions: list[InterviewQuestion],
+        relations: Sequence[ProjectSkillRelation],
+    ) -> list[InterviewQuestion]:
+        """只把与已命中 JD 技能对应的关系冻结到项目型题目。"""
+
+        relations_by_skill: dict[str, list[ProjectSkillRelation]] = {}
+        for relation in relations:
+            relations_by_skill.setdefault(relation.skill_id, []).append(relation)
+
+        eligible_types = {
+            QuestionType.PROJECT_DEEP_DIVE,
+            QuestionType.SYSTEM_DESIGN,
+            QuestionType.SCENARIO,
+        }
+        annotated: list[InterviewQuestion] = []
+        for question in questions:
+            if question.type not in eligible_types:
+                annotated.append(question)
+                continue
+            matched_relations = [
+                relation
+                for job_skill in question.job_skill_matches
+                for relation in relations_by_skill.get(job_skill.skill_id, [])
+            ]
+            annotated.append(
+                question.model_copy(
+                    update={"project_skill_relations": matched_relations}
+                )
+            )
+        return annotated
+
+    def _annotate_job_skill_matches(
+        self,
+        questions: list[InterviewQuestion],
+        job_profile: JobProfile | None,
+    ) -> list[InterviewQuestion]:
+        if job_profile is None:
+            return questions
+
+        skills_by_id = {
+            skill.skill_id: skill
+            for skill in (*job_profile.required_skills, *job_profile.preferred_skills)
+        }
+        if not skills_by_id:
+            return questions
+
+        annotated: list[InterviewQuestion] = []
+        for question in questions:
+            try:
+                skill_id = self._taxonomy.resolve(
+                    question.category, question.subcategory
+                ).key
+            except SkillNotMappedError:
+                annotated.append(question)
+                continue
+            matched = skills_by_id.get(skill_id)
+            if matched is None:
+                annotated.append(question)
+                continue
+            annotated.append(
+                question.model_copy(
+                    update={
+                        "job_skill_matches": [matched],
+                        "job_skill_score": round(2.0 * matched.weight, 4),
+                    }
+                )
+            )
+        return annotated
 
 
 def validate_plan_quality(plan: InterviewPlan) -> list[str]:

@@ -78,6 +78,8 @@ ANSWER_EVALUATION_SYSTEM_PROMPT = """
 2. 候选人的实际回答
 3. reference_answer
 
+输入 rubric 的四项权重已经按当前题型设定；当前回答若是对追问的回答，权重为追问类型权重，但评分点仍来自主问题 rubric。
+
 reference_answer 只用于辅助核对事实，不是唯一标准答案。候选人的表述、示例或实现方案与参考答案不同，但技术上正确且满足题意时，不得直接扣分。如果 rubric 与 reference_answer 冲突，以 rubric 为准。不得根据语气、身份、学历或表达风格推测能力。
 
 ## 四项评分维度
@@ -159,6 +161,8 @@ technical_accuracy / 4 * technical_accuracy_weight
 四舍五入并保留两位小数，不得根据主观印象直接填写百分制分数。
 
 ## 下一步动作
+
+`asked_follow_up_question` 是当前候选人回答前实际播出的追问；为 null 代表本轮回答的是主问题。它不是一条新的独立题目或独立标准答案。若其非 null，仍按主问题的 rubric 和参考答案评分，但要结合该追问判断候选人是否补齐其针对的缺失点或澄清歧义。
 
 - FOLLOW_UP：回答基本有效，但重要评分点尚未覆盖，适合通过一次针对性追问判断理解深度。若高质量回答仍有剩余追问额度，也应使用 FOLLOW_UP 执行递进式深挖。
 - CLARIFY：回答存在歧义、自相矛盾、指代不清，无法确定候选人的真实结论。

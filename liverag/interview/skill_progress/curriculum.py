@@ -17,7 +17,7 @@ class TrainingSelectionRequest:
     weak_skill_keys: tuple[str, ...]    #薄弱项keys
     evidence_skill_keys: tuple[str, ...]    #证据不足项keys
     mastery_skill_keys: tuple[str, ...]     #掌握项keys
-    job_labels: tuple[str, ...] #岗位相关标签
+    job_skill_keys: tuple[str, ...] #岗位相关 taxonomy skill IDs
     weak_target: int    #薄弱项期望数
     evidence_target: int    #证据不足项期望数
     mastery_target: int   #熟练项期望数
@@ -51,7 +51,6 @@ class TrainingCurriculum:
         *,
         question_count: int,
         progress: Sequence[SkillProgress],
-        job_labels: Sequence[str] = (),
         job_profile: JobProfile | None = None,
         job_constraint_enabled: bool | None = None, #是否启用岗位硬约束
     ) -> TrainingSelectionRequest:
@@ -76,28 +75,30 @@ class TrainingCurriculum:
             if item.current_score >= 80 and item.confidence >= 0.65
         )
 
-        #岗位画像需要的skills标签
-        profile_labels = (
-            (job_profile.role, *job_profile.required_skills)
+        profile_skill_keys = (
+            tuple(
+                dict.fromkeys(
+                    item.skill_id
+                    for item in (
+                        *job_profile.required_skills,
+                        *job_profile.preferred_skills,
+                    )
+                )
+            )
             if job_profile is not None
-            else tuple(job_labels)
+            else ()
         )
-
-        #构造“岗位相关标签”，并决定是否启用岗位硬约束
-        normalized_labels_by_key: dict[str, str] = {}
-        #遍历skills标签
-        for label in profile_labels:
-            clean_label = label.strip()
-            if clean_label:
-                normalized_labels_by_key.setdefault(clean_label.casefold(), clean_label)
-        normalized_labels = tuple(normalized_labels_by_key.values())
-        enabled = job_profile is not None if job_constraint_enabled is None else job_constraint_enabled
+        enabled = (
+            bool(profile_skill_keys)
+            if job_constraint_enabled is None
+            else job_constraint_enabled
+        )
 
         return TrainingSelectionRequest(
             weak_skill_keys=weak,
             evidence_skill_keys=evidence,
             mastery_skill_keys=mastery,
-            job_labels=normalized_labels,
+            job_skill_keys=profile_skill_keys,
             weak_target=min(len(weak), max(1, math.floor(question_count * 0.30))),
             evidence_target=min(len(evidence), 1),
             mastery_target=min(len(mastery), 1) if question_count >= 5 else 0,

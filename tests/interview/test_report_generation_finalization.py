@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 
 from liverag.interview.application.controller import InterviewAgentController
 from liverag.interview.application.orchestrator import AnswerReceivedCommand
@@ -13,13 +14,14 @@ from liverag.interview.application.service import InterviewService
 from liverag.interview.jobs.report_generation import (
     enqueue_report_generation,
     finalize_report_generation,
+    retry_report_generation,
 )
 from liverag.interview.jobs.repository import JobRepository
 from liverag.interview.jobs.tasks import report_generation_task
 from liverag.interview.persistence.db import create_session_factory, create_sqlite_engine
 from liverag.interview.persistence.models import Base
 from liverag.interview.persistence.sqlalchemy_repository import SQLAlchemyInterviewRepository
-from liverag.interview.records import JobStatus, utc_now_iso
+from liverag.interview.records import JobStatus, ReportState, utc_now_iso
 from liverag.interview.schemas import (
     InterviewConfig,
     InterviewDifficulty,
@@ -153,6 +155,34 @@ def _create_completing_session(interview_repo: SQLAlchemyInterviewRepository) ->
     return session.id
 
 
+def _create_failed_report_and_exhausted_job(
+    interview_repo: SQLAlchemyInterviewRepository,
+    job_repo: JobRepository,
+    session_id: str,
+):
+    report = interview_repo.create_report(session_id=session_id)
+    failed_report = interview_repo.fail_report(
+        report_id=report.id,
+        error_message="报告生成失败",
+    )
+    job = job_repo.create_job(
+        job_type="report_generation",
+        idempotency_key=f"report:{session_id}",
+        business_resource_id=session_id,
+        payload={"session_id": session_id},
+    )
+    for _ in range(job.max_attempts):
+        running = job_repo.mark_running(job.id)
+        job = job_repo.mark_failed(
+            job.id,
+            error="报告生成失败",
+            lease_token=running.lease_token,
+        )
+        if job.attempt < job.max_attempts:
+            job = job_repo.retry_job(job.id)
+    return failed_report, job
+
+
 def test_finalize_report_generation_completes_a_completing_session(repositories) -> None:
     interview_repo, _ = repositories
     session_id = _create_completing_session(interview_repo)
@@ -226,3 +256,77 @@ async def test_report_generation_recovers_stale_generating_report(repositories) 
     assert interview_repo.get_report_by_session(session_id).state.value == "COMPLETED"
     queue.acquire_lock.assert_awaited_once()
     queue.release_lock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_retry_report_generation_creates_and_enqueues_a_fresh_job(repositories) -> None:
+    interview_repo, job_repo = repositories
+    session_id = _create_completing_session(interview_repo)
+    report, exhausted_job = _create_failed_report_and_exhausted_job(
+        interview_repo,
+        job_repo,
+        session_id,
+    )
+    queue = AsyncMock()
+    queue.acquire_lock.return_value = "retry-token"
+
+    result = await retry_report_generation(
+        interview_repo=interview_repo,
+        job_repo=job_repo,
+        redis_queue=queue,
+        session_id=session_id,
+    )
+
+    retry_job = job_repo.get_job(result["job_id"])
+    assert retry_job.id != exhausted_job.id
+    assert retry_job.idempotency_key == f"report-retry:{session_id}:{report.updated_at}"
+    assert retry_job.status is JobStatus.PENDING
+    assert retry_job.max_attempts == 3
+    assert exhausted_job.status is JobStatus.FAILED
+    assert exhausted_job.attempt == exhausted_job.max_attempts
+    assert interview_repo.get_session(session_id).state is InterviewState.COMPLETING
+    queue.enqueue.assert_awaited_once_with(
+        job_type="report_generation",
+        job_id=retry_job.id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_report_generation_rejects_report_that_is_not_failed(repositories) -> None:
+    interview_repo, job_repo = repositories
+    session_id = _create_completing_session(interview_repo)
+    interview_repo.create_report(session_id=session_id)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await retry_report_generation(
+            interview_repo=interview_repo,
+            job_repo=job_repo,
+            redis_queue=AsyncMock(),
+            session_id=session_id,
+        )
+
+    assert exc_info.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_successful_retry_report_generation_completes_session(repositories) -> None:
+    interview_repo, job_repo = repositories
+    session_id = _create_completing_session(interview_repo)
+    _create_failed_report_and_exhausted_job(interview_repo, job_repo, session_id)
+    queue = AsyncMock()
+    queue.acquire_lock.return_value = "retry-token"
+    retry = await retry_report_generation(
+        interview_repo=interview_repo,
+        job_repo=job_repo,
+        redis_queue=queue,
+        session_id=session_id,
+    )
+
+    result = await report_generation_task(
+        job_repo.get_job(retry["job_id"]),
+        interview_repo=interview_repo,
+    )
+
+    assert result["state"] == "COMPLETED"
+    assert interview_repo.get_report_by_session(session_id).state is ReportState.COMPLETED
+    assert interview_repo.get_session(session_id).state is InterviewState.COMPLETED

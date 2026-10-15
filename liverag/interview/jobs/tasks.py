@@ -14,15 +14,18 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from openai import AsyncOpenAI
 
+from liverag.interview.application.job_facts_extractor import JobFactsExtractor
 from liverag.interview.application.planner import InterviewPlanner, validate_plan_quality
 from liverag.interview.application.profile_service import (
     InterviewProfileService,
     KnowledgeContextSource,
 )
+from liverag.interview.application.project_skill_mapper import ProjectSkillMapper
 from liverag.interview.application.report import InterviewReportBuilder
 from liverag.interview.application.resume_parser import ResumeParser
 from liverag.interview.application.skill_progress_reconciliation import (
@@ -39,8 +42,9 @@ from liverag.interview.jobs.repository import BackgroundJobRecord, JobRepository
 from liverag.interview.persistence.repository import ConcurrentUpdateError, InterviewRepository
 from liverag.interview.question_bank.catalog import QuestionBank
 from liverag.interview.records import ReportState
-from liverag.interview.schemas import CandidateFacts, InterviewConfig
+from liverag.interview.schemas import CandidateFacts, InterviewConfig, JobFacts
 from liverag.interview.skill_progress.service import SkillProgressService
+from liverag.interview.skill_progress.taxonomy import SkillTaxonomy
 
 logger = logging.getLogger("liverag.interview.jobs.tasks")
 
@@ -133,6 +137,43 @@ async def resume_parse_task(
     return facts.model_dump(mode="json")
 
 
+@register("job_parse")
+async def job_parse_task(
+    job: BackgroundJobRecord,
+    *,
+    profile_source: KnowledgeContextSource,
+    llm_client: AsyncOpenAI,
+    llm_model: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """JD RAG → LLM/规则降级 → JobFacts。"""
+
+    payload = json.loads(job.payload_json) if job.payload_json else {}
+    kb_id = payload.get("kb_id", "default")
+    role = payload.get("role")
+    if not role:
+        raise ValueError("job_parse 类型必须提供 role 字段")
+
+    extractor = JobFactsExtractor(
+        profile_source=profile_source,
+        llm_client=llm_client,
+        llm_model=llm_model,
+        taxonomy=SkillTaxonomy.from_file(
+            Path(__file__).resolve().parents[1]
+            / "skill_progress"
+            / "data"
+            / "skill_taxonomy.v1.json"
+        ),
+    )
+    facts = await extractor.parse(
+        kb_id=kb_id,
+        role=role,
+        company=payload.get("company"),
+        job_id=job.id,
+    )
+    return facts.model_dump(mode="json")
+
+
 # ========================= 画像生成任务 =============================
 
 async def _generate_candidate_profile(
@@ -185,18 +226,30 @@ async def _generate_job_profile(
     *,
     job: BackgroundJobRecord,
     service: InterviewProfileService,
+    job_repo: JobRepository,
     kb_id: str,
     company: str | None,
     role: str | None,
+    job_facts_job_id: str | None,
 ) -> dict[str, Any]:
     """生成岗位画像。role 为必填项。"""
 
     if not role:
         raise ValueError("job_profile 类型必须提供 role 字段")
 
+    job_facts: JobFacts | None = None
+    if job_facts_job_id:
+        facts_job = job_repo.get_job(job_facts_job_id)
+        facts_data = json.loads(facts_job.result_json) if facts_job.result_json else None
+        if not facts_data:
+            raise ValueError(
+                f"job_facts_job_id={job_facts_job_id} 的 result_json 为空，无法加载 JobFacts"
+            )
+        job_facts = JobFacts.model_validate(facts_data)
+
     #建立岗位画像
     profile = await service.build_job_profile(
-        kb_id=kb_id, company=company, role=role
+        kb_id=kb_id, company=company, role=role, job_facts=job_facts
     )
     logger.info(
         "岗位画像生成完成",
@@ -206,6 +259,7 @@ async def _generate_job_profile(
             "company": company,
             "role": role,
             "skills_count": len(profile.required_skills),
+            "facts_mode": profile.facts_extraction_mode.value,
         },
     )
     return profile.model_dump()
@@ -251,9 +305,11 @@ async def profile_generation_task(
         return await _generate_job_profile(
             job=job,
             service=service,
+            job_repo=job_repo,
             kb_id=kb_id,
             company=payload.get("company"),
             role=payload.get("role"),
+            job_facts_job_id=payload.get("job_facts_job_id"),
         )
 
     raise ValueError(f"不支持的画像类型：{profile_type}")
@@ -265,6 +321,7 @@ async def profile_generation_task(
 _PREPARATION_STAGES: list[tuple[str, str]] = [
     ("RESUME_PARSING", "RESUME_PARSE"),
     ("CANDIDATE_PROFILE_GENERATION", "CANDIDATE_PROFILE"),
+    ("JOB_FACTS_EXTRACTION", "JOB_FACTS"),
     ("JOB_PROFILE_GENERATION", "JOB_PROFILE"),
     ("COMPANY_INTELLIGENCE", "COMPANY_INTELLIGENCE"),
     ("PLAN_GENERATION", "PLAN_GENERATION"),
@@ -354,8 +411,29 @@ async def interview_preparation_task(
         llm_client=llm_client,
         llm_model=llm_model,
     )
+    taxonomy = SkillTaxonomy.from_file(
+        Path(__file__).resolve().parents[1]
+        / "skill_progress"
+        / "data"
+        / "skill_taxonomy.v1.json"
+    )
+    job_facts_extractor = JobFactsExtractor(
+        profile_source=profile_source,
+        llm_client=llm_client,
+        llm_model=llm_model,
+        taxonomy=taxonomy,
+    )
     profile_service = InterviewProfileService(profile_source)
-    planner = InterviewPlanner(question_bank, llm_client=llm_client, llm_model=llm_model)
+    planner = InterviewPlanner(
+        question_bank,
+        llm_client=llm_client,
+        llm_model=llm_model,
+        taxonomy=taxonomy,
+    )
+    project_skill_mapper = ProjectSkillMapper(
+        llm_client=llm_client,
+        llm_model=llm_model,
+    )
 
     # 当前 stage_results 不保存领域对象，仅保存摘要，因此 Worker 重启后需要重新执行生成领域对象的 stage。
     # 如果下游 stage 未完成，需要重新执行上游 stage 以生成领域对象
@@ -365,11 +443,13 @@ async def interview_preparation_task(
         # 三个都必须重跑，否则依赖链断裂（CandidateFacts 不存在时 Profile 为空壳）
         completed_steps = [
             s for s in completed_steps
-            if s not in ("RESUME_PARSE", "CANDIDATE_PROFILE", "JOB_PROFILE")
+            if s
+            not in ("RESUME_PARSE", "CANDIDATE_PROFILE", "JOB_FACTS", "JOB_PROFILE")
         ]
 
     candidate_facts = None
     candidate_profile = None
+    job_facts = None
     job_profile = None
     company_intel = None
     intelligence_enrichment_result = None
@@ -439,6 +519,33 @@ async def interview_preparation_task(
                 }
 
             # ── JOB_PROFILE ──
+            elif step_name == "JOB_FACTS":
+                if not target_role:
+                    raise ValueError("JOB_FACTS stage 必须提供 target_role")
+                if not target_kb_id:
+                    raise ValueError("JOB_FACTS stage 必须提供 target_kb_id")
+                facts = await job_facts_extractor.parse(
+                    kb_id=target_kb_id,
+                    company=target_company,
+                    role=target_role,
+                    job_id=job.id,
+                )
+                job_facts = facts
+                completed_steps.append(step_name)
+                stage_results[step_name.lower()] = {
+                    "status": "degraded"
+                    if facts.extraction_mode.value == "FALLBACK"
+                    else "completed",
+                    "stage": stage_name,
+                    "required_skills_count": len(facts.required_skills),
+                    "preferred_skills_count": len(facts.preferred_skills),
+                    "extraction_mode": facts.extraction_mode.value,
+                    "confidence": facts.confidence,
+                }
+                if facts.extraction_mode.value == "FALLBACK":
+                    degraded = True
+                    degradation_reasons.append("JOB_FACTS_EXTRACTION:FALLBACK")
+
             elif step_name == "JOB_PROFILE":
                 if not target_role:
                     raise ValueError("JOB_PROFILE stage 必须提供 target_role")
@@ -448,6 +555,7 @@ async def interview_preparation_task(
                     kb_id=target_kb_id,
                     company=target_company,
                     role=target_role,
+                    job_facts=job_facts,
                 )
                 job_profile = profile
                 completed_steps.append(step_name)
@@ -455,6 +563,7 @@ async def interview_preparation_task(
                     "status": "completed",
                     "stage": stage_name,
                     "skills_count": len(profile.required_skills),
+                    "facts_extraction_mode": profile.facts_extraction_mode.value,
                 }
 
             # ── COMPANY_INTELLIGENCE（可降级）──
@@ -538,6 +647,30 @@ async def interview_preparation_task(
                     raise RuntimeError("PLAN_GENERATION 需要 CandidateProfile，但尚未生成")
                 if job_profile is None:
                     raise RuntimeError("PLAN_GENERATION 需要 JobProfile，但尚未生成")
+                if candidate_facts is None:
+                    raise RuntimeError("PLAN_GENERATION 需要 CandidateFacts，但尚未生成")
+
+                project_skill_relations = []
+                job_skills = (*job_profile.required_skills, *job_profile.preferred_skills)
+                if candidate_facts.projects and job_skills:
+                    requirements = "\n".join(
+                        f"- {skill.skill_id}: {skill.evidence}"
+                        for skill in job_skills
+                    )
+                    retrieval_context = await profile_source.retrieve_raw_context(
+                        kb_id=candidate_facts.kb_id,
+                        query=(
+                            "Find candidate projects, responsibilities and concrete "
+                            "implementation evidence related to the following job "
+                            f"requirements:\n{requirements}"
+                        ),
+                        mode="mix",
+                    )
+                    project_skill_relations = await project_skill_mapper.build(
+                        candidate_facts=candidate_facts,
+                        job_profile=job_profile,
+                        retrieval_context=retrieval_context,
+                    )
 
                 # 生成LLM改写过的个性化面试计划
                 candidate_profile_id = None
@@ -561,6 +694,7 @@ async def interview_preparation_task(
                     company_intel=company_intel,
                     candidate_profile_id=candidate_profile_id,
                     skill_progress=skill_progress,
+                    project_skill_relations=project_skill_relations,
                 )
 
                 # 设置公司情报审计状态
@@ -641,6 +775,7 @@ async def interview_preparation_task(
                     "stage": stage_name,
                     "plan_id": plan.id,
                     "question_count": len(plan.questions),
+                    "project_skill_relation_count": len(project_skill_relations),
                     "quality_issues": quality_issues,
                     "skill_count": len(skill_progress),
                     "selection_intent_count": (

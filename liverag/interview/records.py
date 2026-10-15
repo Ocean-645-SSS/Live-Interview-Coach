@@ -37,6 +37,13 @@ class AnswerState(str, Enum):
     FAILED = "FAILED"
 
 
+class AnswerDraftState(str, Enum):
+    """A recoverable, not-yet-submitted answer buffer."""
+
+    OPEN = "OPEN"
+    SUBMITTED = "SUBMITTED"
+
+
 class ReportState(str, Enum):
     """表示面试报告的生成状态。"""
 
@@ -108,6 +115,33 @@ class AnswerEvaluationRecord:
     question_id: str
     rubric_version: int
     evaluation: AnswerEvaluation
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerDraftRecord:
+    """Durable final STT segments for one answer window."""
+
+    id: str
+    session_id: str
+    question_id: str
+    answer_number: int
+    state: AnswerDraftState
+    opened_at: str
+    deadline_at: str
+    submitted_at: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerDraftSegmentRecord:
+    """One ordered, confirmed STT segment in an answer draft."""
+
+    id: str
+    draft_id: str
+    segment_index: int
+    transcript: str
     created_at: str
 
 

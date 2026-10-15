@@ -11,7 +11,7 @@ from liverag.interview.application.orchestrator import InterviewOrchestrator
 from liverag.interview.jobs.queue import RedisQueue
 from liverag.interview.jobs.repository import JobRepository
 from liverag.interview.persistence.repository import InterviewRepository
-from liverag.interview.records import JobStatus
+from liverag.interview.records import JobStatus, ReportState
 from liverag.interview.schemas import InterviewState
 from liverag.interview.state_machine import InterviewEventType
 
@@ -77,6 +77,93 @@ async def enqueue_report_generation(
         )
 
 
+async def retry_report_generation(
+    *,
+    interview_repo: InterviewRepository,
+    job_repo: JobRepository,
+    redis_queue: RedisQueue,
+    session_id: str,
+) -> dict[str, Any]:
+    """为失败的报告创建新的、可重新尝试的生成任务。"""
+
+    session = interview_repo.get_session(session_id)
+    if session.state is not InterviewState.COMPLETING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="面试不在报告生成阶段",
+        )
+    report = interview_repo.get_report_by_session(session_id)
+    if report is None or report.state is not ReportState.FAILED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="报告当前不可重试",
+        )
+
+    idempotency_key = f"report-retry:{session_id}:{report.updated_at}"
+    existing = job_repo.find_by_idempotency(
+        job_type="report_generation",
+        idempotency_key=idempotency_key,
+    )
+    if existing is not None:
+        return {"job_id": existing.id, "status": existing.status.value}
+
+    lock_token = await redis_queue.acquire_lock(
+        job_type="report_generation_job",
+        resource_id=session_id,
+        ttl=10,
+    )
+    if lock_token is None:
+        await asyncio.sleep(0.1)
+        existing = job_repo.find_by_idempotency(
+            job_type="report_generation",
+            idempotency_key=idempotency_key,
+        )
+        if existing is not None:
+            return {"job_id": existing.id, "status": existing.status.value}
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="报告重试任务正在创建中，请稍后重试",
+        )
+
+    try:
+        session = interview_repo.get_session(session_id)
+        if session.state is not InterviewState.COMPLETING:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="面试不在报告生成阶段",
+            )
+        report = interview_repo.get_report_by_session(session_id)
+        if report is None or report.state is not ReportState.FAILED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="报告当前不可重试",
+            )
+
+        idempotency_key = f"report-retry:{session_id}:{report.updated_at}"
+        existing = job_repo.find_by_idempotency(
+            job_type="report_generation",
+            idempotency_key=idempotency_key,
+        )
+        if existing is not None:
+            return {"job_id": existing.id, "status": existing.status.value}
+
+        job = job_repo.create_job(
+            job_type="report_generation",
+            idempotency_key=idempotency_key,
+            business_resource_id=session_id,
+            payload={"session_id": session_id},
+            max_attempts=3,
+        )
+        await redis_queue.enqueue(job_type="report_generation", job_id=job.id)
+        return {"job_id": job.id, "status": job.status.value}
+    finally:
+        await redis_queue.release_lock(
+            job_type="report_generation_job",
+            resource_id=session_id,
+            lock_token=lock_token,
+        )
+
+
 def finalize_report_generation(
     *,
     interview_repo: InterviewRepository,
@@ -100,4 +187,5 @@ __all__ = [
     "REPORT_GENERATION_LOCK_TTL_SECONDS",
     "enqueue_report_generation",
     "finalize_report_generation",
+    "retry_report_generation",
 ]

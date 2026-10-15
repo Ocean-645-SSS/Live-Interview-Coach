@@ -26,7 +26,7 @@ from liverag.interview.skill_progress.curriculum import (
     TrainingSelectionRequest,
     TrainingSelectionResult,
 )
-from liverag.interview.skill_progress.taxonomy import SkillTaxonomy
+from liverag.interview.skill_progress.taxonomy import SkillNotMappedError, SkillTaxonomy
 
 
 class QuestionBankError(RuntimeError):
@@ -144,10 +144,11 @@ _DEFAULT_SELECTABLE_TYPES: frozenset[QuestionType] = frozenset(
         QuestionType.TECHNICAL_KNOWLEDGE,   #技术知识
         QuestionType.PROJECT_DEEP_DIVE,  #项目深入
         QuestionType.SYSTEM_DESIGN,  #系统设计
-        QuestionType.SCENARIO,  #场景题
-        QuestionType.BEHAVIORAL,  #行为分析
+        QuestionType.SCENARIO,  #真实场景
     }
 )
+
+_JOB_SKILL_SCORE_MULTIPLIER = 2.0
 
 
 def _normalize_topic(topic: str) -> str:
@@ -368,6 +369,8 @@ class QuestionBank:
         self,
         config: InterviewConfig,
         *,
+        taxonomy: SkillTaxonomy | None = None,
+        job_skill_weights: dict[str, float] | None = None,
         relevance_text: str | None = None,  #从个人简历+岗位JD提取出的文本
         explicitly_requested_topics: Iterable[str] = (),    #用户明确要求考察的主题
         required_relevance_topics: Iterable[str] = (),  #必须命中的岗位主题
@@ -402,6 +405,22 @@ class QuestionBank:
         required_relevance_labels = {
             _normalize_topic(topic) for topic in required_relevance_topics
         }
+        effective_job_skill_weights = job_skill_weights or {}
+
+        def job_skill_score(question: InterviewQuestion) -> float:
+            if not effective_job_skill_weights:
+                return 0.0
+            if taxonomy is None:
+                raise ValueError("按岗位技能权重选题时必须提供 SkillTaxonomy")
+            try:
+                skill_key = taxonomy.resolve(question.category, question.subcategory).key
+            except SkillNotMappedError:
+                # Older question-bank entries may not yet have a taxonomy mapping.
+                # They remain selectable; they simply receive no JobProfile boost.
+                return 0.0
+            return _JOB_SKILL_SCORE_MULTIPLIER * effective_job_skill_weights.get(
+                skill_key, 0.0
+            )
 
         def selection_key(question: InterviewQuestion) -> tuple[float, int, str]:
             """生成稳定排序键，分类/主题得分越高、难度距离越小越优先
@@ -421,6 +440,7 @@ class QuestionBank:
             topic_score = sum(
                 normalized_weights.get(label, 0.0) for label in selection_labels
             )
+            topic_score += job_skill_score(question)
 
             #计算题目难度和配置目标难度之间的等级距离
             difficulty_distance = _difficulty_distance(
@@ -493,6 +513,7 @@ class QuestionBank:
         explicitly_requested_topics: Iterable[str],
         selection_seed: str,
         max_total_seconds: int | None = None,   #选题总时长上限（秒）
+        job_skill_weights: dict[str, float] | None = None,
     ) -> TrainingSelectionResult:
         """在岗位题硬下限内，尽量满足画像产生的训练软目标
 
@@ -534,7 +555,14 @@ class QuestionBank:
         explicitly_requested_labels = {
             _normalize_topic(topic) for topic in explicitly_requested_topics
         }
-        job_labels = {_normalize_topic(label) for label in training.job_labels}
+        effective_job_skill_weights = job_skill_weights or {}
+        skill_key_by_question = {
+            question.id: taxonomy.resolve(
+                question.category, question.subcategory
+            ).key
+            for question in candidates
+        }
+        job_skill_keys = set(training.job_skill_keys)
 
         def question_labels(question: InterviewQuestion) -> set[str]:
             labels = {
@@ -546,13 +574,9 @@ class QuestionBank:
             return labels
 
         def is_job_relevant(question: InterviewQuestion) -> bool:
-            if not job_labels:
+            if not job_skill_keys:
                 return False
-            return any(
-                required in label or label in required
-                for required in job_labels
-                for label in question_labels(question)
-            )
+            return skill_key_by_question[question.id] in job_skill_keys
 
         def selection_key(question: InterviewQuestion) -> tuple[float, int, str]:
             labels = question_labels(question)
@@ -561,6 +585,9 @@ class QuestionBank:
                 question, normalized_weights, explicitly_requested_labels
             ):
                 topic_score += 0.001
+            topic_score += _JOB_SKILL_SCORE_MULTIPLIER * effective_job_skill_weights.get(
+                skill_key_by_question[question.id], 0.0
+            )
             tie_breaker = hashlib.sha256(
                 f"{selection_seed}:{question.id}".encode()
             ).hexdigest()
@@ -580,8 +607,8 @@ class QuestionBank:
         non_job_budget = config.question_count - effective_job_target
 
         degradation_reasons: list[str] = []
-        if training.job_constraint_enabled and not training.job_labels:
-            degradation_reasons.append("JOB_CORE_LABELS_UNAVAILABLE")
+        if training.job_constraint_enabled and not training.job_skill_keys:
+            degradation_reasons.append("JOB_CORE_SKILLS_UNAVAILABLE")
         if (
             training.job_constraint_enabled
             and available_job_core < training.minimum_job_core
@@ -599,13 +626,6 @@ class QuestionBank:
         selected: list[InterviewQuestion] = []
         selected_ids: set[str] = set()
         selection_intents: dict[str, str] = {}
-
-        skill_key_by_question = {
-            question.id: taxonomy.resolve(
-                question.category, question.subcategory
-            ).key
-            for question in ranked
-        }
 
         def add(question: InterviewQuestion, intent: str) -> None:
             selected.append(question)

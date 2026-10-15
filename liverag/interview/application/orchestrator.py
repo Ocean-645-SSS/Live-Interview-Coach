@@ -42,6 +42,7 @@ class AnswerReceivedCommand:
     started_at: str
     ended_at: str
     answer_id: str | None = None
+    draft_id: str | None = None
     payload: dict[str, Any] | None = None
 
 
@@ -156,6 +157,7 @@ class InterviewOrchestrator:
                 answer_started_at=command.started_at,
                 answer_ended_at=command.ended_at,
                 answer_id=command.answer_id,
+                draft_id=command.draft_id,
             )
         except Exception:
             logger.exception(
